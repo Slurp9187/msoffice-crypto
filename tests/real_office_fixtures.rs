@@ -43,9 +43,7 @@
 
 #![cfg(feature = "crypto-ops")]
 
-use msoffice_crypto::{
-    classify, Container, Document, Family, IntegrityDeclaration, OoXmlCryptoError,
-};
+use msoffice_crypto::{classify, Container, Document, Error, Family, IntegrityDeclaration};
 use sha2::{Digest, Sha256};
 
 const PASSWORD: &str = "testpass";
@@ -169,7 +167,7 @@ fn legacy_binary_fixtures_are_refused_by_the_ooxml_entry_point_without_misdiagno
         );
 
         assert!(
-            !matches!(err, OoXmlCryptoError::WrongPassword),
+            !matches!(err, Error::WrongPassword),
             "{name}: refused with WrongPassword, but the password is correct -- the file \
              is simply not an OOXML package. That is the GH #11 failure mode and it must \
              not come back."

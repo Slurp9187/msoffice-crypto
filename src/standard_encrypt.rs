@@ -79,7 +79,7 @@
 //! salt and both ciphertext blobs are written into the file in the clear and are not.
 
 use crate::agile_encrypt::{fill, random_source};
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use crate::sensitive::{DerivedKey, VerifierPlaintext};
 use crate::standard::{
     aes128_ecb_encrypt, derive_standard_key, AES128_KEY_LEN, ALG_ID_AES_128, FLAG_AES,
@@ -171,14 +171,14 @@ pub(crate) struct StandardKeyMaterial {
 ///
 /// # Errors
 ///
-/// [`OoXmlCryptoError::RandomSource`] if the RNG will not produce bytes;
-/// [`OoXmlCryptoError::BadParameters`] and [`OoXmlCryptoError::CipherError`] are
+/// [`Error::RandomSource`] if the RNG will not produce bytes;
+/// [`Error::BadParameters`] and [`Error::CipherError`] are
 /// propagated from the key derivation and the cipher rather than unwrapped, though both
 /// are unreachable for the fixed AES-128 tuple.
 pub(crate) fn generate<R: TryRng + TryCryptoRng>(
     password: &str,
     rng: &mut R,
-) -> Result<StandardKeyMaterial, OoXmlCryptoError> {
+) -> Result<StandardKeyMaterial, Error> {
     // The salt, public: it seeds the KDF and is written into the header.
     let mut salt = [0u8; SALT_LEN];
     fill(rng, &mut salt)?;
@@ -211,10 +211,10 @@ pub(crate) fn generate<R: TryRng + TryCryptoRng>(
         // a cipher error, and this crate does not panic on a code path a caller reaches.
         encrypted_verifier: encrypted_verifier
             .try_into()
-            .map_err(|_| OoXmlCryptoError::CipherError)?,
+            .map_err(|_| Error::CipherError)?,
         encrypted_verifier_hash: encrypted_verifier_hash
             .try_into()
-            .map_err(|_| OoXmlCryptoError::CipherError)?,
+            .map_err(|_| Error::CipherError)?,
     })
 }
 
@@ -286,10 +286,7 @@ pub(crate) fn write_encryption_info(
 /// format. The reader (`standard::decrypt_package`) truncates the padding away against
 /// the prefix, and refuses a prefix larger than the ciphertext — so the prefix is the
 /// plaintext length exactly, never the padded length.
-pub(crate) fn encrypt_package(
-    plaintext: &[u8],
-    key: &DerivedKey,
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+pub(crate) fn encrypt_package(plaintext: &[u8], key: &DerivedKey) -> Result<Vec<u8>, Error> {
     let mut stream = Vec::with_capacity(8 + plaintext.len() + AES_BLOCK_LEN);
     stream.extend_from_slice(&(plaintext.len() as u64).to_le_bytes());
     for chunk in plaintext.chunks(CHUNK_LEN) {
@@ -324,18 +321,18 @@ pub(crate) fn encrypt_package(
 ///
 /// # Errors
 ///
-/// [`OoXmlCryptoError::BadParameters`] if `package` exceeds
+/// [`Error::BadParameters`] if `package` exceeds
 /// [`limits::PAYLOAD_CEILING`] — the same 1 GiB the decrypt side refuses, checked on the
 /// input so that a file this crate writes is a file it reads back;
-/// [`OoXmlCryptoError::RandomSource`] if `rng` will not produce bytes;
-/// [`OoXmlCryptoError::Io`] if the in-memory container cannot be written.
+/// [`Error::RandomSource`] if `rng` will not produce bytes;
+/// [`Error::Io`] if the in-memory container cannot be written.
 pub(crate) fn encrypt<R: TryRng + TryCryptoRng>(
     package: &[u8],
     password: &str,
     rng: &mut R,
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+) -> Result<Vec<u8>, Error> {
     if package.len() > limits::PAYLOAD_CEILING {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "the package is {} bytes; this crate encrypts at most {} (see \
              limits::PAYLOAD_CEILING), because that is what it will read back",
             package.len(),

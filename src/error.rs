@@ -1,10 +1,8 @@
 //! Failures from decryption and encryption.
 //!
-//! [`OoXmlCryptoError`] is re-exported at the crate root under `crypto-ops`. In a
+//! [`Error`] is re-exported at the crate root under `crypto-ops`. In a
 //! detection-only build no public function returns a [`Result`], so the type is not
 //! public there — see the enum's own docs.
-
-use thiserror::Error;
 
 /// Every reason this crate refuses a file.
 ///
@@ -22,8 +20,8 @@ use thiserror::Error;
 /// the way to `classify`, which swallows them.
 ///
 /// Messages never carry key material. Where a message quotes the file —
-/// [`OoXmlCryptoError::UnsupportedAlgorithm`]'s `name`, the lengths and declared values
-/// interpolated into [`OoXmlCryptoError::BadParameters`] — it is bounded and truncated at
+/// [`Error::UnsupportedAlgorithm`]'s `name`, the lengths and declared values
+/// interpolated into [`Error::BadParameters`] — it is bounded and truncated at
 /// the construction site, and the variant says so. Match with a `_` arm: the enum does
 /// not implement `PartialEq`.
 // `unreachable_pub` fires on this type in the **detection** build and only there: the
@@ -35,9 +33,9 @@ use thiserror::Error;
 // `allow` rather than `expect`: the lint fires in one of the three configurations, so an
 // `expect` would itself go unfulfilled in the other two.
 #[allow(unreachable_pub)]
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum OoXmlCryptoError {
+pub enum Error {
     /// The bytes are not a CFB container: they lack the eight-byte magic, or `cfb`
     /// refused to open them.
     #[error("not a CFB (Compound Binary File) container")]
@@ -74,7 +72,7 @@ pub enum OoXmlCryptoError {
     /// Office 2007 or later" for *every* pair that reached it, including `vMinor = 3`
     /// (extensible encryption) and, until `standard::require_aes_128` landed, every
     /// Office 2007 file whose `AlgID` was the conforming `0x660E`. A cipher this crate
-    /// has not implemented is [`OoXmlCryptoError::UnsupportedAlgorithm`]; this variant is
+    /// has not implemented is [`Error::UnsupportedAlgorithm`]; this variant is
     /// for the version pair alone.
     #[error(
         "unsupported Office encryption version {0}.{1} \
@@ -119,14 +117,14 @@ pub enum OoXmlCryptoError {
     /// The message describes the *shape* of the problem — a length, an attribute name,
     /// an algorithm name. It never carries key material or file content.
     ///
-    /// Contrast [`OoXmlCryptoError::UnsupportedAlgorithm`], which is the file being
+    /// Contrast [`Error::UnsupportedAlgorithm`], which is the file being
     /// internally consistent about something this crate has not implemented.
     #[error("unsupported or inconsistent encryption parameter: {0}")]
     BadParameters(String),
 
     /// The file names an algorithm this crate does not implement.
     ///
-    /// **Distinct from [`OoXmlCryptoError::WrongPassword`] on purpose.** The password
+    /// **Distinct from [`Error::WrongPassword`] on purpose.** The password
     /// may be perfectly correct and simply unusable: before this variant existed, an
     /// agile file declaring `hashAlgorithm="SHA256"` derived a SHA-512 spin hash, failed
     /// the verifier comparison, and was reported as a wrong password — telling the user

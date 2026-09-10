@@ -3,10 +3,10 @@
 //! [`read_encryption_info`] is the detection path: open the container, take
 //! `\EncryptionInfo`, refuse anything over `ENCRYPTION_INFO_READ_CAP`. [`read_cfb_streams`]
 //! is the decrypt path, and also takes `\EncryptedPackage` under the payload ceiling.
-//! Both map `cfb` failures onto [`OoXmlCryptoError`] so a hostile directory tree is an
+//! Both map `cfb` failures onto [`Error`] so a hostile directory tree is an
 //! error (or, for `classify`, `Unknown`), never a panic.
 
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 #[cfg(feature = "crypto-ops")]
 use crate::limits::ENCRYPTED_PACKAGE_READ_CAP;
 use crate::limits::ENCRYPTION_INFO_READ_CAP;
@@ -25,11 +25,11 @@ pub(crate) struct OfficeCfbStreams {
 /// Open a CFB container from raw bytes and extract the two streams needed for decryption.
 ///
 /// # Errors
-/// [`OoXmlCryptoError::NotACfbFile`] if the container will not open,
-/// [`OoXmlCryptoError::MissingStream`] if either stream is absent,
-/// [`OoXmlCryptoError::BadParameters`] if either exceeds its cap —
+/// [`Error::NotACfbFile`] if the container will not open,
+/// [`Error::MissingStream`] if either stream is absent,
+/// [`Error::BadParameters`] if either exceeds its cap —
 /// [`ENCRYPTION_INFO_READ_CAP`] (1 MiB) or [`ENCRYPTED_PACKAGE_READ_CAP`]
-/// ([`crate::limits::PAYLOAD_CEILING`], 1 GiB) — and [`OoXmlCryptoError::Io`] on a read
+/// ([`crate::limits::PAYLOAD_CEILING`], 1 GiB) — and [`Error::Io`] on a read
 /// failure.
 ///
 /// The `Io` arm is not decorative: both streams go through [`read_capped`], whose
@@ -37,7 +37,7 @@ pub(crate) struct OfficeCfbStreams {
 /// not lead where its directory entry claims. [`read_encryption_info`] documents the same
 /// arm for the same helper, and the two must not disagree about a function they share.
 #[cfg(feature = "crypto-ops")]
-pub(crate) fn read_cfb_streams(data: &[u8]) -> Result<OfficeCfbStreams, OoXmlCryptoError> {
+pub(crate) fn read_cfb_streams(data: &[u8]) -> Result<OfficeCfbStreams, Error> {
     read_cfb_streams_capped(data, ENCRYPTION_INFO_READ_CAP, ENCRYPTED_PACKAGE_READ_CAP)
 }
 
@@ -65,20 +65,20 @@ fn read_cfb_streams_capped(
     data: &[u8],
     info_cap: usize,
     package_cap: usize,
-) -> Result<OfficeCfbStreams, OoXmlCryptoError> {
+) -> Result<OfficeCfbStreams, Error> {
     let cursor = Cursor::new(data);
-    let mut cfb = cfb::CompoundFile::open(cursor).map_err(|_| OoXmlCryptoError::NotACfbFile)?;
+    let mut cfb = cfb::CompoundFile::open(cursor).map_err(|_| Error::NotACfbFile)?;
 
     let encryption_info = read_capped(
         cfb.open_stream("/EncryptionInfo")
-            .map_err(|_| OoXmlCryptoError::MissingStream("EncryptionInfo"))?,
+            .map_err(|_| Error::MissingStream("EncryptionInfo"))?,
         info_cap,
         "EncryptionInfo",
     )?;
 
     let encrypted_package = read_capped(
         cfb.open_stream("/EncryptedPackage")
-            .map_err(|_| OoXmlCryptoError::MissingStream("EncryptedPackage"))?,
+            .map_err(|_| Error::MissingStream("EncryptedPackage"))?,
         package_cap,
         "EncryptedPackage",
     )?;
@@ -97,16 +97,16 @@ fn read_cfb_streams_capped(
 /// container and take a stream" share one cap and one set of error mappings.
 ///
 /// # Errors
-/// [`OoXmlCryptoError::NotACfbFile`] if the container will not open,
-/// [`OoXmlCryptoError::MissingStream`] if it holds no `EncryptionInfo`,
-/// [`OoXmlCryptoError::BadParameters`] if that stream is larger than
-/// [`ENCRYPTION_INFO_READ_CAP`], and [`OoXmlCryptoError::Io`] on a read failure.
-pub(crate) fn read_encryption_info(data: &[u8]) -> Result<Vec<u8>, OoXmlCryptoError> {
+/// [`Error::NotACfbFile`] if the container will not open,
+/// [`Error::MissingStream`] if it holds no `EncryptionInfo`,
+/// [`Error::BadParameters`] if that stream is larger than
+/// [`ENCRYPTION_INFO_READ_CAP`], and [`Error::Io`] on a read failure.
+pub(crate) fn read_encryption_info(data: &[u8]) -> Result<Vec<u8>, Error> {
     let cursor = Cursor::new(data);
-    let mut cfb = cfb::CompoundFile::open(cursor).map_err(|_| OoXmlCryptoError::NotACfbFile)?;
+    let mut cfb = cfb::CompoundFile::open(cursor).map_err(|_| Error::NotACfbFile)?;
     read_capped(
         cfb.open_stream("/EncryptionInfo")
-            .map_err(|_| OoXmlCryptoError::MissingStream("EncryptionInfo"))?,
+            .map_err(|_| Error::MissingStream("EncryptionInfo"))?,
         ENCRYPTION_INFO_READ_CAP,
         "EncryptionInfo",
     )
@@ -124,11 +124,11 @@ pub(crate) fn read_capped(
     mut stream: impl Read,
     cap: usize,
     what: &'static str,
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+) -> Result<Vec<u8>, Error> {
     let mut buf = Vec::new();
     stream.by_ref().take(cap as u64 + 1).read_to_end(&mut buf)?;
     if buf.len() > cap {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "the {what} stream is larger than {cap} bytes"
         )));
     }
@@ -171,7 +171,7 @@ mod tests {
         // `Vec<u8>`'s `Debug` would bury the assertion that failed under all of it.
         let got = read_encryption_info(&over).map(|b| b.len());
         assert!(
-            matches!(&got, Err(OoXmlCryptoError::BadParameters(msg))
+            matches!(&got, Err(Error::BadParameters(msg))
                 if msg.contains("EncryptionInfo") && msg.contains("larger than")),
             "one byte over the cap must be refused, got: {got:?}"
         );
@@ -234,7 +234,7 @@ mod tests {
         let over = cfb_with_both(1441, CAP + 1);
         let got = read_cfb_streams_capped(&over, info_cap, CAP).map(|s| s.encrypted_package.len());
         assert!(
-            matches!(&got, Err(OoXmlCryptoError::BadParameters(msg))
+            matches!(&got, Err(Error::BadParameters(msg))
                 if msg.contains("EncryptedPackage") && msg.contains("larger than")),
             "one byte over the payload cap must be refused, got: {got:?}"
         );

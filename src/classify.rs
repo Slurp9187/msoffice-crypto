@@ -326,7 +326,7 @@ pub enum IntegrityDeclaration {
     /// `encryptedHmacValue`. `Require` will verify it.
     Declared,
     /// `<dataIntegrity>` is present but one of the two blobs is missing. `decrypt`
-    /// refuses this with `OoXmlCryptoError::BadParameters` (a `crypto-ops` type, so not linked from this doc, which renders in every build): a half-written
+    /// refuses this with `Error::BadParameters` (a `crypto-ops` type, so not linked from this doc, which renders in every build): a half-written
     /// element is malformed, not absent. Collapsing the two would report a corrupt tag
     /// as a *stripped* one under the default policy, and under the explicitly chosen
     /// `VerifyIfPresent` and `Skip` policies would decrypt the file and call it

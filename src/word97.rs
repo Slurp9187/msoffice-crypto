@@ -26,7 +26,7 @@ use crate::binary_office::{
     self, FibBase, DATA, FIB_CLEAR_LEN, FIB_FLAGS_OFFSET, FIB_F_ENCRYPTED, FIB_F_OBFUSCATED,
     FIB_L_KEY_OFFSET, WORD_DOCUMENT,
 };
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use crate::legacy_container::LegacyContainer;
 use crate::limits::ENCRYPTION_HEADER_STRUCTURE_MAX;
 use crate::rc4::{self, BlockKeySchedule};
@@ -36,24 +36,21 @@ use crate::{rc4_cryptoapi, rc4_office97};
 const BLOCK_SIZE: usize = 0x200;
 
 /// Decrypt the container in place. The container is left untouched on any error.
-pub(crate) fn decrypt(
-    container: &mut LegacyContainer,
-    password: &str,
-) -> Result<(), OoXmlCryptoError> {
+pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result<(), Error> {
     let word = container.read(WORD_DOCUMENT)?;
-    let fib = FibBase::parse(&word).ok_or(OoXmlCryptoError::BadParameters(
+    let fib = FibBase::parse(&word).ok_or(Error::BadParameters(
         "the WordDocument stream does not begin with a FIB (wIdent 0xA5EC)".to_string(),
     ))?;
     if word.len() < FIB_CLEAR_LEN {
-        return Err(OoXmlCryptoError::MissingStream(
+        return Err(Error::MissingStream(
             "WordDocument stream shorter than the 68-byte FIB",
         ));
     }
     if !fib.encrypted() {
-        return Err(OoXmlCryptoError::NotEncrypted);
+        return Err(Error::NotEncrypted);
     }
     if fib.obfuscated() {
-        return Err(OoXmlCryptoError::UnsupportedAlgorithm {
+        return Err(Error::UnsupportedAlgorithm {
             what: "FibBase.fObfuscated",
             name: "XOR obfuscation of a Word document ([MS-OFFCRYPTO] 2.3.7.4)".to_string(),
         });
@@ -65,14 +62,14 @@ pub(crate) fn decrypt(
     let table = container.read(table_name)?;
     let l_key = usize::try_from(fib.l_key).unwrap_or(usize::MAX);
     if l_key > ENCRYPTION_HEADER_STRUCTURE_MAX {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "FibBase.lKey is {}, over the {ENCRYPTION_HEADER_STRUCTURE_MAX} an RC4 \
              encryption header can occupy",
             fib.l_key
         )));
     }
     let Some(structure) = table.get(..l_key) else {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "FibBase.lKey is {} but the table stream holds {} bytes",
             fib.l_key,
             table.len()
@@ -98,10 +95,10 @@ pub(crate) fn decrypt(
             Box::new(schedule)
         }
         (Some(major), Some(minor)) => {
-            return Err(OoXmlCryptoError::UnsupportedEncryptionVersion(major, minor))
+            return Err(Error::UnsupportedEncryptionVersion(major, minor))
         }
         _ => {
-            return Err(OoXmlCryptoError::BadParameters(
+            return Err(Error::BadParameters(
                 "FibBase.lKey is too small to hold an EncryptionVersionInfo".to_string(),
             ))
         }

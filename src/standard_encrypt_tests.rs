@@ -112,7 +112,7 @@ fn the_generated_encryptor_verifies_through_the_real_path() {
     assert!(
         matches!(
             standard::verify_password(&wrong, &params),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ),
         "a wrong password must be refused, and by name"
     );
@@ -253,12 +253,12 @@ fn encrypt_ooxml_standard_round_trips_and_reports_no_integrity_element() {
 
     assert!(matches!(
         crate::decrypt_ooxml(&container, "not the password"),
-        Err(OoXmlCryptoError::WrongPassword)
+        Err(Error::WrongPassword)
     ));
     // A caller demanding a guarantee the format cannot give is refused by name.
     assert!(matches!(
         crate::decrypt_ooxml_with_policy(&container, PASSWORD, crate::IntegrityPolicy::Require),
-        Err(OoXmlCryptoError::IntegrityUnavailable(_))
+        Err(Error::IntegrityUnavailable(_))
     ));
 }
 
@@ -429,7 +429,7 @@ fn a_package_over_the_ceiling_is_refused_before_any_work() {
     let big = vec![0u8; crate::limits::PAYLOAD_CEILING + 1];
     let got = crate::encrypt_ooxml_standard(&big, PASSWORD).map(|c| c.len());
     assert!(
-        matches!(&got, Err(OoXmlCryptoError::BadParameters(msg)) if msg.contains("PAYLOAD_CEILING")),
+        matches!(&got, Err(Error::BadParameters(msg)) if msg.contains("PAYLOAD_CEILING")),
         "over the ceiling must be refused by name, got: {got:?}"
     );
 }

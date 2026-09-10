@@ -130,10 +130,7 @@ fn a_workbook_of_a_million_tiny_records_does_not_allocate_per_record() {
     // deriving a key, which is the point: the cost above is what an unauthenticated
     // caller can impose.
     assert!(
-        matches!(
-            outcome,
-            Err(msoffice_crypto::OoXmlCryptoError::NotEncrypted)
-        ),
+        matches!(outcome, Err(msoffice_crypto::Error::NotEncrypted)),
         "a workbook with no FILEPASS is not encrypted, got: {outcome:?}"
     );
 

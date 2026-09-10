@@ -42,7 +42,7 @@
 //! source. A writer that can emit a file its own reader refuses is a bug generator, and
 //! this crate is both halves.
 
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use crate::hash::HashAlgorithm;
 use crate::limits;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -122,11 +122,11 @@ pub(crate) struct EncryptionInfoParams<'a> {
 ///
 /// # Errors
 ///
-/// [`OoXmlCryptoError::BadParameters`] if any blob is not the length the tuple fixes, or
+/// [`Error::BadParameters`] if any blob is not the length the tuple fixes, or
 /// if `spin_count` exceeds [`limits::SPIN_COUNT_MAX`]. Every one of those is a check the
 /// parser makes on the way back in, so failing here is the writer declining to produce a
 /// file this crate could not read.
-pub(crate) fn write(params: &EncryptionInfoParams<'_>) -> Result<Vec<u8>, OoXmlCryptoError> {
+pub(crate) fn write(params: &EncryptionInfoParams<'_>) -> Result<Vec<u8>, Error> {
     let hash_size = HASH.digest_len();
     // `roundUp(hashSize, blockSize)` — 64 is already a multiple of 16 under SHA-512, so
     // this is an identity today and is written as the rule rather than as the number so
@@ -171,7 +171,7 @@ pub(crate) fn write(params: &EncryptionInfoParams<'_>) -> Result<Vec<u8>, OoXmlC
         ),
     ] {
         if got != want {
-            return Err(OoXmlCryptoError::BadParameters(format!(
+            return Err(Error::BadParameters(format!(
                 "{what} is {got} bytes; this crate writes AES-256/SHA-512, which fixes it \
                  at {want}"
             )));
@@ -179,7 +179,7 @@ pub(crate) fn write(params: &EncryptionInfoParams<'_>) -> Result<Vec<u8>, OoXmlC
     }
 
     if params.spin_count > limits::SPIN_COUNT_MAX {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "spinCount {} exceeds this crate's own ceiling of {}; a file written with it \
              could not be read back",
             params.spin_count,

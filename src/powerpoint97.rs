@@ -48,7 +48,7 @@ use crate::binary_office::{
     self, UserEditAtom, CURRENT_USER, CURRENT_USER_HEADER_TOKEN_AT, POWERPOINT_DOCUMENT,
     USER_EDIT_ATOM_LEN_ENCRYPTED, USER_EDIT_ATOM_LEN_PLAIN,
 };
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use crate::legacy_container::LegacyContainer;
 use crate::rc4;
 use crate::rc4_cryptoapi::{self, CryptoApiKeySchedule};
@@ -56,21 +56,18 @@ use crate::rc4_cryptoapi::{self, CryptoApiKeySchedule};
 /// `CurrentUserAtom.headerToken` for a file that is not encrypted — [MS-PPT] §2.3.2.
 const HEADER_TOKEN_PLAIN: u32 = 0xE391_C05F;
 
-fn bad(msg: impl Into<String>) -> OoXmlCryptoError {
-    OoXmlCryptoError::BadParameters(msg.into())
+fn bad(msg: impl Into<String>) -> Error {
+    Error::BadParameters(msg.into())
 }
 
 /// Decrypt the container in place. The container is left untouched on any error.
-pub(crate) fn decrypt(
-    container: &mut LegacyContainer,
-    password: &str,
-) -> Result<(), OoXmlCryptoError> {
+pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result<(), Error> {
     let current_user = container.read(CURRENT_USER)?;
     let doc = container.read(POWERPOINT_DOCUMENT)?;
     let mut src: &[u8] = &doc;
 
     let edit_offset = binary_office::current_edit_offset(&current_user).ok_or(
-        OoXmlCryptoError::MissingStream("Current User stream shorter than its atom"),
+        Error::MissingStream("Current User stream shorter than its atom"),
     )?;
     let edit_offset = usize::try_from(edit_offset).map_err(|_| bad("offsetToCurrentEdit"))?;
     let atom = binary_office::user_edit_atom(&mut src, edit_offset as u64).ok_or_else(|| {
@@ -80,7 +77,7 @@ pub(crate) fn decrypt(
         ))
     })?;
     if atom.rec_len == USER_EDIT_ATOM_LEN_PLAIN {
-        return Err(OoXmlCryptoError::NotEncrypted);
+        return Err(Error::NotEncrypted);
     }
     debug_assert_eq!(atom.rec_len, USER_EDIT_ATOM_LEN_ENCRYPTED);
     if atom.offset_last_edit != 0 {

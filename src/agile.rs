@@ -37,7 +37,7 @@
 //! (`DocumentDecryption.cxx:210-218`: decrypt the whole package into the caller's
 //! stream, then compare) and relies on the caller discarding it.
 use crate::classify::local_name;
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use crate::hash::{fit_iv, HashAlgorithm};
 use crate::integrity::{self, IntegrityMaterial, IntegrityOutcome, IntegrityPolicy};
 use crate::limits;
@@ -230,9 +230,9 @@ impl AgileParams {
     pub(crate) fn integrity_material<'a>(
         &'a self,
         di: &'a DataIntegrity,
-    ) -> Result<IntegrityMaterial<'a>, OoXmlCryptoError> {
+    ) -> Result<IntegrityMaterial<'a>, Error> {
         let hash_size = self.key_data_hash_size.ok_or_else(|| {
-            OoXmlCryptoError::BadParameters(
+            Error::BadParameters(
                 "<dataIntegrity> is present but keyData/@hashSize is missing".into(),
             )
         })?;
@@ -259,7 +259,7 @@ impl AgileParams {
 pub(crate) fn recover_session_key(
     params: &AgileParams,
     password: &str,
-) -> Result<SessionKey, OoXmlCryptoError> {
+) -> Result<SessionKey, Error> {
     let h_final = spin_hash(
         params.password_hash,
         password,
@@ -299,21 +299,21 @@ pub(crate) fn recover_session_key(
 ///
 /// # Errors
 ///
-/// [`OoXmlCryptoError::XmlParse`] if the XML is malformed, a required attribute is
+/// [`Error::XmlParse`] if the XML is malformed, a required attribute is
 /// missing, or the file's only key encryptors are certificate ones;
-/// [`OoXmlCryptoError::BadParameters`] if a declared length, spin count or sibling field
-/// is out of range, or the file declares more than one `PasswordKeyEncryptor`; [`OoXmlCryptoError::UnsupportedAlgorithm`] if a named
-/// cipher or hash is not implemented; [`OoXmlCryptoError::WrongPassword`] if the verifier
-/// does not match; [`OoXmlCryptoError::IntegrityElementMissing`],
-/// [`OoXmlCryptoError::IntegrityCheckFailed`] or [`OoXmlCryptoError::BadParameters`] from
-/// the HMAC policy; [`OoXmlCryptoError::CipherError`] if an AES-CBC step rejects a block;
-/// [`OoXmlCryptoError::MissingStream`] if the package prefix is truncated.
+/// [`Error::BadParameters`] if a declared length, spin count or sibling field
+/// is out of range, or the file declares more than one `PasswordKeyEncryptor`; [`Error::UnsupportedAlgorithm`] if a named
+/// cipher or hash is not implemented; [`Error::WrongPassword`] if the verifier
+/// does not match; [`Error::IntegrityElementMissing`],
+/// [`Error::IntegrityCheckFailed`] or [`Error::BadParameters`] from
+/// the HMAC policy; [`Error::CipherError`] if an AES-CBC step rejects a block;
+/// [`Error::MissingStream`] if the package prefix is truncated.
 pub(crate) fn decrypt(
     xml_data: &[u8],
     encrypted_package: &[u8],
     password: &str,
     policy: IntegrityPolicy,
-) -> Result<(Vec<u8>, IntegrityOutcome), OoXmlCryptoError> {
+) -> Result<(Vec<u8>, IntegrityOutcome), Error> {
     let params = parse_encryption_info(xml_data)?;
 
     // `p:encryptedKey/@hashAlgorithm`, never `<keyData>`'s: this is step 2 of the module
@@ -342,7 +342,7 @@ fn check_integrity(
     session_key: &SessionKey,
     encrypted_package: &[u8],
     policy: IntegrityPolicy,
-) -> Result<IntegrityOutcome, OoXmlCryptoError> {
+) -> Result<IntegrityOutcome, Error> {
     let Some(di) = params.data_integrity() else {
         // The agile half of `IntegrityPolicy`'s contract; the standard half is the
         // version dispatch in `lib.rs`. Absence is a defect here, not a shape: agile
@@ -356,7 +356,7 @@ fn check_integrity(
         // a compile error here, not a downgrade.
         return match policy {
             IntegrityPolicy::Require | IntegrityPolicy::RequireWhereDefined => {
-                Err(OoXmlCryptoError::IntegrityElementMissing)
+                Err(Error::IntegrityElementMissing)
             }
             // `NotDeclared` for `Skip` too, not `Skipped`: nothing was skipped, because
             // nothing was there. Stated rather than inherited from arm ordering.
@@ -403,10 +403,7 @@ fn check_integrity(
 /// Exposed to the crate so `agile_encrypt`'s tests can put a generated encryptor through
 /// the real verification path — write, parse, verify — rather than re-deriving the check
 /// beside the generator, which would prove only that the test agrees with itself.
-pub(crate) fn verify_password(
-    params: &AgileParams,
-    h_final: &PasswordDigest,
-) -> Result<(), OoXmlCryptoError> {
+pub(crate) fn verify_password(params: &AgileParams, h_final: &PasswordDigest) -> Result<(), Error> {
     let hash = params.password_hash;
     let block_size = params.password_block_size as usize;
     let digest_len = hash.digest_len();
@@ -425,7 +422,7 @@ pub(crate) fn verify_password(
     if params.encrypted_verifier_hash_input.len() != input_len
         || params.encrypted_verifier_hash_value.len() != value_len
     {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "encryptedVerifierHashInput/Value are {}/{} bytes; {} with saltSize {} and \
              blockSize {} requires {}/{}",
             params.encrypted_verifier_hash_input.len(),
@@ -469,7 +466,7 @@ pub(crate) fn verify_password(
         verifier_hash.with_secret(|vh| computed.as_slice().ct_eq(&vh[..digest_len]))
     });
     if !matches {
-        return Err(OoXmlCryptoError::WrongPassword);
+        return Err(Error::WrongPassword);
     }
     Ok(())
 }
@@ -489,11 +486,9 @@ fn decrypt_package(
     encryption_key: &SessionKey,
     params: &AgileParams,
     encrypted_package: &[u8],
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+) -> Result<Vec<u8>, Error> {
     if encrypted_package.len() < 8 {
-        return Err(OoXmlCryptoError::MissingStream(
-            "EncryptedPackage too short",
-        ));
+        return Err(Error::MissingStream("EncryptedPackage too short"));
     }
 
     // The session key must be the length `<keyData>` says the package key is. herumi
@@ -511,7 +506,7 @@ fn decrypt_package(
     let key_len = (params.key_data_key_bits / 8) as usize;
     let actual = encryption_key.with_secret(|k| k.len());
     if actual != key_len {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "keyData/@keyBits is {} ({key_len} bytes) but the session key recovered \
              from encryptedKeyValue is {actual} bytes",
             params.key_data_key_bits
@@ -527,7 +522,7 @@ fn decrypt_package(
     // second entry point) reaches it without passing that reader. GH #10 pattern 3: one
     // named ceiling aliased per allocation path, never a second number.
     if data.len() > limits::PAYLOAD_CEILING {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptedPackage carries {} bytes of ciphertext; this crate decrypts at most \
              {} (see limits::PAYLOAD_CEILING)",
             data.len(),
@@ -547,7 +542,7 @@ fn decrypt_package(
     // Compared as `u64`, before the `as usize` cast: on a 32-bit target that cast
     // truncates, and a declared size of `2^32 + 16` would otherwise pass as 16.
     if declared_size > data.len() as u64 {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptedPackage declares {declared_size} plaintext bytes but carries only {} \
              bytes of ciphertext",
             data.len()
@@ -641,7 +636,7 @@ pub(crate) fn derive_block_key(
     h_final: &PasswordDigest,
     block_key: &[u8; 8],
     key_bits: u32,
-) -> Result<DerivedKey, OoXmlCryptoError> {
+) -> Result<DerivedKey, Error> {
     let key_len = (key_bits / 8) as usize;
     if key_len > hash.digest_len() {
         return Err(unusable_key_bits(key_bits, hash));
@@ -655,8 +650,8 @@ pub(crate) fn derive_block_key(
 /// The one message for "this file's `keyBits` asks for more bytes than its own
 /// `hashAlgorithm` can produce", shared by the parse-time check and `derive_block_key`
 /// so the two cannot drift apart.
-fn unusable_key_bits(key_bits: u32, hash: HashAlgorithm) -> OoXmlCryptoError {
-    OoXmlCryptoError::BadParameters(format!(
+fn unusable_key_bits(key_bits: u32, hash: HashAlgorithm) -> Error {
+    Error::BadParameters(format!(
         "p:encryptedKey/@keyBits is {} ({} bytes) but hashAlgorithm {} yields only {}; \
          no writer produces this combination and this crate refuses to pad the digest",
         key_bits,
@@ -666,19 +661,19 @@ fn unusable_key_bits(key_bits: u32, hash: HashAlgorithm) -> OoXmlCryptoError {
     ))
 }
 
-/// Build [`OoXmlCryptoError::UnsupportedAlgorithm`] from a name the *file* chose.
+/// Build [`Error::UnsupportedAlgorithm`] from a name the *file* chose.
 ///
 /// The name is bounded here and nowhere else: it is XML attribute text limited only by
 /// `limits::ENCRYPTION_INFO_READ_CAP`, so a 1 MiB `hashAlgorithm="AAAA…"` would otherwise
 /// land whole in an error string. 32 characters is generous — the longest legitimate
 /// value is `SHA-512` — and the cut is on a char boundary, not a byte one.
-fn unsupported_algorithm(what: &'static str, name: &str) -> OoXmlCryptoError {
+fn unsupported_algorithm(what: &'static str, name: &str) -> Error {
     const MAX_CHARS: usize = 32;
     let mut shown: String = name.chars().take(MAX_CHARS).collect();
     if name.chars().nth(MAX_CHARS).is_some() {
         shown.push('…');
     }
-    OoXmlCryptoError::UnsupportedAlgorithm { what, name: shown }
+    Error::UnsupportedAlgorithm { what, name: shown }
 }
 
 /// AES-CBC decrypt with NoPadding, AES-128/192/256 by key length. `ciphertext` must be a
@@ -697,11 +692,7 @@ fn unsupported_algorithm(what: &'static str, name: &str) -> OoXmlCryptoError {
 /// was `aes256_cbc_decrypt`, and three of the four agile tuples in the wild, including
 /// Word 2010's own AES-128/SHA-1 default, were refused one frame after the parser had
 /// accepted them.
-pub(crate) fn aes_cbc_decrypt(
-    ciphertext: &[u8],
-    key: &[u8],
-    iv: &[u8],
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+pub(crate) fn aes_cbc_decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, Error> {
     use aes::cipher::generic_array::GenericArray;
     check_cbc_lengths(key, iv)?;
     let iv = GenericArray::from_slice(iv);
@@ -720,7 +711,7 @@ pub(crate) fn aes_cbc_decrypt(
         24 => run!(Aes192),
         _ => run!(Aes256),
     }
-    .map_err(|_| OoXmlCryptoError::CipherError)?;
+    .map_err(|_| Error::CipherError)?;
     Ok(out)
 }
 
@@ -738,11 +729,7 @@ pub(crate) fn aes_cbc_decrypt(
 /// and only the caller knows which applies. A block-cipher padding mode would append
 /// bytes the reader is not expecting and lengthen every blob past what `<keyData>` says.
 ///
-pub(crate) fn aes_cbc_encrypt(
-    plaintext: &[u8],
-    key: &[u8],
-    iv: &[u8],
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+pub(crate) fn aes_cbc_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, Error> {
     use aes::cipher::generic_array::GenericArray;
     use cbc::cipher::BlockEncryptMut;
     check_cbc_lengths(key, iv)?;
@@ -759,7 +746,7 @@ pub(crate) fn aes_cbc_encrypt(
         24 => run!(Aes192),
         _ => run!(Aes256),
     }
-    .map_err(|_| OoXmlCryptoError::CipherError)?;
+    .map_err(|_| Error::CipherError)?;
     Ok(out)
 }
 
@@ -771,15 +758,15 @@ pub(crate) fn aes_cbc_encrypt(
 /// fitted to a `blockSize` the parser pinned to 16, so the IV arm guards the seam rather
 /// than a live path. A key of any length AES does not define must produce an error rather
 /// than a crash in the caller's process.
-fn check_cbc_lengths(key: &[u8], iv: &[u8]) -> Result<(), OoXmlCryptoError> {
+fn check_cbc_lengths(key: &[u8], iv: &[u8]) -> Result<(), Error> {
     if !AES_KEY_LENS.contains(&key.len()) {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "AES-CBC takes a 16-, 24- or 32-byte key; this file's parameters produced {}",
             key.len()
         )));
     }
     if iv.len() != AES_BLOCK_LEN {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "AES-CBC needs a {}-byte IV; this file's parameters produced {}",
             AES_BLOCK_LEN,
             iv.len()
@@ -792,7 +779,7 @@ fn check_cbc_lengths(key: &[u8], iv: &[u8]) -> Result<(), OoXmlCryptoError> {
 /// `pub(crate)` so `encryption_info`'s tests can hand it what the writer produced. The
 /// writer is this function's inverse, and the cheapest statement of that is the parser
 /// accepting a synthetic document that no fixture supplies.
-pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, OoXmlCryptoError> {
+pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Error> {
     let mut reader = Reader::from_reader(xml_data);
     reader.config_mut().trim_text(true);
 
@@ -942,7 +929,7 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, OoXm
                         // key wraps the session key, and taking the last is a guess whose
                         // only symptom is a correct password reported wrong.
                         if saw_password_encryptor {
-                            return Err(OoXmlCryptoError::BadParameters(
+                            return Err(Error::BadParameters(
                                 "the EncryptionInfo carries more than one PasswordKeyEncryptor; \
                                  [MS-OFFCRYPTO] 2.3.4.10 admits exactly one"
                                     .into(),
@@ -1005,7 +992,7 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, OoXm
                 }
             }
             Ok(Event::Eof) => break,
-            Err(e) => return Err(OoXmlCryptoError::XmlParse(e.to_string())),
+            Err(e) => return Err(Error::XmlParse(e.to_string())),
             _ => {}
         }
         buf.clear();
@@ -1017,7 +1004,7 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, OoXm
     // below reports `missing spinCount`, which invites the reader to look for a
     // truncated file.
     if saw_certificate_encryptor && !saw_password_encryptor {
-        return Err(OoXmlCryptoError::XmlParse(
+        return Err(Error::XmlParse(
             "the EncryptionInfo carries only CertificateKeyEncryptor elements and no \
              PasswordKeyEncryptor; this crate opens password-protected documents only"
                 .into(),
@@ -1037,7 +1024,7 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, OoXm
             encrypted_hmac_value,
         }),
         (true, _, _) => {
-            return Err(OoXmlCryptoError::BadParameters(
+            return Err(Error::BadParameters(
                 "<dataIntegrity> is missing encryptedHmacKey or encryptedHmacValue".into(),
             ))
         }
@@ -1063,10 +1050,9 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, OoXm
     //     anything longer than that digest slices out of range inside `derive_block_key`.
     // `aes_cbc_decrypt`'s key-length check is one call frame too late for the
     // second: the slice panics before that function is entered.
-    let spin_count =
-        spin_count.ok_or_else(|| OoXmlCryptoError::XmlParse("missing spinCount".into()))?;
+    let spin_count = spin_count.ok_or_else(|| Error::XmlParse("missing spinCount".into()))?;
     if spin_count > limits::SPIN_COUNT_MAX {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "p:encryptedKey/@spinCount is {spin_count}; this crate refuses anything above \
              {} (Office writes 100000)",
             limits::SPIN_COUNT_MAX
@@ -1129,7 +1115,7 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, OoXm
         "p:encryptedKey/@cipherChaining",
     )?;
     let password_hash_size = password_hash_size
-        .ok_or_else(|| OoXmlCryptoError::XmlParse("missing encryptedKey.hashSize".into()))?;
+        .ok_or_else(|| Error::XmlParse("missing encryptedKey.hashSize".into()))?;
     check_hash_size(
         password_hash_size,
         password_hash,
@@ -1169,13 +1155,13 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, OoXm
     // `<dataIntegrity>` element to fail — returned rubbish under `Ok`. An honest AES-128
     // file (both elements 128) opens: the cipher dispatches on the length this declares
     // (GH #13). This check is about the two elements *disagreeing*, not about the size.
-    let encrypted_key_value = encrypted_key_value
-        .ok_or_else(|| OoXmlCryptoError::XmlParse("missing encryptedKeyValue".into()))?;
+    let encrypted_key_value =
+        encrypted_key_value.ok_or_else(|| Error::XmlParse("missing encryptedKeyValue".into()))?;
     let session_key_len = (key_data_key_bits / 8) as usize;
     let block = key_data_block_size as usize;
     let wrapped_len = session_key_len.div_ceil(block) * block;
     if encrypted_key_value.len() != wrapped_len {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "keyData/@keyBits is {key_data_key_bits} ({session_key_len} bytes, {wrapped_len} \
              once padded to keyData/@blockSize {key_data_block_size}) but encryptedKeyValue \
              decodes to {} bytes; the two must agree",
@@ -1189,12 +1175,10 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, OoXm
         spin_count,
         key_bits,
         encrypted_key_value,
-        encrypted_verifier_hash_input: encrypted_verifier_hash_input.ok_or_else(|| {
-            OoXmlCryptoError::XmlParse("missing encryptedVerifierHashInput".into())
-        })?,
-        encrypted_verifier_hash_value: encrypted_verifier_hash_value.ok_or_else(|| {
-            OoXmlCryptoError::XmlParse("missing encryptedVerifierHashValue".into())
-        })?,
+        encrypted_verifier_hash_input: encrypted_verifier_hash_input
+            .ok_or_else(|| Error::XmlParse("missing encryptedVerifierHashInput".into()))?,
+        encrypted_verifier_hash_value: encrypted_verifier_hash_value
+            .ok_or_else(|| Error::XmlParse("missing encryptedVerifierHashValue".into()))?,
         data_integrity,
         key_data_hash,
         key_data_block_size,
@@ -1209,15 +1193,15 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, OoXm
 /// Resolve one element's `hashAlgorithm` attribute, distinguishing "absent" from "named
 /// something we do not implement".
 ///
-/// The second is [`OoXmlCryptoError::UnsupportedAlgorithm`] rather than `BadParameters`
+/// The second is [`Error::UnsupportedAlgorithm`] rather than `BadParameters`
 /// precisely so it can never be confused with a wrong password: the file is well-formed
 /// and internally consistent, and the user's password may be exactly right.
 fn resolve_hash(
     declared: Option<String>,
     what: &'static str,
     missing: &'static str,
-) -> Result<HashAlgorithm, OoXmlCryptoError> {
-    let name = declared.ok_or_else(|| OoXmlCryptoError::XmlParse(missing.into()))?;
+) -> Result<HashAlgorithm, Error> {
+    let name = declared.ok_or_else(|| Error::XmlParse(missing.into()))?;
     HashAlgorithm::parse(&name).ok_or_else(|| unsupported_algorithm(what, &name))
 }
 
@@ -1245,14 +1229,12 @@ fn require_aes_cbc(
     chaining: Option<String>,
     cipher_what: &'static str,
     chaining_what: &'static str,
-) -> Result<(), OoXmlCryptoError> {
-    let cipher =
-        cipher.ok_or_else(|| OoXmlCryptoError::XmlParse(format!("missing {cipher_what}")))?;
+) -> Result<(), Error> {
+    let cipher = cipher.ok_or_else(|| Error::XmlParse(format!("missing {cipher_what}")))?;
     if cipher != "AES" {
         return Err(unsupported_algorithm(cipher_what, &cipher));
     }
-    let chaining =
-        chaining.ok_or_else(|| OoXmlCryptoError::XmlParse(format!("missing {chaining_what}")))?;
+    let chaining = chaining.ok_or_else(|| Error::XmlParse(format!("missing {chaining_what}")))?;
     if chaining != "ChainingModeCBC" {
         return Err(unsupported_algorithm(chaining_what, &chaining));
     }
@@ -1271,10 +1253,10 @@ fn require_aes_cbc(
 /// The bound is necessary and not sufficient on either element: `<p:encryptedKey>`'s
 /// value is additionally paired with the named digest's length in the caller, and
 /// `<keyData>`'s with the length of `encryptedKeyValue`.
-fn check_key_bits(declared: Option<u32>, what: &'static str) -> Result<u32, OoXmlCryptoError> {
-    let declared = declared.ok_or_else(|| OoXmlCryptoError::XmlParse(format!("missing {what}")))?;
+fn check_key_bits(declared: Option<u32>, what: &'static str) -> Result<u32, Error> {
+    let declared = declared.ok_or_else(|| Error::XmlParse(format!("missing {what}")))?;
     if !limits::AGILE_KEY_BITS_ALLOWED.contains(&declared) {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "{what} is {declared}; ECMA-376 defines {:?} for AES",
             limits::AGILE_KEY_BITS_ALLOWED
         )));
@@ -1292,10 +1274,10 @@ fn check_key_bits(declared: Option<u32>, what: &'static str) -> Result<u32, OoXm
 /// multiple of it — so a `blockSize="4096"` file is not a file we decrypt differently,
 /// it is a file we cannot decrypt at all. Pinning says that one frame earlier and with
 /// a message naming the attribute, which `derive_iv`'s digest-length error would not.
-fn check_block_size(declared: Option<u32>, what: &'static str) -> Result<u32, OoXmlCryptoError> {
-    let declared = declared.ok_or_else(|| OoXmlCryptoError::XmlParse(format!("missing {what}")))?;
+fn check_block_size(declared: Option<u32>, what: &'static str) -> Result<u32, Error> {
+    let declared = declared.ok_or_else(|| Error::XmlParse(format!("missing {what}")))?;
     if declared as usize != AES_BLOCK_LEN {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "{what} is {declared}; this crate implements AES-CBC only, whose block size \
              is {AES_BLOCK_LEN}"
         )));
@@ -1316,13 +1298,9 @@ fn check_block_size(declared: Option<u32>, what: &'static str) -> Result<u32, Oo
 /// point it becomes a length. That is deliberate duplication, not drift: this one is
 /// reached by every agile file, that one only by a file carrying `<dataIntegrity>`, and
 /// the value crosses a module boundary in between.
-fn check_hash_size(
-    declared: u32,
-    hash: HashAlgorithm,
-    what: &'static str,
-) -> Result<(), OoXmlCryptoError> {
+fn check_hash_size(declared: u32, hash: HashAlgorithm, what: &'static str) -> Result<(), Error> {
     if declared as usize != hash.digest_len() {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "{what} is {} but hashAlgorithm {} produces {}",
             declared,
             hash.name(),
@@ -1353,10 +1331,10 @@ fn check_salt_size(
     salt: &[u8],
     what: &'static str,
     missing: &'static str,
-) -> Result<u32, OoXmlCryptoError> {
-    let declared = declared.ok_or_else(|| OoXmlCryptoError::XmlParse(missing.into()))?;
+) -> Result<u32, Error> {
+    let declared = declared.ok_or_else(|| Error::XmlParse(missing.into()))?;
     if !limits::AGILE_SALT_SIZE.contains(&declared) || declared as usize != salt.len() {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "{what} is {declared} but saltValue decodes to {} bytes (the spec requires \
              them equal, and saltSize in {}..={})",
             salt.len(),
@@ -1369,45 +1347,36 @@ fn check_salt_size(
 
 /// A required `saltValue`. Named for the two fields it produces so neither call site
 /// reads as the other's.
-fn inner_or_outer_salt(
-    declared: Option<Vec<u8>>,
-    missing: &'static str,
-) -> Result<Vec<u8>, OoXmlCryptoError> {
-    declared.ok_or_else(|| OoXmlCryptoError::XmlParse(missing.into()))
+fn inner_or_outer_salt(declared: Option<Vec<u8>>, missing: &'static str) -> Result<Vec<u8>, Error> {
+    declared.ok_or_else(|| Error::XmlParse(missing.into()))
 }
 
 // The three helpers below read attribute values the same way `classify` does, and the
 // `normalized_value(Implicit1_0)` argument is explained once at `classify::attr_str`
 // rather than three more times here. Briefly: it is the same call the deprecated
 // `unescape_value()` made, not a replacement for it.
-fn decode_b64_attr(
-    attr: &quick_xml::events::attributes::Attribute,
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+fn decode_b64_attr(attr: &quick_xml::events::attributes::Attribute) -> Result<Vec<u8>, Error> {
     let val = attr
         .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-        .map_err(|e| OoXmlCryptoError::XmlParse(e.to_string()))?;
+        .map_err(|e| Error::XmlParse(e.to_string()))?;
     BASE64
         .decode(val.as_ref())
-        .map_err(|e| OoXmlCryptoError::XmlParse(format!("base64 decode: {e}")))
+        .map_err(|e| Error::XmlParse(format!("base64 decode: {e}")))
 }
 
 /// An attribute whose value is a plain token (`hashAlgorithm="SHA512"`).
-fn decode_str_attr(
-    attr: &quick_xml::events::attributes::Attribute,
-) -> Result<String, OoXmlCryptoError> {
+fn decode_str_attr(attr: &quick_xml::events::attributes::Attribute) -> Result<String, Error> {
     attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
         .map(|v| v.into_owned())
-        .map_err(|e| OoXmlCryptoError::XmlParse(e.to_string()))
+        .map_err(|e| Error::XmlParse(e.to_string()))
 }
 
-fn parse_u32_attr(
-    attr: &quick_xml::events::attributes::Attribute,
-) -> Result<u32, OoXmlCryptoError> {
+fn parse_u32_attr(attr: &quick_xml::events::attributes::Attribute) -> Result<u32, Error> {
     let val = attr
         .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-        .map_err(|e| OoXmlCryptoError::XmlParse(e.to_string()))?;
+        .map_err(|e| Error::XmlParse(e.to_string()))?;
     val.parse::<u32>()
-        .map_err(|e| OoXmlCryptoError::XmlParse(format!("integer parse: {e}")))
+        .map_err(|e| Error::XmlParse(format!("integer parse: {e}")))
 }
 
 #[cfg(test)]
@@ -1481,7 +1450,7 @@ mod tests {
             let err = derive_block_key(HashAlgorithm::Sha1, &h, &BLOCK_KEY_VALUE, key_bits)
                 .expect_err("SHA-1 cannot produce that many key bytes");
             let text = err.to_string();
-            assert!(matches!(err, OoXmlCryptoError::BadParameters(_)));
+            assert!(matches!(err, Error::BadParameters(_)));
             assert!(
                 text.contains("keyBits") && text.contains("SHA1"),
                 "the refusal must name both halves of the pair, got: {text}"
@@ -1527,7 +1496,7 @@ mod tests {
 
     /// The same call, keeping the error so a test can assert the *variant* rather than a
     /// substring of its message.
-    fn parse_err(key_data_attrs: &str, encrypted_key_attrs: &str) -> OoXmlCryptoError {
+    fn parse_err(key_data_attrs: &str, encrypted_key_attrs: &str) -> Error {
         parse_encryption_info(&minimal_xml(key_data_attrs, encrypted_key_attrs))
             .err()
             .expect("expected a parse failure")
@@ -1686,7 +1655,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                OoXmlCryptoError::UnsupportedAlgorithm { what, name }
+                Error::UnsupportedAlgorithm { what, name }
                     if *what == "keyData/@hashAlgorithm" && name == "MD5"
             ),
             "got: {err:?}"
@@ -1697,7 +1666,7 @@ mod tests {
             assert!(
                 matches!(
                     &err,
-                    OoXmlCryptoError::UnsupportedAlgorithm { what, name: got }
+                    Error::UnsupportedAlgorithm { what, name: got }
                         if *what == "p:encryptedKey/@hashAlgorithm" && got == name
                 ),
                 "hashAlgorithm={name:?} got: {err:?}"
@@ -1718,7 +1687,7 @@ mod tests {
             &good_key_data(),
             &enc_key(&[("hashAlgorithm", Some(&long))]),
         );
-        let OoXmlCryptoError::UnsupportedAlgorithm { name, .. } = &err else {
+        let Error::UnsupportedAlgorithm { name, .. } = &err else {
             panic!("got: {err:?}");
         };
         assert_eq!(name.chars().count(), 33, "32 characters plus the ellipsis");
@@ -1736,7 +1705,7 @@ mod tests {
                 &good_enc_key(),
             );
             assert!(
-                matches!(&err, OoXmlCryptoError::UnsupportedAlgorithm { what, .. }
+                matches!(&err, Error::UnsupportedAlgorithm { what, .. }
                     if *what == "keyData/@cipherAlgorithm"),
                 "keyData cipher={cipher} got: {err:?}"
             );
@@ -1746,7 +1715,7 @@ mod tests {
                 &enc_key(&[("cipherAlgorithm", Some(cipher))]),
             );
             assert!(
-                matches!(&err, OoXmlCryptoError::UnsupportedAlgorithm { what, .. }
+                matches!(&err, Error::UnsupportedAlgorithm { what, .. }
                     if *what == "p:encryptedKey/@cipherAlgorithm"),
                 "encryptedKey cipher={cipher} got: {err:?}"
             );
@@ -1757,7 +1726,7 @@ mod tests {
             (key_data(&[("cipherAlgorithm", None)]), good_enc_key()),
             (good_key_data(), enc_key(&[("cipherAlgorithm", None)])),
         ] {
-            assert!(matches!(parse_err(&kd, &ek), OoXmlCryptoError::XmlParse(_)));
+            assert!(matches!(parse_err(&kd, &ek), Error::XmlParse(_)));
         }
     }
 
@@ -1775,7 +1744,7 @@ mod tests {
                 &good_enc_key(),
             );
             assert!(
-                matches!(&err, OoXmlCryptoError::UnsupportedAlgorithm { what, name }
+                matches!(&err, Error::UnsupportedAlgorithm { what, name }
                     if *what == "keyData/@cipherChaining" && name == chaining),
                 "keyData chaining={chaining:?} got: {err:?}"
             );
@@ -1785,7 +1754,7 @@ mod tests {
                 &enc_key(&[("cipherChaining", Some(chaining))]),
             );
             assert!(
-                matches!(&err, OoXmlCryptoError::UnsupportedAlgorithm { what, name }
+                matches!(&err, Error::UnsupportedAlgorithm { what, name }
                     if *what == "p:encryptedKey/@cipherChaining" && name == chaining),
                 "encryptedKey chaining={chaining:?} got: {err:?}"
             );
@@ -1797,7 +1766,7 @@ mod tests {
             (key_data(&[("cipherChaining", None)]), good_enc_key()),
             (good_key_data(), enc_key(&[("cipherChaining", None)])),
         ] {
-            assert!(matches!(parse_err(&kd, &ek), OoXmlCryptoError::XmlParse(_)));
+            assert!(matches!(parse_err(&kd, &ek), Error::XmlParse(_)));
         }
 
         // The control: `ChainingModeCBC` on both, everything else identical, parses.
@@ -2024,7 +1993,7 @@ mod tests {
             // thousands of them, and `Vec<u8>`'s `Debug` would bury the assertion.
             let got = decrypt_package(&sk, &params, &forged).map(|p| p.len());
             assert!(
-                matches!(&got, Err(OoXmlCryptoError::BadParameters(msg))
+                matches!(&got, Err(Error::BadParameters(msg))
                     if msg.contains("EncryptedPackage declares")),
                 "declared={declared} got: {got:?}"
             );
@@ -2058,14 +2027,14 @@ mod tests {
         // Absent is a parse error, not a silent "probably the same as its sibling".
         assert!(matches!(
             parse_err(&key_data(&[("keyBits", None)]), &good_enc_key()),
-            OoXmlCryptoError::XmlParse(_)
+            Error::XmlParse(_)
         ));
 
         // Outside the ECMA-376 set, refused by name on this element too.
         for key_bits in ["0", "255", "257", "512", "4294967295"] {
             let err = parse_err(&key_data(&[("keyBits", Some(key_bits))]), &good_enc_key());
             assert!(
-                matches!(&err, OoXmlCryptoError::BadParameters(msg)
+                matches!(&err, Error::BadParameters(msg)
                     if msg.contains("keyData/@keyBits")),
                 "keyData keyBits={key_bits} got: {err:?}"
             );
@@ -2077,7 +2046,7 @@ mod tests {
         // writer used the first 16.
         let err = parse_err(&key_data(&[("keyBits", Some("128"))]), &good_enc_key());
         assert!(
-            matches!(&err, OoXmlCryptoError::BadParameters(msg)
+            matches!(&err, Error::BadParameters(msg)
                 if msg.contains("keyData/@keyBits") && msg.contains("encryptedKeyValue")),
             "keyData keyBits=128 got: {err:?}"
         );
@@ -2100,7 +2069,7 @@ mod tests {
             .err()
             .expect("a 24-byte encryptedKeyValue must be refused");
         assert!(
-            matches!(&err, OoXmlCryptoError::BadParameters(msg)
+            matches!(&err, Error::BadParameters(msg)
                 if msg.contains("keyData/@keyBits") && msg.contains("24 bytes")),
             "keyData keyBits=192 over 24 bytes got: {err:?}"
         );
@@ -2126,7 +2095,7 @@ mod tests {
             params.key_data_key_bits = key_bits;
             let got = decrypt_package(&sk, &params, &stream).map(|p| p.len());
             assert!(
-                matches!(&got, Err(OoXmlCryptoError::BadParameters(msg))
+                matches!(&got, Err(Error::BadParameters(msg))
                     if msg.contains("keyData/@keyBits") && msg.contains("session key")),
                 "keyData keyBits={key_bits} got: {got:?}"
             );
@@ -2254,7 +2223,7 @@ mod tests {
             assert!(
                 matches!(
                     decrypt(&xml, &package, "wrong", IntegrityPolicy::VerifyIfPresent),
-                    Err(OoXmlCryptoError::WrongPassword)
+                    Err(Error::WrongPassword)
                 ),
                 "saltSize={salt_len}"
             );
@@ -2309,7 +2278,7 @@ mod tests {
                 "nottestpass",
                 IntegrityPolicy::VerifyIfPresent
             ),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ));
     }
 
@@ -2389,10 +2358,7 @@ mod tests {
             // this test cannot tell "dispatch wired correctly" from "always accepts".
             let wrong = spin_hash(hash, "nottestpass", &salt, 0);
             assert!(
-                matches!(
-                    verify_password(&params, &wrong),
-                    Err(OoXmlCryptoError::WrongPassword)
-                ),
+                matches!(verify_password(&params, &wrong), Err(Error::WrongPassword)),
                 "{hash:?} must still report a genuinely wrong password as WrongPassword"
             );
 
@@ -2425,7 +2391,7 @@ mod tests {
                     .clone_from(&params.encrypted_verifier_hash_value);
                 let got = verify_password(&crossed, &right);
                 assert!(
-                    matches!(&got, Err(OoXmlCryptoError::BadParameters(msg))
+                    matches!(&got, Err(Error::BadParameters(msg))
                         if msg.contains("encryptedVerifierHashInput/Value")),
                     "a {hash:?} verifier read as {other:?} must be refused by the length \
                      guard, got: {got:?}"
@@ -2458,7 +2424,7 @@ mod tests {
             assert!(
                 matches!(
                     verify_password(&params, &h_final),
-                    Err(OoXmlCryptoError::BadParameters(_))
+                    Err(Error::BadParameters(_))
                 ),
                 "input={vi_len} value={vh_len} must be an error"
             );
@@ -2469,7 +2435,7 @@ mod tests {
         let params = test_params(HashAlgorithm::Sha512, vec![0u8; 16]);
         assert!(matches!(
             verify_password(&params, &h_final),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ));
 
         // ... and the required length really does follow the named hash: 48 bytes is
@@ -2479,12 +2445,12 @@ mod tests {
         assert_eq!(sha384.encrypted_verifier_hash_value.len(), 48);
         assert!(matches!(
             verify_password(&sha384, &PasswordDigest::new(vec![0u8; 48])),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ));
         sha384.password_hash = HashAlgorithm::Sha512;
         assert!(matches!(
             verify_password(&sha384, &PasswordDigest::new(vec![0u8; 64])),
-            Err(OoXmlCryptoError::BadParameters(_))
+            Err(Error::BadParameters(_))
         ));
     }
 
@@ -2604,7 +2570,7 @@ mod tests {
             .expect("no password key encryptor is present");
         let text = err.to_string();
         assert!(
-            matches!(err, OoXmlCryptoError::XmlParse(_)),
+            matches!(err, Error::XmlParse(_)),
             "expected an XmlParse refusal, got {err:?}"
         );
         assert!(
@@ -2647,7 +2613,7 @@ mod tests {
             .err()
             .expect("two password key encryptors");
         assert!(
-            matches!(err, OoXmlCryptoError::BadParameters(_)),
+            matches!(err, Error::BadParameters(_)),
             "expected BadParameters, got {err:?}"
         );
         assert!(

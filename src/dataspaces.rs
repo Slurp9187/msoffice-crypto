@@ -46,7 +46,7 @@
 //! `allow(dead_code)` would only silence it. A detection build classifies files and
 //! writes none, so it never wants this module.
 
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use std::io::{Cursor, Write};
 
 // ---------------------------------------------------------------------------
@@ -263,14 +263,14 @@ pub(crate) fn transform_info() -> Vec<u8> {
 ///
 /// # Errors
 ///
-/// [`OoXmlCryptoError::Io`] if the in-memory container cannot be written. Every path and
+/// [`Error::Io`] if the in-memory container cannot be written. Every path and
 /// blob below is a compile-time constant, so there is no input-shaped failure here — but
 /// the writes still go through `io::Write` and this crate does not `unwrap` on a code
 /// path a caller can reach.
 pub(crate) fn build_container(
     encryption_info: &[u8],
     encrypted_package: &[u8],
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+) -> Result<Vec<u8>, Error> {
     let mut cursor = Cursor::new(Vec::new());
     {
         let mut container = cfb::CompoundFile::create_with_version(cfb::Version::V3, &mut cursor)?;

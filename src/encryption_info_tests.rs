@@ -266,7 +266,7 @@ fn a_blob_of_the_wrong_length_is_refused_by_the_writer() {
         mutate(&mut p);
         let got = write(&p).map(|s| s.len());
         assert!(
-            matches!(&got, Err(OoXmlCryptoError::BadParameters(msg)) if msg.contains(what)),
+            matches!(&got, Err(Error::BadParameters(msg)) if msg.contains(what)),
             "a wrong-length {what} must be refused by name, got: {got:?}"
         );
     }
@@ -282,7 +282,7 @@ fn a_blob_of_the_wrong_length_is_refused_by_the_writer() {
 fn a_spin_count_past_the_ceiling_is_refused_rather_than_written() {
     let got = write(&params(limits::SPIN_COUNT_MAX + 1)).map(|s| s.len());
     assert!(
-        matches!(&got, Err(OoXmlCryptoError::BadParameters(msg)) if msg.contains("spinCount")),
+        matches!(&got, Err(Error::BadParameters(msg)) if msg.contains("spinCount")),
         "a spin count over the ceiling must be refused, got: {got:?}"
     );
 

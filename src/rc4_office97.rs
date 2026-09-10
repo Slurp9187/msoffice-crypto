@@ -19,7 +19,7 @@
 //! `DocumentRC4`, MIT) and msoffcrypto-tool `msoffcrypto/method/rc4.py` (MIT); see
 //! NOTICE.
 
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use crate::rc4::{self, BlockKeySchedule};
 use crate::sensitive::{DerivedKey, PasswordDigest};
 use md5::{Digest, Md5};
@@ -39,20 +39,20 @@ pub(crate) struct Office97Header {
 }
 
 /// Parse an RC4 encryption header — §2.3.6.1 — starting at its `EncryptionVersionInfo`.
-pub(crate) fn parse(structure: &[u8]) -> Result<Office97Header, OoXmlCryptoError> {
+pub(crate) fn parse(structure: &[u8]) -> Result<Office97Header, Error> {
     let (Some(major), Some(minor)) = (
         crate::binary_office::le16(structure, 0),
         crate::binary_office::le16(structure, 2),
     ) else {
-        return Err(OoXmlCryptoError::BadParameters(
+        return Err(Error::BadParameters(
             "the RC4 encryption header is shorter than its 4-byte version".to_string(),
         ));
     };
     if (major, minor) != (1, 1) {
-        return Err(OoXmlCryptoError::UnsupportedEncryptionVersion(major, minor));
+        return Err(Error::UnsupportedEncryptionVersion(major, minor));
     }
     let Some(body) = structure.get(4..HEADER_LEN) else {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "the RC4 encryption header is {} bytes; [MS-OFFCRYPTO] 2.3.6.1 lays out \
              {HEADER_LEN}",
             structure.len()
@@ -71,7 +71,7 @@ pub(crate) fn parse(structure: &[u8]) -> Result<Office97Header, OoXmlCryptoError
         match body.get(range) {
             Some(src) if src.len() == dst.len() => dst.copy_from_slice(src),
             _ => {
-                return Err(OoXmlCryptoError::BadParameters(
+                return Err(Error::BadParameters(
                     "RC4 encryption header fields unreadable".to_string(),
                 ))
             }
@@ -109,7 +109,7 @@ impl Office97KeySchedule {
     }
 
     /// The password check — §2.3.6.4: the same shape as CryptoAPI's, with MD5.
-    pub(crate) fn verify(&self, header: &Office97Header) -> Result<(), OoXmlCryptoError> {
+    pub(crate) fn verify(&self, header: &Office97Header) -> Result<(), Error> {
         rc4::verify_password(
             self,
             &header.encrypted_verifier,
@@ -195,7 +195,7 @@ mod tests {
             .is_ok());
         assert!(matches!(
             Office97KeySchedule::new("password2", &SALT).verify(&header),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ));
     }
 
@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(h.encrypted_verifier_hash, ENCRYPTED_VERIFIER_HASH);
         for cut in [0usize, 3, 4, 51] {
             assert!(
-                matches!(parse(&s[..cut]), Err(OoXmlCryptoError::BadParameters(_))),
+                matches!(parse(&s[..cut]), Err(Error::BadParameters(_))),
                 "cut {cut}"
             );
         }
@@ -218,7 +218,7 @@ mod tests {
         wrong_version[0] = 2;
         assert!(matches!(
             parse(&wrong_version),
-            Err(OoXmlCryptoError::UnsupportedEncryptionVersion(2, 1))
+            Err(Error::UnsupportedEncryptionVersion(2, 1))
         ));
     }
 }

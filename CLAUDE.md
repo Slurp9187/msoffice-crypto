@@ -211,7 +211,7 @@ src/segments.rs        the 4096-byte segment iterator both directions share (D4)
 src/cfb_reader.rs      capped stream reads
 src/limits.rs          every bound, each with cited provenance
 src/sensitive.rs       secure-gate aliases — the only place they are declared
-src/error.rs           OoXmlCryptoError
+src/error.rs           Error -- the crate's single public error type
 src/malformed_input.rs hostile-input tests, containers built at runtime
 src/dataspaces.rs      the \x06DataSpaces writer and the CFB container, timestamps zeroed   (+ dataspaces_tests.rs)
 src/encryption_info.rs the EncryptionInfo serialiser, byte-identical to Office's   (+ encryption_info_tests.rs)

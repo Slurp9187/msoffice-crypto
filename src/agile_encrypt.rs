@@ -59,7 +59,7 @@ use crate::agile::{
     BLOCK_VERIFIER_INPUT,
 };
 use crate::encryption_info::{self, EncryptionInfoParams, SESSION_KEY_LEN};
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use crate::hash::HashAlgorithm;
 use crate::segments::Segments;
 use crate::sensitive::{SessionKey, VerifierPlaintext};
@@ -109,8 +109,8 @@ pub(crate) struct AgileKeyMaterial {
 ///
 /// # Errors
 ///
-/// [`OoXmlCryptoError::RandomSource`] if the RNG will not produce bytes, and
-/// [`OoXmlCryptoError::BadParameters`] from the key derivation — unreachable for the fixed
+/// [`Error::RandomSource`] if the RNG will not produce bytes, and
+/// [`Error::BadParameters`] from the key derivation — unreachable for the fixed
 /// tuple above, since SHA-512's 64-byte digest comfortably exceeds the 32 bytes
 /// `derive_block_key` truncates to, but propagated rather than unwrapped because that
 /// argument stops holding the moment GH #13 widens the tuple.
@@ -118,7 +118,7 @@ pub(crate) fn generate<R: TryRng + TryCryptoRng>(
     password: &str,
     spin_count: u32,
     rng: &mut R,
-) -> Result<AgileKeyMaterial, OoXmlCryptoError> {
+) -> Result<AgileKeyMaterial, Error> {
     // Draw order is herumi's; see the module header. Each step is numbered against
     // `include/encode.hpp` so the two can be read side by side.
 
@@ -197,7 +197,7 @@ pub(crate) fn encrypt_package(
     session_key: &SessionKey,
     key_data_salt: &[u8],
     hash: HashAlgorithm,
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+) -> Result<Vec<u8>, Error> {
     let mut stream = Vec::with_capacity(8 + plaintext.len() + AES_BLOCK_LEN);
     stream.extend_from_slice(&(plaintext.len() as u64).to_le_bytes());
     for segment in Segments::new(plaintext, hash, key_data_salt, AES_BLOCK_LEN)? {
@@ -227,19 +227,19 @@ pub(crate) fn encrypt_package(
 ///
 /// # Errors
 ///
-/// [`OoXmlCryptoError::BadParameters`] if `package` exceeds
+/// [`Error::BadParameters`] if `package` exceeds
 /// [`limits::PAYLOAD_CEILING`] — the same 1 GiB the decrypt side refuses, checked on the
 /// input so that a file this crate writes is a file this crate can read back;
-/// [`OoXmlCryptoError::RandomSource`] if `rng` will not produce bytes;
-/// [`OoXmlCryptoError::Io`] if the in-memory container cannot be written.
+/// [`Error::RandomSource`] if `rng` will not produce bytes;
+/// [`Error::Io`] if the in-memory container cannot be written.
 pub(crate) fn encrypt<R: TryRng + TryCryptoRng>(
     package: &[u8],
     password: &str,
     spin_count: u32,
     rng: &mut R,
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+) -> Result<Vec<u8>, Error> {
     if package.len() > limits::PAYLOAD_CEILING {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "the package is {} bytes; this crate encrypts at most {} (see \
              limits::PAYLOAD_CEILING), because that is what it will read back",
             package.len(),
@@ -281,17 +281,14 @@ fn round_up(n: usize, multiple: usize) -> usize {
 }
 
 /// Fill `dst` from the injected RNG, mapping the RNG's own error into this crate's.
-pub(crate) fn fill<R: TryRng + TryCryptoRng>(
-    rng: &mut R,
-    dst: &mut [u8],
-) -> Result<(), OoXmlCryptoError> {
+pub(crate) fn fill<R: TryRng + TryCryptoRng>(rng: &mut R, dst: &mut [u8]) -> Result<(), Error> {
     rng.try_fill_bytes(dst).map_err(random_source)
 }
 
 /// The RNG's `Display`, which describes the *source* and never its output — on a failure
 /// there is no output to describe.
-pub(crate) fn random_source<E: core::fmt::Display>(e: E) -> OoXmlCryptoError {
-    OoXmlCryptoError::RandomSource(e.to_string())
+pub(crate) fn random_source<E: core::fmt::Display>(e: E) -> Error {
+    Error::RandomSource(e.to_string())
 }
 
 #[cfg(test)]

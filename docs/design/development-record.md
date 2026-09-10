@@ -119,6 +119,42 @@ What landed instead is self-consistency validation: `hashSize` must match the na
 unknown algorithm *names* are refused. This is why the crate opens AES-256/SHA-256, which
 LibreOffice does not.
 
+### 2.5 `OoXmlCryptoError` became `Error`, on the crate's own argument
+
+Renamed 2026-09-10, before publication, on a finding from the pre-publish adversarial audit
+(`docs/audits/2026-09-10-prepublish-adversarial-audit.md`, finding 4). Recorded here so it
+is not re-litigated in either direction.
+
+**The argument was already in the repository, one level up.** `README.md` explains that the
+crate is *not* called `ooxml-crypto` because "RC4 CryptoAPI and doc97 operate on binary
+`.doc`/`.xls`/`.ppt`, which are not OOXML — so `ooxml-crypto` … would have been wrong for
+roughly half its eventual surface." The sole error type for every fallible function was
+`OoXmlCryptoError` — including `decrypt_binary_office`, which touches no OOXML at all, and
+whose `NotEncrypted` variant exists *because of* the binary formats. The same naming mistake
+the crate name was changed to avoid, left in place underneath it.
+
+**Why the timing was the whole point.** `#[non_exhaustive]` protects adding variants; it does
+nothing for the type name. Renaming before `cargo publish` is a `sed`; afterwards it is a
+breaking change, and CLAUDE.md's "breaking API changes are free" holds *only* while
+unpublished.
+
+**Why `Error` and not `MsOfficeCryptoError`.** Rust's API guidelines argue against stutter
+(C-STUTTER), and `msoffice_crypto::MsOfficeCryptoError` is what that guideline exists to
+prevent; `serde_json`, `toml` and `csv` all name a crate's single error type `Error`.
+`OfficeCryptoError` was rejected separately: it would read as belonging to **`office-crypto`**,
+a real crate that is this one's dev-dependency and differential oracle.
+
+**The sibling did not settle it.** `odf-crypto` splits into `DecryptError`, `EncryptError` and
+`DetectError` — three types where this crate has one — so it is not a template to copy here.
+
+**The cost, accepted.** A consumer juggling several formats writes
+`use msoffice_crypto::Error as MsOfficeError`. That is routine, and it leaves the choice of
+alias with the caller rather than imposing one on everybody.
+
+One collision had to be resolved: `error.rs` did `use thiserror::Error` and could not also
+declare `pub enum Error`. The derive is now spelled `#[derive(Debug, thiserror::Error)]` and
+the import is gone.
+
 ### 2.4 The tarball stopped shipping the fixture corpus
 
 Until 2026-09-05 the stated posture was that *"a crate whose fidelity claim cannot be re-run

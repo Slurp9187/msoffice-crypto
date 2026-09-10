@@ -10,7 +10,7 @@
 //!
 //! The public surface is re-exported at the crate root. Detection types
 //! ([`Classification`], [`Family`], [`IntegrityDeclaration`]) compile into every build.
-//! `decrypt_ooxml`, `encrypt_ooxml`, `OoXmlCryptoError`, `IntegrityPolicy` and
+//! `decrypt_ooxml`, `encrypt_ooxml`, `Error`, `IntegrityPolicy` and
 //! `IntegrityOutcome` exist only under `crypto-ops`; `decrypt_binary_office` exists
 //! only under `legacy-binary`. Those names are not linked from this page because this
 //! crate-level document renders in the detection-only build, where they are absent.
@@ -60,7 +60,7 @@
 //!
 //! ```
 //! # #[cfg(feature = "crypto-ops")]
-//! # fn doctest() -> Result<(), msoffice_crypto::OoXmlCryptoError> {
+//! # fn doctest() -> Result<(), msoffice_crypto::Error> {
 //! use msoffice_crypto::decrypt_ooxml;
 //!
 //! let package = decrypt_ooxml(
@@ -240,7 +240,7 @@ pub use classify::{
 /// produced — and, once its crypto-only variants were gated, a type whose public shape
 /// depended on a feature the consumer could not see from the name. See the enum's doc.
 #[cfg(feature = "crypto-ops")]
-pub use error::OoXmlCryptoError;
+pub use error::Error;
 #[cfg(feature = "crypto-ops")]
 pub use integrity::{IntegrityOutcome, IntegrityPolicy};
 
@@ -290,29 +290,29 @@ pub fn is_cfb_office(data: &[u8]) -> bool {
 ///
 /// # Errors
 ///
-/// - [`OoXmlCryptoError::NotACfbFile`] — `data` is not a CFB container
-/// - [`OoXmlCryptoError::MissingStream`] — `EncryptionInfo` or `EncryptedPackage` is
+/// - [`Error::NotACfbFile`] — `data` is not a CFB container
+/// - [`Error::MissingStream`] — `EncryptionInfo` or `EncryptedPackage` is
 ///   absent, unreadable, or shorter than its header
-/// - [`OoXmlCryptoError::XmlParse`] — the agile `EncryptionInfo` XML is malformed, a
+/// - [`Error::XmlParse`] — the agile `EncryptionInfo` XML is malformed, a
 ///   required attribute is missing, or the file carries only `CertificateKeyEncryptor`
 ///   elements and no `PasswordKeyEncryptor` (this crate opens password-protected
 ///   documents only)
-/// - [`OoXmlCryptoError::BadParameters`] — a declared length, spin count, reserved word
+/// - [`Error::BadParameters`] — a declared length, spin count, reserved word
 ///   or sibling field is out of range or inconsistent
-/// - [`OoXmlCryptoError::WrongPassword`] — password verification failed
-/// - [`OoXmlCryptoError::IntegrityCheckFailed`] — the package does not match its HMAC
-/// - [`OoXmlCryptoError::IntegrityElementMissing`] — the file declares agile encryption
+/// - [`Error::WrongPassword`] — password verification failed
+/// - [`Error::IntegrityCheckFailed`] — the package does not match its HMAC
+/// - [`Error::IntegrityElementMissing`] — the file declares agile encryption
 ///   but carries no `dataIntegrity` element to check it against
-/// - [`OoXmlCryptoError::UnsupportedAlgorithm`] — the file names a cipher or hash this
+/// - [`Error::UnsupportedAlgorithm`] — the file names a cipher or hash this
 ///   crate does not implement. Never reported as a wrong password: the password may be
 ///   correct and simply unusable
-/// - [`OoXmlCryptoError::UnsupportedEncryptionVersion`] — a version pair this crate does
+/// - [`Error::UnsupportedEncryptionVersion`] — a version pair this crate does
 ///   not implement
-/// - [`OoXmlCryptoError::CipherError`] — an AES operation rejected a block (a length that
+/// - [`Error::CipherError`] — an AES operation rejected a block (a length that
 ///   is not a block multiple, typically a truncated stream)
-/// - [`OoXmlCryptoError::Io`] — reading the in-memory container failed
+/// - [`Error::Io`] — reading the in-memory container failed
 ///
-/// [`OoXmlCryptoError::IntegrityUnavailable`] is not reachable here: that variant is
+/// [`Error::IntegrityUnavailable`] is not reachable here: that variant is
 /// [`IntegrityPolicy::Require`] on a format that defines no tag, and this function uses
 /// the default policy.
 ///
@@ -326,20 +326,20 @@ pub fn is_cfb_office(data: &[u8]) -> bool {
 ///     "testpass",
 /// )?;
 /// assert!(package.starts_with(b"PK\x03\x04"));
-/// # Ok::<(), msoffice_crypto::OoXmlCryptoError>(())
+/// # Ok::<(), msoffice_crypto::Error>(())
 /// ```
 ///
 /// A wrong password is a distinct variant from a tampered package:
 ///
 /// ```
-/// use msoffice_crypto::{decrypt_ooxml, OoXmlCryptoError};
+/// use msoffice_crypto::{decrypt_ooxml, Error};
 ///
 /// let err = decrypt_ooxml(
 ///     include_bytes!("../tests/fixtures/agile_encrypted.docx"),
 ///     "wrongpass",
 /// )
 /// .unwrap_err();
-/// assert!(matches!(err, OoXmlCryptoError::WrongPassword));
+/// assert!(matches!(err, Error::WrongPassword));
 /// ```
 ///
 /// # See Also
@@ -348,7 +348,7 @@ pub fn is_cfb_office(data: &[u8]) -> bool {
 /// [`IntegrityOutcome`]. [`encrypt_ooxml`] is the inverse for the agile tuple Office 16
 /// writes. [`classify()`] is the pre-flight that does not decrypt.
 #[cfg(feature = "crypto-ops")]
-pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, OoXmlCryptoError> {
+pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, Error> {
     decrypt_ooxml_with_policy(data, password, IntegrityPolicy::default())
         .map(|(package, _)| package)
 }
@@ -373,12 +373,12 @@ pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, OoXmlCrypto
 ///
 /// # Errors
 ///
-/// - [`OoXmlCryptoError::BadParameters`] — `package` is over the 1 GiB this crate would
+/// - [`Error::BadParameters`] — `package` is over the 1 GiB this crate would
 ///   read back
-/// - [`OoXmlCryptoError::RandomSource`] — the system RNG would not produce bytes
-/// - [`OoXmlCryptoError::CipherError`] — an AES-CBC step rejected a block (an internal
+/// - [`Error::RandomSource`] — the system RNG would not produce bytes
+/// - [`Error::CipherError`] — an AES-CBC step rejected a block (an internal
 ///   length invariant, not a property of a well-formed `package`)
-/// - [`OoXmlCryptoError::Io`] — the in-memory container could not be written
+/// - [`Error::Io`] — the in-memory container could not be written
 ///
 /// # Examples
 ///
@@ -389,7 +389,7 @@ pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, OoXmlCrypto
 /// let sealed = encrypt_ooxml(package, "testpass")?;
 /// assert!(is_cfb_office(&sealed));
 /// assert_eq!(decrypt_ooxml(&sealed, "testpass")?, package);
-/// # Ok::<(), msoffice_crypto::OoXmlCryptoError>(())
+/// # Ok::<(), msoffice_crypto::Error>(())
 /// ```
 ///
 /// # See Also
@@ -397,7 +397,7 @@ pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, OoXmlCrypto
 /// [`encrypt_ooxml_standard`] writes the Office 2007 format for a reader that cannot
 /// open agile files. Prefer this function unless that constraint applies.
 #[cfg(feature = "crypto-ops")]
-pub fn encrypt_ooxml(package: &[u8], password: &str) -> Result<Vec<u8>, OoXmlCryptoError> {
+pub fn encrypt_ooxml(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
     agile_encrypt::encrypt(
         package,
         password,
@@ -431,12 +431,12 @@ pub fn encrypt_ooxml(package: &[u8], password: &str) -> Result<Vec<u8>, OoXmlCry
 ///
 /// # Errors
 ///
-/// - [`OoXmlCryptoError::BadParameters`] — `package` is over the 1 GiB this crate would
+/// - [`Error::BadParameters`] — `package` is over the 1 GiB this crate would
 ///   read back
-/// - [`OoXmlCryptoError::RandomSource`] — the system RNG would not produce bytes
-/// - [`OoXmlCryptoError::CipherError`] — an AES-ECB step returned a blob of the wrong
+/// - [`Error::RandomSource`] — the system RNG would not produce bytes
+/// - [`Error::CipherError`] — an AES-ECB step returned a blob of the wrong
 ///   length (unreachable for the fixed AES-128 tuple this function writes)
-/// - [`OoXmlCryptoError::Io`] — the in-memory container could not be written
+/// - [`Error::Io`] — the in-memory container could not be written
 ///
 /// # Examples
 ///
@@ -456,7 +456,7 @@ pub fn encrypt_ooxml(package: &[u8], password: &str) -> Result<Vec<u8>, OoXmlCry
 /// assert_eq!(plain, package);
 /// assert_eq!(outcome, IntegrityOutcome::NotApplicable);
 /// assert!(!outcome.is_authenticated());
-/// # Ok::<(), msoffice_crypto::OoXmlCryptoError>(())
+/// # Ok::<(), msoffice_crypto::Error>(())
 /// ```
 ///
 /// # See Also
@@ -464,7 +464,7 @@ pub fn encrypt_ooxml(package: &[u8], password: &str) -> Result<Vec<u8>, OoXmlCry
 /// [`encrypt_ooxml`] writes agile encryption with a `dataIntegrity` HMAC, which is what
 /// Office 16 writes and what this crate recommends.
 #[cfg(feature = "crypto-ops")]
-pub fn encrypt_ooxml_standard(package: &[u8], password: &str) -> Result<Vec<u8>, OoXmlCryptoError> {
+pub fn encrypt_ooxml_standard(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
     standard_encrypt::encrypt(package, password, &mut rand::rngs::SysRng)
 }
 
@@ -496,33 +496,33 @@ pub fn encrypt_ooxml_standard(package: &[u8], password: &str) -> Result<Vec<u8>,
 ///
 /// # Errors
 ///
-/// - [`OoXmlCryptoError::NotACfbFile`] — `data` is not a CFB container
-/// - [`OoXmlCryptoError::MissingStream`] — the container carries none of the three
+/// - [`Error::NotACfbFile`] — `data` is not a CFB container
+/// - [`Error::MissingStream`] — the container carries none of the three
 ///   formats' streams, or a stream is shorter than its header
-/// - [`OoXmlCryptoError::NotEncrypted`] — the document carries no password-to-open
-/// - [`OoXmlCryptoError::WrongPassword`] — the verifier did not match. Every scheme has
+/// - [`Error::NotEncrypted`] — the document carries no password-to-open
+/// - [`Error::WrongPassword`] — the verifier did not match. Every scheme has
 ///   one: the RC4 families' encrypted verifier, XOR's 16-bit `verificationBytes`
-/// - [`OoXmlCryptoError::UnsupportedAlgorithm`] — XOR obfuscation of a `.doc`, a BIFF5
+/// - [`Error::UnsupportedAlgorithm`] — XOR obfuscation of a `.doc`, a BIFF5
 ///   workbook, a header naming `fExternal` or `fAES`, or an `AlgID` / `AlgIDHash` naming
 ///   anything but RC4 and SHA-1
-/// - [`OoXmlCryptoError::UnsupportedEncryptionVersion`] — a version pair the format's own
+/// - [`Error::UnsupportedEncryptionVersion`] — a version pair the format's own
 ///   walk does not implement: none of `1.1`, `2.2`, `3.2`, `4.2` for a `.doc` or `.xls`,
 ///   and none of `2.2`, `3.2`, `4.2` for a `.ppt`, whose `CryptSession10Container`
 ///   defines RC4 CryptoAPI only ([MS-OFFCRYPTO] §2.3.5)
-/// - [`OoXmlCryptoError::BadParameters`] — a length or offset the file declares is out of
+/// - [`Error::BadParameters`] — a length or offset the file declares is out of
 ///   range: an `lKey` past the table stream, a record length past the workbook, a persist
 ///   offset past the presentation, a `KeySize` outside 40..=128, a `FILEPASS` out of order
-/// - [`OoXmlCryptoError::Io`] — rewriting a stream inside the in-memory container failed
+/// - [`Error::Io`] — rewriting a stream inside the in-memory container failed
 ///
 /// # Examples
 ///
 /// A non-CFB input is refused before any format walk:
 ///
 /// ```
-/// use msoffice_crypto::{decrypt_binary_office, OoXmlCryptoError};
+/// use msoffice_crypto::{decrypt_binary_office, Error};
 ///
 /// let err = decrypt_binary_office(b"PK\x03\x04", "testpass").unwrap_err();
-/// assert!(matches!(err, OoXmlCryptoError::NotACfbFile));
+/// assert!(matches!(err, Error::NotACfbFile));
 /// ```
 ///
 /// A password-protected `.doc` / `.xls` / `.ppt` decrypts in place. The crate tarball
@@ -542,9 +542,9 @@ pub fn encrypt_ooxml_standard(package: &[u8], password: &str) -> Result<Vec<u8>,
 /// [`Document::PowerPointBinary`] for these files. [`decrypt_ooxml`] is the modern-OOXML
 /// path and does not read a `.doc`.
 #[cfg(feature = "legacy-binary")]
-pub fn decrypt_binary_office(data: &[u8], password: &str) -> Result<Vec<u8>, OoXmlCryptoError> {
+pub fn decrypt_binary_office(data: &[u8], password: &str) -> Result<Vec<u8>, Error> {
     if !is_cfb_office(data) {
-        return Err(OoXmlCryptoError::NotACfbFile);
+        return Err(Error::NotACfbFile);
     }
     let mut container = legacy_container::LegacyContainer::open(data)?;
     match container.format() {
@@ -554,7 +554,7 @@ pub fn decrypt_binary_office(data: &[u8], password: &str) -> Result<Vec<u8>, OoX
             powerpoint97::decrypt(&mut container, password)?
         }
         None => {
-            return Err(OoXmlCryptoError::MissingStream(
+            return Err(Error::MissingStream(
                 "WordDocument, Workbook or PowerPoint Document",
             ))
         }
@@ -591,16 +591,16 @@ const AGILE_ENCRYPTION_RESERVED: u32 = 0x0000_0040;
 ///
 /// Every variant [`decrypt_ooxml`] documents, plus:
 ///
-/// - [`OoXmlCryptoError::IntegrityUnavailable`] — [`IntegrityPolicy::Require`] on
+/// - [`Error::IntegrityUnavailable`] — [`IntegrityPolicy::Require`] on
 ///   ECMA-376 standard encryption, which defines no integrity element at all. An *agile*
-///   file that omits `<dataIntegrity>` is [`OoXmlCryptoError::IntegrityElementMissing`]
+///   file that omits `<dataIntegrity>` is [`Error::IntegrityElementMissing`]
 ///   instead, under `Require` and under the default alike.
 ///
-/// [`OoXmlCryptoError::BadParameters`] also covers a declared tag whose parameters this
+/// [`Error::BadParameters`] also covers a declared tag whose parameters this
 /// crate cannot use: a `hashSize` that contradicts the hash `<keyData>` names, a
 /// `blockSize` that is not the AES block, or a blob that is not a block multiple or is
 /// shorter than the digest. A `hashAlgorithm` this crate does not implement is
-/// [`OoXmlCryptoError::UnsupportedAlgorithm`], never `BadParameters`: `agile::resolve_hash`
+/// [`Error::UnsupportedAlgorithm`], never `BadParameters`: `agile::resolve_hash`
 /// refuses the name before `integrity::verify` is reached, and the file is well formed —
 /// the password may be exactly right.
 ///
@@ -619,7 +619,7 @@ const AGILE_ENCRYPTION_RESERVED: u32 = 0x0000_0040;
 /// assert_eq!(outcome, IntegrityOutcome::Verified);
 /// assert!(outcome.is_authenticated());
 /// assert!(package.starts_with(b"PK\x03\x04"));
-/// # Ok::<(), msoffice_crypto::OoXmlCryptoError>(())
+/// # Ok::<(), msoffice_crypto::Error>(())
 /// ```
 ///
 /// # See Also
@@ -632,22 +632,22 @@ pub fn decrypt_ooxml_with_policy(
     data: &[u8],
     password: &str,
     policy: IntegrityPolicy,
-) -> Result<(Vec<u8>, IntegrityOutcome), OoXmlCryptoError> {
+) -> Result<(Vec<u8>, IntegrityOutcome), Error> {
     if !is_cfb_office(data) {
-        return Err(OoXmlCryptoError::NotACfbFile);
+        return Err(Error::NotACfbFile);
     }
 
     let streams = cfb_reader::read_cfb_streams(data)?;
 
     // The version header is eight bytes. Copying it into an array is how a short stream
-    // becomes [`OoXmlCryptoError::MissingStream`] rather than a panic on `try_into` or
+    // becomes [`Error::MissingStream`] rather than a panic on `try_into` or
     // on indexing past the end — both of which clippy::missing_panics_doc would then
     // demand a `# Panics` section for, on a path that is an error, not a panic.
     let header: [u8; 8] = streams
         .encryption_info
         .get(..8)
         .and_then(|s| s.try_into().ok())
-        .ok_or(OoXmlCryptoError::MissingStream("EncryptionInfo too short"))?;
+        .ok_or(Error::MissingStream("EncryptionInfo too short"))?;
 
     // Bytes 0-1: vMajor (LE u16), bytes 2-3: vMinor (LE u16)
     let v_major = u16::from_le_bytes([header[0], header[1]]);
@@ -682,7 +682,7 @@ pub fn decrypt_ooxml_with_policy(
             // `header` is `[u8; 8]`, so these four bytes exist.
             let reserved = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
             if reserved != AGILE_ENCRYPTION_RESERVED {
-                return Err(OoXmlCryptoError::BadParameters(format!(
+                return Err(Error::BadParameters(format!(
                     "agile EncryptionInfo Reserved is {reserved:#010x}; [MS-OFFCRYPTO] \
                      2.3.4.10 requires {AGILE_ENCRYPTION_RESERVED:#010x}"
                 )));
@@ -712,7 +712,7 @@ pub fn decrypt_ooxml_with_policy(
         (2, 2) | (3, 2) | (4, 2) => {
             match policy {
                 IntegrityPolicy::Require => {
-                    return Err(OoXmlCryptoError::IntegrityUnavailable(
+                    return Err(Error::IntegrityUnavailable(
                         "ECMA-376 standard encryption (Office 2007) defines no integrity element",
                     ))
                 }
@@ -727,9 +727,7 @@ pub fn decrypt_ooxml_with_policy(
             )?;
             Ok((package, IntegrityOutcome::NotApplicable))
         }
-        _ => Err(OoXmlCryptoError::UnsupportedEncryptionVersion(
-            v_major, v_minor,
-        )),
+        _ => Err(Error::UnsupportedEncryptionVersion(v_major, v_minor)),
     }
 }
 
@@ -768,7 +766,7 @@ mod tests {
         #[test]
         fn test_decrypt_non_cfb_returns_error() {
             let result = decrypt_ooxml(b"PK\x03\x04not a cfb", "password");
-            assert!(matches!(result, Err(OoXmlCryptoError::NotACfbFile)));
+            assert!(matches!(result, Err(Error::NotACfbFile)));
         }
 
         /// End-to-end fixture tests. The fixtures are committed in tests/fixtures/
@@ -800,7 +798,7 @@ mod tests {
                 .expect("fixture must be present -- agile tests are not optional");
             let result = decrypt_ooxml(&data, "wrongpass");
             assert!(
-                matches!(result, Err(OoXmlCryptoError::WrongPassword)),
+                matches!(result, Err(Error::WrongPassword)),
                 "Wrong password must return WrongPassword"
             );
         }
@@ -893,7 +891,7 @@ mod tests {
             for name in NON_SHA512_AGILE_FIXTURES {
                 let result = decrypt_ooxml(&fixture(name), "wrongpass");
                 assert!(
-                    matches!(result, Err(OoXmlCryptoError::WrongPassword)),
+                    matches!(result, Err(Error::WrongPassword)),
                     "{name} with the wrong password got {:?}",
                     result.map(|p| p.len())
                 );
@@ -961,7 +959,7 @@ mod tests {
                 .expect("fixture must be present -- standard tests are not optional");
             let result = decrypt_ooxml(&data, "wrongpass");
             assert!(
-                matches!(result, Err(OoXmlCryptoError::WrongPassword)),
+                matches!(result, Err(Error::WrongPassword)),
                 "Wrong password must return WrongPassword"
             );
         }
@@ -1064,19 +1062,19 @@ mod tests {
             assert!(
                 matches!(
                     decrypt_ooxml(&data, "testpass"),
-                    Err(OoXmlCryptoError::IntegrityElementMissing)
+                    Err(Error::IntegrityElementMissing)
                 ),
                 "the default policy must refuse an agile file whose tag was deleted"
             );
             assert!(matches!(
                 decrypt_ooxml_with_policy(&data, "testpass", IntegrityPolicy::default()),
-                Err(OoXmlCryptoError::IntegrityElementMissing)
+                Err(Error::IntegrityElementMissing)
             ));
             // `Require` is stricter still and refuses for the same reason, with the same
             // variant: the file is the problem, not the request.
             assert!(matches!(
                 decrypt_ooxml_with_policy(&data, "testpass", IntegrityPolicy::Require),
-                Err(OoXmlCryptoError::IntegrityElementMissing)
+                Err(Error::IntegrityElementMissing)
             ));
 
             // The negative control that makes the refusals mean something: the SAME bytes
@@ -1126,7 +1124,7 @@ mod tests {
             ] {
                 let result = decrypt_ooxml_with_policy(&tampered, "testpass", policy);
                 assert!(
-                    matches!(result, Err(OoXmlCryptoError::IntegrityCheckFailed)),
+                    matches!(result, Err(Error::IntegrityCheckFailed)),
                     "{policy:?} must refuse a tampered package, got {:?}",
                     result.map(|(p, o)| (p.len(), o))
                 );
@@ -1137,7 +1135,7 @@ mod tests {
             // not the `IntegrityElementMissing` of the deleted-element case.
             assert!(matches!(
                 decrypt_ooxml(&tampered, "testpass"),
-                Err(OoXmlCryptoError::IntegrityCheckFailed)
+                Err(Error::IntegrityCheckFailed)
             ));
         }
 
@@ -1168,7 +1166,7 @@ mod tests {
         fn test_agile_wrong_password_is_not_reported_as_corruption() {
             let result =
                 decrypt_ooxml_with_policy(&agile_fixture(), "wrongpass", IntegrityPolicy::Require);
-            assert!(matches!(result, Err(OoXmlCryptoError::WrongPassword)));
+            assert!(matches!(result, Err(Error::WrongPassword)));
         }
 
         /// ECMA-376 standard encryption has no integrity element by spec. Absence is
@@ -1216,7 +1214,7 @@ mod tests {
             // is refused -- with a distinct error, never `IntegrityCheckFailed`.
             assert!(matches!(
                 decrypt_ooxml_with_policy(&data, "testpass", IntegrityPolicy::Require),
-                Err(OoXmlCryptoError::IntegrityUnavailable(_))
+                Err(Error::IntegrityUnavailable(_))
             ));
         }
 

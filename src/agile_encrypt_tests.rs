@@ -130,7 +130,7 @@ fn the_generated_encryptor_verifies_through_the_real_path() {
     assert!(
         matches!(
             agile::verify_password(&params, &wrong),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ),
         "a wrong password must be refused, and by name"
     );
@@ -415,7 +415,7 @@ fn encrypt_ooxml_round_trips_under_the_fail_closed_default() {
 
     assert!(matches!(
         crate::decrypt_ooxml(&container, "not the password"),
-        Err(OoXmlCryptoError::WrongPassword)
+        Err(Error::WrongPassword)
     ));
 }
 
@@ -428,7 +428,7 @@ fn a_tampered_encrypt_ooxml_output_is_refused_by_the_hmac_it_wrote() {
     let bad = tampered(crate::encrypt_ooxml(&plain, PASSWORD).unwrap());
     assert!(matches!(
         crate::decrypt_ooxml(&bad, PASSWORD),
-        Err(OoXmlCryptoError::IntegrityCheckFailed)
+        Err(Error::IntegrityCheckFailed)
     ));
     let (wrong, outcome) =
         crate::decrypt_ooxml_with_policy(&bad, PASSWORD, crate::IntegrityPolicy::Skip)
@@ -493,7 +493,7 @@ fn a_package_over_the_ceiling_is_refused_before_any_work() {
     let big = vec![0u8; crate::limits::PAYLOAD_CEILING + 1];
     let got = crate::encrypt_ooxml(&big, PASSWORD).map(|c| c.len());
     assert!(
-        matches!(&got, Err(OoXmlCryptoError::BadParameters(msg)) if msg.contains("PAYLOAD_CEILING")),
+        matches!(&got, Err(Error::BadParameters(msg)) if msg.contains("PAYLOAD_CEILING")),
         "over the ceiling must be refused by name, got: {got:?}"
     );
 }

@@ -29,7 +29,7 @@
 //! integrity checker. The enum itself stays in `classify`, which must *report* the hash
 //! in a build with no cipher crate at all; this module is the `crypto-ops` half.
 
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -141,10 +141,10 @@ pub(crate) fn derive_iv(
     salt: &[u8],
     suffix: &[u8],
     block_size: usize,
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+) -> Result<Vec<u8>, Error> {
     let digest = hash.digest_two(salt, suffix);
     if digest.len() < block_size {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "keyData blockSize {} exceeds the {} digest length {}",
             block_size,
             hash.name(),
@@ -273,7 +273,7 @@ mod tests {
             // One byte past the digest is an error, not a 0x36 tail.
             let err = derive_iv(hash, b"salt", b"", hash.digest_len() + 1)
                 .expect_err("blockSize past the digest must be refused");
-            assert!(matches!(err, OoXmlCryptoError::BadParameters(_)));
+            assert!(matches!(err, Error::BadParameters(_)));
         }
     }
 }

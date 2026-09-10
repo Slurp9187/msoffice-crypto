@@ -43,7 +43,7 @@
 
 #![cfg(feature = "legacy-binary")]
 
-use msoffice_crypto::{classify, decrypt_binary_office, Document, Family, OoXmlCryptoError};
+use msoffice_crypto::{classify, decrypt_binary_office, Document, Error, Family};
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Seek, SeekFrom, Write};
 
@@ -227,7 +227,7 @@ fn every_scheme_names_a_wrong_password() {
     for (name, _, _, _, _) in GOLDENS {
         let got = decrypt_binary_office(&fixture(name), "wrongpass").map(|p| p.len());
         assert!(
-            matches!(got, Err(OoXmlCryptoError::WrongPassword)),
+            matches!(got, Err(Error::WrongPassword)),
             "{name}: expected WrongPassword, got {got:?}"
         );
     }
@@ -235,7 +235,7 @@ fn every_scheme_names_a_wrong_password() {
     // a wrong password too, not a parameter problem: the file is fine.
     assert!(matches!(
         decrypt_binary_office(&fixture("excel97_xor.xls"), "sixteen-char-pw!"),
-        Err(OoXmlCryptoError::WrongPassword)
+        Err(Error::WrongPassword)
     ));
 }
 
@@ -250,7 +250,7 @@ fn unprotected_documents_are_reported_not_encrypted() {
     ] {
         let got = decrypt_binary_office(&fixture(name), PASSWORD).map(|p| p.len());
         assert!(
-            matches!(got, Err(OoXmlCryptoError::NotEncrypted)),
+            matches!(got, Err(Error::NotEncrypted)),
             "{name}: expected NotEncrypted, got {got:?}"
         );
     }
@@ -258,7 +258,7 @@ fn unprotected_documents_are_reported_not_encrypted() {
     let once = decrypt_binary_office(&fixture("word97_password.doc"), PASSWORD).unwrap();
     assert!(matches!(
         decrypt_binary_office(&once, PASSWORD),
-        Err(OoXmlCryptoError::NotEncrypted)
+        Err(Error::NotEncrypted)
     ));
 }
 
@@ -294,7 +294,7 @@ fn the_ooxml_entry_point_still_refuses_binary_documents_without_misdiagnosing() 
         let err = msoffice_crypto::decrypt_ooxml(&fixture(name), PASSWORD)
             .expect_err("a binary document is not an OOXML package");
         assert!(
-            !matches!(err, OoXmlCryptoError::WrongPassword),
+            !matches!(err, Error::WrongPassword),
             "{name}: refused with WrongPassword, but the password is correct"
         );
     }

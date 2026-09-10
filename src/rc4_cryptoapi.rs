@@ -16,7 +16,7 @@
 //! `sc/source/filter/excel/xicontent.cxx:1157-1220`, MPL, behaviour only) refuses the
 //! same things this one does, `fExternal` included, which neither can serve.
 
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use crate::limits::{RC4_ENCRYPTION_HEADER_SIZE_MAX, RC4_KEY_BITS, RC4_KEY_BITS_DEFAULT};
 use crate::rc4::{self, BlockKeySchedule};
 use crate::sensitive::{DerivedKey, PasswordDigest};
@@ -75,12 +75,12 @@ impl CryptoApiHeader {
 /// refusal names the field. The verifier is located from `EncryptionHeaderSize` rather
 /// than by scanning `CSPName` for its terminator, which is what the structure's own
 /// size field is for and how every reference reader finds it.
-pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, OoXmlCryptoError> {
+pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, Error> {
     let le16 = |at: usize| crate::binary_office::le16(structure, at);
     let le32 = |at: usize| crate::binary_office::le32(structure, at);
 
     let (Some(major), Some(minor), Some(header_size)) = (le16(0), le16(2), le32(8)) else {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "the RC4 CryptoAPI encryption header structure is {} bytes; its version, \
              flags and size prefix alone take {PREFIX_LEN}",
             structure.len()
@@ -90,27 +90,26 @@ pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, OoXmlCryptoErro
     // `rc4_office97`; a caller dispatches on the pair before arriving here, so a
     // mismatch is the same fact the version variant already names.
     if !matches!(major, 2..=4) || minor != 2 {
-        return Err(OoXmlCryptoError::UnsupportedEncryptionVersion(major, minor));
+        return Err(Error::UnsupportedEncryptionVersion(major, minor));
     }
 
-    let header_size = usize::try_from(header_size).map_err(|_| {
-        OoXmlCryptoError::BadParameters("EncryptionHeaderSize does not fit usize".to_string())
-    })?;
+    let header_size = usize::try_from(header_size)
+        .map_err(|_| Error::BadParameters("EncryptionHeaderSize does not fit usize".to_string()))?;
     if header_size < HEADER_FIXED_LEN {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptionHeaderSize is {header_size}; the header's fixed fields alone take \
              {HEADER_FIXED_LEN}"
         )));
     }
     if header_size > RC4_ENCRYPTION_HEADER_SIZE_MAX {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptionHeaderSize is {header_size}, over the {RC4_ENCRYPTION_HEADER_SIZE_MAX} \
              this crate allows for 32 fixed bytes and a CSP name"
         )));
     }
     let header_end = PREFIX_LEN + header_size;
     let Some(header) = structure.get(PREFIX_LEN..header_end) else {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptionHeaderSize is {header_size} but only {} bytes follow the prefix",
             structure.len().saturating_sub(PREFIX_LEN)
         )));
@@ -122,7 +121,7 @@ pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, OoXmlCryptoErro
     else {
         // Unreachable with header_size >= 32, but a slice-length assumption is not an
         // argument this crate accepts from itself either.
-        return Err(OoXmlCryptoError::BadParameters(
+        return Err(Error::BadParameters(
             "EncryptionHeader fixed fields unreadable".to_string(),
         ));
     };
@@ -132,31 +131,31 @@ pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, OoXmlCryptoErro
     // fExternal set nothing here is defined at all.
     const WHAT_FLAGS: &str = "EncryptionHeader.Flags";
     if flags & FLAG_EXTERNAL != 0 {
-        return Err(OoXmlCryptoError::UnsupportedAlgorithm {
+        return Err(Error::UnsupportedAlgorithm {
             what: WHAT_FLAGS,
             name: "fExternal (application-defined encryption)".to_string(),
         });
     }
     if flags & FLAG_AES != 0 {
-        return Err(OoXmlCryptoError::UnsupportedAlgorithm {
+        return Err(Error::UnsupportedAlgorithm {
             what: WHAT_FLAGS,
             name: "fAES in a binary document".to_string(),
         });
     }
     if flags & FLAG_CRYPTO_API == 0 {
-        return Err(OoXmlCryptoError::BadParameters(
+        return Err(Error::BadParameters(
             "EncryptionHeader.Flags has fCryptoAPI clear; [MS-OFFCRYPTO] 2.3.5.1 requires it"
                 .to_string(),
         ));
     }
     if alg_id != 0 && alg_id != ALG_ID_RC4 {
-        return Err(OoXmlCryptoError::UnsupportedAlgorithm {
+        return Err(Error::UnsupportedAlgorithm {
             what: "EncryptionHeader.AlgID",
             name: format!("{alg_id:#010x}"),
         });
     }
     if alg_id_hash != 0 && alg_id_hash != ALG_ID_HASH_SHA1 {
-        return Err(OoXmlCryptoError::UnsupportedAlgorithm {
+        return Err(Error::UnsupportedAlgorithm {
             what: "EncryptionHeader.AlgIDHash",
             name: format!("{alg_id_hash:#010x}"),
         });
@@ -170,7 +169,7 @@ pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, OoXmlCryptoErro
         key_size
     };
     if !RC4_KEY_BITS.contains(&key_bits) || key_bits % 8 != 0 {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptionHeader.KeySize is {key_size}; RC4 CryptoAPI allows {}..={} bits in \
              steps of 8",
             RC4_KEY_BITS.start(),
@@ -179,7 +178,7 @@ pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, OoXmlCryptoErro
     }
 
     let Some(verifier) = structure.get(header_end..header_end + VERIFIER_LEN) else {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptionVerifier missing or truncated: {} bytes follow the header, \
              {VERIFIER_LEN} are needed",
             structure.len().saturating_sub(header_end)
@@ -187,17 +186,17 @@ pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, OoXmlCryptoErro
     };
     let v32 = |at: usize| crate::binary_office::le32(verifier, at);
     let (Some(salt_size), Some(verifier_hash_size)) = (v32(0), v32(36)) else {
-        return Err(OoXmlCryptoError::BadParameters(
+        return Err(Error::BadParameters(
             "EncryptionVerifier fields unreadable".to_string(),
         ));
     };
     if salt_size != SALT_LEN as u32 {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptionVerifier.SaltSize is {salt_size}; [MS-OFFCRYPTO] 2.3.5.2 requires 16"
         )));
     }
     if verifier_hash_size != VERIFIER_HASH_LEN as u32 {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptionVerifier.VerifierHashSize is {verifier_hash_size}; SHA-1 gives 20"
         )));
     }
@@ -213,7 +212,7 @@ pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, OoXmlCryptoErro
         match verifier.get(range) {
             Some(src) if src.len() == dst.len() => dst.copy_from_slice(src),
             _ => {
-                return Err(OoXmlCryptoError::BadParameters(
+                return Err(Error::BadParameters(
                     "EncryptionVerifier fields unreadable".to_string(),
                 ))
             }
@@ -244,13 +243,9 @@ impl CryptoApiKeySchedule {
     /// `key_bits` is the header's `KeySize` after `parse` has bounded it; it is bounded
     /// again here so that a caller skipping `parse` cannot make `block_key` slice past
     /// a SHA-1 digest.
-    pub(crate) fn new(
-        password: &str,
-        salt: &[u8; SALT_LEN],
-        key_bits: u32,
-    ) -> Result<Self, OoXmlCryptoError> {
+    pub(crate) fn new(password: &str, salt: &[u8; SALT_LEN], key_bits: u32) -> Result<Self, Error> {
         if !RC4_KEY_BITS.contains(&key_bits) || key_bits % 8 != 0 {
-            return Err(OoXmlCryptoError::BadParameters(format!(
+            return Err(Error::BadParameters(format!(
                 "an RC4 CryptoAPI key of {key_bits} bits is outside {}..={}",
                 RC4_KEY_BITS.start(),
                 RC4_KEY_BITS.end()
@@ -270,7 +265,7 @@ impl CryptoApiKeySchedule {
     }
 
     /// The password check for this header — [MS-OFFCRYPTO] §2.3.5.6.
-    pub(crate) fn verify(&self, header: &CryptoApiHeader) -> Result<(), OoXmlCryptoError> {
+    pub(crate) fn verify(&self, header: &CryptoApiHeader) -> Result<(), Error> {
         rc4::verify_password(
             self,
             &header.encrypted_verifier,
@@ -381,7 +376,7 @@ mod tests {
             CryptoApiKeySchedule::new("wrongpass", &DOC_SALT, 128)
                 .unwrap()
                 .verify(&header),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ));
         // A key size the header did not declare derives a different key, and the
         // verifier catches that too: the KeySize field is authenticated by the check.
@@ -389,7 +384,7 @@ mod tests {
             CryptoApiKeySchedule::new("testpass", &DOC_SALT, 40)
                 .unwrap()
                 .verify(&header),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ));
     }
 
@@ -524,14 +519,14 @@ mod tests {
                 20,
             ));
             assert!(
-                matches!(&got, Err(OoXmlCryptoError::BadParameters(m)) if m.contains("KeySize")),
+                matches!(&got, Err(Error::BadParameters(m)) if m.contains("KeySize")),
                 "KeySize {bits}: {got:?}"
             );
         }
         // The schedule's own guard, for a caller that skips `parse`.
         assert!(matches!(
             CryptoApiKeySchedule::new("pw", &DOC_SALT, 256),
-            Err(OoXmlCryptoError::BadParameters(_))
+            Err(Error::BadParameters(_))
         ));
     }
 
@@ -552,21 +547,21 @@ mod tests {
         );
         // Too small for the fixed fields.
         assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, 31, 16, 20)), Err(OoXmlCryptoError::BadParameters(m)) if m.contains("EncryptionHeaderSize"))
+            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, 31, 16, 20)), Err(Error::BadParameters(m)) if m.contains("EncryptionHeaderSize"))
         );
         // Over the cap.
         assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, RC4_ENCRYPTION_HEADER_SIZE_MAX as u32 + 1, 16, 20)), Err(OoXmlCryptoError::BadParameters(m)) if m.contains("over the"))
+            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, RC4_ENCRYPTION_HEADER_SIZE_MAX as u32 + 1, 16, 20)), Err(Error::BadParameters(m)) if m.contains("over the"))
         );
         // Under the cap but past the bytes present: the header would swallow the verifier
         // and run off the end.
         assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, RC4_ENCRYPTION_HEADER_SIZE_MAX as u32, 16, 20)), Err(OoXmlCryptoError::BadParameters(m)) if m.contains("follow the prefix"))
+            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, RC4_ENCRYPTION_HEADER_SIZE_MAX as u32, 16, 20)), Err(Error::BadParameters(m)) if m.contains("follow the prefix"))
         );
         // Truncations: the prefix, the header, the verifier.
         for cut in [0usize, 11, 12, 40, good.len() - 60, good.len() - 1] {
             assert!(
-                matches!(parse(&good[..cut]), Err(OoXmlCryptoError::BadParameters(_))),
+                matches!(parse(&good[..cut]), Err(Error::BadParameters(_))),
                 "cut at {cut}"
             );
         }
@@ -581,35 +576,35 @@ mod tests {
         for (major, minor) in [(1u16, 1u16), (4, 4), (5, 2), (2, 3)] {
             assert!(matches!(
                 parse(&structure(major, minor, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 16, 20)),
-                Err(OoXmlCryptoError::UnsupportedEncryptionVersion(m, n)) if (m, n) == (major, minor)
+                Err(Error::UnsupportedEncryptionVersion(m, n)) if (m, n) == (major, minor)
             ));
         }
         assert!(matches!(
             parse(&structure(4, 2, GOOD_FLAGS | FLAG_EXTERNAL, 0, 0, 128, CSP_HEADER_SIZE, 16, 20)),
-            Err(OoXmlCryptoError::UnsupportedAlgorithm { what: "EncryptionHeader.Flags", name }) if name.contains("fExternal")
+            Err(Error::UnsupportedAlgorithm { what: "EncryptionHeader.Flags", name }) if name.contains("fExternal")
         ));
         assert!(matches!(
             parse(&structure(4, 2, GOOD_FLAGS | FLAG_AES, 0x660E, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 16, 20)),
-            Err(OoXmlCryptoError::UnsupportedAlgorithm { what: "EncryptionHeader.Flags", name }) if name.contains("fAES")
+            Err(Error::UnsupportedAlgorithm { what: "EncryptionHeader.Flags", name }) if name.contains("fAES")
         ));
         assert!(matches!(
             parse(&structure(4, 2, GOOD_FLAGS, 0x660E, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 16, 20)),
-            Err(OoXmlCryptoError::UnsupportedAlgorithm { what: "EncryptionHeader.AlgID", name }) if name == "0x0000660e"
+            Err(Error::UnsupportedAlgorithm { what: "EncryptionHeader.AlgID", name }) if name == "0x0000660e"
         ));
         assert!(matches!(
             parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, 0x800C, 128, CSP_HEADER_SIZE, 16, 20)),
-            Err(OoXmlCryptoError::UnsupportedAlgorithm { what: "EncryptionHeader.AlgIDHash", name }) if name == "0x0000800c"
+            Err(Error::UnsupportedAlgorithm { what: "EncryptionHeader.AlgIDHash", name }) if name == "0x0000800c"
         ));
         assert!(matches!(
             parse(&structure(4, 2, FLAG_DOC_PROPS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 16, 20)),
-            Err(OoXmlCryptoError::BadParameters(m)) if m.contains("fCryptoAPI")
+            Err(Error::BadParameters(m)) if m.contains("fCryptoAPI")
         ));
         // The verifier's own two sizes.
         assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 32, 20)), Err(OoXmlCryptoError::BadParameters(m)) if m.contains("SaltSize"))
+            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 32, 20)), Err(Error::BadParameters(m)) if m.contains("SaltSize"))
         );
         assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 16, 32)), Err(OoXmlCryptoError::BadParameters(m)) if m.contains("VerifierHashSize"))
+            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 16, 32)), Err(Error::BadParameters(m)) if m.contains("VerifierHashSize"))
         );
     }
 }

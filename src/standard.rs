@@ -26,7 +26,7 @@
 //! did before. `standard_encrypt` runs the same `derive_standard_key` and the encrypt
 //! half of the same ECB helper, so the two directions cannot drift the way two
 //! derivations written side by side can.
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use crate::limits;
 use crate::sensitive::{DerivedKey, PasswordDigest, VerifierPlaintext};
 use aes::Aes128;
@@ -119,16 +119,16 @@ pub(crate) struct StandardParams<'a> {
 ///
 /// # Errors
 ///
-/// [`OoXmlCryptoError::MissingStream`] if the header is truncated;
-/// [`OoXmlCryptoError::BadParameters`] if `EncryptionHeaderSize` or a sibling field is
-/// out of range; [`OoXmlCryptoError::UnsupportedAlgorithm`] if `AlgID` is not AES-128 or
-/// `AlgIDHash` is not SHA-1; [`OoXmlCryptoError::WrongPassword`] if the verifier does not
-/// match; [`OoXmlCryptoError::CipherError`] if an AES-ECB step rejects a block.
+/// [`Error::MissingStream`] if the header is truncated;
+/// [`Error::BadParameters`] if `EncryptionHeaderSize` or a sibling field is
+/// out of range; [`Error::UnsupportedAlgorithm`] if `AlgID` is not AES-128 or
+/// `AlgIDHash` is not SHA-1; [`Error::WrongPassword`] if the verifier does not
+/// match; [`Error::CipherError`] if an AES-ECB step rejects a block.
 pub(crate) fn decrypt(
     info: &[u8],
     encrypted_package: &[u8],
     password: &str,
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+) -> Result<Vec<u8>, Error> {
     let params = parse_encryption_info(info)?;
     let derived_key = derive_standard_key(password, params.salt, params.key_size_bytes)?;
     verify_password(&derived_key, &params)?;
@@ -140,7 +140,7 @@ pub(crate) fn decrypt(
 ///
 /// `info` is the stream after its 8-byte prefix. Every refusal here happens before the
 /// 50 000-round KDF runs, so a malformed file costs nothing to reject.
-pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, OoXmlCryptoError> {
+pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, Error> {
     // MS-OFFCRYPTO §2.3.4.5: after the 8-byte version+flags header (already stripped by
     // the caller), the stream is:
     //   EncryptionHeaderSize (4 bytes LE u32)
@@ -150,7 +150,7 @@ pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, O
     //     CSPName     (variable, null-terminated UTF-16LE)
     //   EncryptionVerifier   (72 bytes — see ENCRYPTION_VERIFIER_LEN for the fields)
     if info.len() < 36 {
-        return Err(OoXmlCryptoError::MissingStream("EncryptionInfo too short"));
+        return Err(Error::MissingStream("EncryptionInfo too short"));
     }
 
     // `EncryptionHeaderSize` is the length of the `EncryptionHeader` that follows it, and
@@ -170,13 +170,13 @@ pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, O
     // reached before any password work, so it is checked before it is used as an offset.
     let header_size = read_u32(info, 0) as usize;
     if header_size < HEADER_FIXED_LEN {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptionHeaderSize is {header_size}; the EncryptionHeader's fixed fields \
              alone take {HEADER_FIXED_LEN}"
         )));
     }
     if header_size > limits::RC4_ENCRYPTION_HEADER_SIZE_MAX {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptionHeaderSize is {header_size}, over the {} this crate allows for 32 \
              fixed bytes and a CSP name",
             limits::RC4_ENCRYPTION_HEADER_SIZE_MAX
@@ -186,7 +186,7 @@ pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, O
     // The header itself. `info[0..4]` is the size field, so the header runs from 4 and
     // the verifier from `4 + header_size`.
     let Some(h) = info.get(4..4 + header_size) else {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptionHeaderSize is {header_size} but only {} bytes follow it",
             info.len() - 4
         )));
@@ -210,7 +210,7 @@ pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, O
     // and the result is then handed to AES-128 (panics for anything but 16). Neither
     // needs a password to reach: both run before the verifier comparison.
     if key_size_bits != limits::STANDARD_KEY_BITS_AES128 {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptionHeader.KeySize is {key_size_bits}; this crate implements AES-128 \
              only, which requires {}",
             limits::STANDARD_KEY_BITS_AES128
@@ -226,19 +226,19 @@ pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, O
     //
     // EncryptionVerifier begins where the header ends.
     let Some(v) = info.get(4 + header_size..) else {
-        return Err(OoXmlCryptoError::MissingStream(
+        return Err(Error::MissingStream(
             "EncryptionVerifier missing or truncated",
         ));
     };
     if v.len() < ENCRYPTION_VERIFIER_LEN {
-        return Err(OoXmlCryptoError::MissingStream(
+        return Err(Error::MissingStream(
             "EncryptionVerifier missing or truncated",
         ));
     }
 
     let salt_size = read_u32(v, 0) as usize;
     if salt_size != 16 {
-        return Err(OoXmlCryptoError::MissingStream(
+        return Err(Error::MissingStream(
             "unexpected EncryptionVerifier salt size",
         ));
     }
@@ -252,7 +252,7 @@ pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, O
     // its copy of the same field for the same reason; the two now agree.
     let verifier_hash_size = read_u32(v, 36);
     if verifier_hash_size as usize != SHA1_LEN {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptionVerifier.VerifierHashSize is {verifier_hash_size}; \
              [MS-OFFCRYPTO] 2.3.4.9 requires {SHA1_LEN} (SHA-1)"
         )));
@@ -275,12 +275,9 @@ pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, O
 /// result leaves the closures. The inverse of `standard_encrypt::generate`'s verifier
 /// construction, and the function the writer's tests drive rather than a check written
 /// beside them.
-pub(crate) fn verify_password(
-    key: &DerivedKey,
-    params: &StandardParams<'_>,
-) -> Result<(), OoXmlCryptoError> {
+pub(crate) fn verify_password(key: &DerivedKey, params: &StandardParams<'_>) -> Result<(), Error> {
     let (dec_verifier, dec_hash) = key.with_secret(
-        |k| -> Result<(VerifierPlaintext, VerifierPlaintext), OoXmlCryptoError> {
+        |k| -> Result<(VerifierPlaintext, VerifierPlaintext), Error> {
             Ok((
                 VerifierPlaintext::new(aes128_ecb_decrypt(k, params.encrypted_verifier)?),
                 VerifierPlaintext::new(aes128_ecb_decrypt(k, params.encrypted_verifier_hash)?),
@@ -305,7 +302,7 @@ pub(crate) fn verify_password(
         })
     });
     if !matches {
-        return Err(OoXmlCryptoError::WrongPassword);
+        return Err(Error::WrongPassword);
     }
     Ok(())
 }
@@ -323,12 +320,12 @@ pub(crate) fn verify_password(
 /// function's predecessor did, made the decryptor and the classifier disagree about the
 /// same bytes.
 ///
-/// The refusal is [`OoXmlCryptoError::UnsupportedAlgorithm`], never
+/// The refusal is [`Error::UnsupportedAlgorithm`], never
 /// `UnsupportedEncryptionVersion`: an RC4 CryptoAPI file is a well-formed `vMinor = 2`
 /// document this crate has not implemented, and the version pair is not what is wrong
 /// with it. It used to come back `WrongPassword` — the AES verifier comparison failing on
 /// an RC4 file — which is the one answer that is actively misleading.
-fn require_aes_128(flags: u32, alg_id: u32) -> Result<(), OoXmlCryptoError> {
+fn require_aes_128(flags: u32, alg_id: u32) -> Result<(), Error> {
     const WHAT: &str = "EncryptionHeader/@AlgID";
 
     // Named AES, but a key length this crate does not implement. Checked before the fAES
@@ -339,7 +336,7 @@ fn require_aes_128(flags: u32, alg_id: u32) -> Result<(), OoXmlCryptoError> {
         } else {
             "AES-256 (0x00006610)"
         };
-        return Err(OoXmlCryptoError::UnsupportedAlgorithm {
+        return Err(Error::UnsupportedAlgorithm {
             what: WHAT,
             name: name.to_string(),
         });
@@ -356,11 +353,11 @@ fn require_aes_128(flags: u32, alg_id: u32) -> Result<(), OoXmlCryptoError> {
     // with the AES bit clear that is RC4.
     match alg_id {
         ALG_ID_AES_128 => Ok(()),
-        ALG_ID_RC4 | 0 => Err(OoXmlCryptoError::UnsupportedAlgorithm {
+        ALG_ID_RC4 | 0 => Err(Error::UnsupportedAlgorithm {
             what: WHAT,
             name: "RC4 CryptoAPI (0x00006801)".to_string(),
         }),
-        other => Err(OoXmlCryptoError::UnsupportedAlgorithm {
+        other => Err(Error::UnsupportedAlgorithm {
             what: WHAT,
             name: format!("{other:#010x}"),
         }),
@@ -377,14 +374,14 @@ fn require_aes_128(flags: u32, alg_id: u32) -> Result<(), OoXmlCryptoError> {
 ///
 /// Refused rather than ignored because [`derive_standard_key`] is SHA-1 and nothing
 /// else. A file declaring SHA-256 was previously run through the SHA-1 KDF anyway and
-/// came back [`OoXmlCryptoError::WrongPassword`] — the answer that sends the caller
+/// came back [`Error::WrongPassword`] — the answer that sends the caller
 /// looking for a typo in a password that was right. `rc4_cryptoapi::parse` has always
 /// refused its copy of this field by name; this is the standard path saying the same
 /// thing about the same bytes.
-fn require_sha1(alg_id_hash: u32) -> Result<(), OoXmlCryptoError> {
+fn require_sha1(alg_id_hash: u32) -> Result<(), Error> {
     match alg_id_hash {
         ALG_ID_HASH_SHA1 | 0 => Ok(()),
-        other => Err(OoXmlCryptoError::UnsupportedAlgorithm {
+        other => Err(Error::UnsupportedAlgorithm {
             what: "EncryptionHeader/@AlgIDHash",
             name: format!("{other:#010x}"),
         }),
@@ -411,13 +408,13 @@ pub(crate) fn derive_standard_key(
     password: &str,
     salt: &[u8],
     key_size_bytes: usize,
-) -> Result<DerivedKey, OoXmlCryptoError> {
+) -> Result<DerivedKey, Error> {
     // `key_size_bytes` is `EncryptionHeader.KeySize / 8`, a file field. `decrypt`
     // pins it to 128 bits before calling; re-checked here so a future caller cannot
     // slice past the 40 bytes two SHA-1 digests actually supply — and checked first,
     // so a request this cannot meet costs no hashing.
     if key_size_bytes > 2 * SHA1_LEN {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptionHeader.KeySize asks for a {}-byte key; the SHA-1 XOR ladder \
              yields {}",
             key_size_bytes,
@@ -473,14 +470,9 @@ pub(crate) fn derive_standard_key(
     }))
 }
 
-fn decrypt_package(
-    key: &DerivedKey,
-    encrypted_package: &[u8],
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+fn decrypt_package(key: &DerivedKey, encrypted_package: &[u8]) -> Result<Vec<u8>, Error> {
     if encrypted_package.len() < 8 {
-        return Err(OoXmlCryptoError::MissingStream(
-            "EncryptedPackage too short",
-        ));
+        return Err(Error::MissingStream("EncryptedPackage too short"));
     }
     let declared_size = u64::from_le_bytes(encrypted_package[..8].try_into().unwrap());
     let data = &encrypted_package[8..];
@@ -497,7 +489,7 @@ fn decrypt_package(
     // truncates, and a declared size of `2^32 + 16` would otherwise pass as 16 — silently
     // returning a 16-byte prefix of the document as though it were the whole thing.
     if declared_size > data.len() as u64 {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "EncryptedPackage declares {declared_size} plaintext bytes but carries only {} \
              bytes of ciphertext",
             data.len()
@@ -529,9 +521,9 @@ fn decrypt_package(
 /// the file. The check belongs here *as well as* at the parse boundary — the parse check
 /// states what this crate accepts, this one states what the cipher requires, and a
 /// future caller that skips the first still hits the second.
-fn check_aes128_key(key: &[u8]) -> Result<(), OoXmlCryptoError> {
+fn check_aes128_key(key: &[u8]) -> Result<(), Error> {
     if key.len() != AES128_KEY_LEN {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "AES-128 needs a {}-byte key; this file's parameters produced {}",
             AES128_KEY_LEN,
             key.len()
@@ -542,40 +534,34 @@ fn check_aes128_key(key: &[u8]) -> Result<(), OoXmlCryptoError> {
 
 /// AES-128-ECB decrypt with NoPadding — the read half of [`aes128_ecb_encrypt`], with the
 /// same key rule. Data must be a multiple of 16 bytes; anything else is
-/// [`OoXmlCryptoError::CipherError`], never a panic.
-pub(crate) fn aes128_ecb_decrypt(
-    key: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+/// [`Error::CipherError`], never a panic.
+pub(crate) fn aes128_ecb_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
     use aes::cipher::generic_array::GenericArray;
     check_aes128_key(key)?;
     let key = GenericArray::from_slice(key);
     let mut out = vec![0u8; ciphertext.len()];
     ecb::Decryptor::<Aes128>::new(key)
         .decrypt_padded_b2b_mut::<NoPadding>(ciphertext, &mut out)
-        .map_err(|_| OoXmlCryptoError::CipherError)?;
+        .map_err(|_| Error::CipherError)?;
     Ok(out)
 }
 
 /// AES-128-ECB encrypt with NoPadding — the write half of [`aes128_ecb_decrypt`], with
 /// the same key rule. Data must be a multiple of 16 bytes; anything else is
-/// [`OoXmlCryptoError::CipherError`], never a panic.
+/// [`Error::CipherError`], never a panic.
 ///
 /// ECB has no IV and no chaining, which is why the standard format needs no segment
 /// iterator and no per-segment IV derivation: every block is independent, and the
 /// writer's job is only to pad the tail to a block. That independence is also why the
 /// format is the weaker one — see `standard_encrypt`'s header.
-pub(crate) fn aes128_ecb_encrypt(
-    key: &[u8],
-    plaintext: &[u8],
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+pub(crate) fn aes128_ecb_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
     use aes::cipher::generic_array::GenericArray;
     check_aes128_key(key)?;
     let key = GenericArray::from_slice(key);
     let mut out = vec![0u8; plaintext.len()];
     ecb::Encryptor::<Aes128>::new(key)
         .encrypt_padded_b2b_mut::<NoPadding>(plaintext, &mut out)
-        .map_err(|_| OoXmlCryptoError::CipherError)?;
+        .map_err(|_| Error::CipherError)?;
     Ok(out)
 }
 
@@ -690,10 +676,7 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("EncryptionHeaderSize {declared} must be refused"));
             assert!(
-                matches!(
-                    err,
-                    OoXmlCryptoError::BadParameters(_) | OoXmlCryptoError::MissingStream(_)
-                ),
+                matches!(err, Error::BadParameters(_) | Error::MissingStream(_)),
                 "declared={declared} got {err:?}"
             );
         }
@@ -721,7 +704,7 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("AlgIDHash {alg_id_hash:#010x} must be refused"));
             match &err {
-                OoXmlCryptoError::UnsupportedAlgorithm { what, name } => {
+                Error::UnsupportedAlgorithm { what, name } => {
                     assert_eq!(*what, "EncryptionHeader/@AlgIDHash");
                     assert!(
                         name.contains(&format!("{alg_id_hash:#010x}")),
@@ -755,7 +738,7 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("VerifierHashSize {verifier_hash_size} must be refused"));
             assert!(
-                matches!(err, OoXmlCryptoError::BadParameters(_)),
+                matches!(err, Error::BadParameters(_)),
                 "expected BadParameters for {verifier_hash_size}, got {err:?}"
             );
             assert!(
@@ -813,7 +796,7 @@ mod tests {
             assert!(
                 matches!(
                     derive_standard_key("pw", b"1234567890123456", key_size_bytes),
-                    Err(OoXmlCryptoError::BadParameters(_))
+                    Err(Error::BadParameters(_))
                 ),
                 "key_size_bytes={key_size_bytes} must be an error"
             );
@@ -833,14 +816,14 @@ mod tests {
             assert!(
                 matches!(
                     aes128_ecb_decrypt(&vec![0u8; key_len], &[0u8; 16]),
-                    Err(OoXmlCryptoError::BadParameters(_))
+                    Err(Error::BadParameters(_))
                 ),
                 "a {key_len}-byte key must be an error, not a panic"
             );
             assert!(
                 matches!(
                     aes128_ecb_encrypt(&vec![0u8; key_len], &[0u8; 16]),
-                    Err(OoXmlCryptoError::BadParameters(_))
+                    Err(Error::BadParameters(_))
                 ),
                 "a {key_len}-byte key must be an error on the encrypt side too"
             );
@@ -857,14 +840,14 @@ mod tests {
             assert!(
                 matches!(
                     aes128_ecb_encrypt(&[0u8; 16], &vec![0u8; len]),
-                    Err(OoXmlCryptoError::CipherError)
+                    Err(Error::CipherError)
                 ),
                 "{len} bytes must be refused by the encrypt side"
             );
             assert!(
                 matches!(
                     aes128_ecb_decrypt(&[0u8; 16], &vec![0u8; len]),
-                    Err(OoXmlCryptoError::CipherError)
+                    Err(Error::CipherError)
                 ),
                 "{len} bytes must be refused by the decrypt side"
             );
@@ -896,7 +879,7 @@ mod tests {
             // them and `Vec<u8>`'s `Debug` would bury the assertion.
             let got = decrypt_package(&key, &forged).map(|p| p.len());
             assert!(
-                matches!(&got, Err(OoXmlCryptoError::BadParameters(msg))
+                matches!(&got, Err(Error::BadParameters(msg))
                     if msg.contains("EncryptedPackage declares")),
                 "declared={declared} got: {got:?}"
             );
@@ -949,7 +932,7 @@ mod tests {
         ] {
             let err = require_aes_128(flags, alg_id).expect_err("must be refused");
             assert!(
-                matches!(&err, OoXmlCryptoError::UnsupportedAlgorithm { what, name }
+                matches!(&err, Error::UnsupportedAlgorithm { what, name }
                     if *what == "EncryptionHeader/@AlgID" && name.contains(expected)),
                 "flags={flags:#x} algId={alg_id:#x} got: {err:?}"
             );
@@ -987,7 +970,7 @@ mod tests {
         };
         assert!(matches!(
             verify_password(&key, &params),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ));
     }
 }

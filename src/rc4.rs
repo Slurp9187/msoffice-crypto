@@ -17,7 +17,7 @@
 //! Behaviour ported from office-crypto `src/method/rc4.rs` (MIT) and msoffcrypto-tool
 //! `msoffcrypto/method/rc4_cryptoapi.py` (MIT); see NOTICE.
 
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use crate::sensitive::{DerivedKey, VerifierPlaintext};
 use rc4::{consts::*, Key, KeyInit, Rc4, StreamCipher};
 use secure_gate::{ConstantTimeEq, RevealSecret};
@@ -41,7 +41,7 @@ impl Keystream {
     /// Anything else is a bug in the schedule that produced it, and is refused rather
     /// than sliced: `GenericArray::from_slice` panics on a length mismatch, and the
     /// length reaches here from the file's `KeySize`.
-    pub(crate) fn new(key: &DerivedKey) -> Result<Self, OoXmlCryptoError> {
+    pub(crate) fn new(key: &DerivedKey) -> Result<Self, Error> {
         macro_rules! cipher_for {
             ($k:expr, $($n:literal => $size:ty),+ $(,)?) => {
                 match $k.len() {
@@ -56,7 +56,7 @@ impl Keystream {
                 12 => U12, 13 => U13, 14 => U14, 15 => U15, 16 => U16)
         });
         cipher.map(Self).ok_or_else(|| {
-            OoXmlCryptoError::BadParameters(format!(
+            Error::BadParameters(format!(
                 "an RC4 key of {} bytes is outside the 5..=16 the binary formats define",
                 key.with_secret(|k| k.len())
             ))
@@ -80,15 +80,15 @@ pub(crate) fn decrypt_in_blocks(
     schedule: &dyn BlockKeySchedule,
     data: &mut [u8],
     block_size: usize,
-) -> Result<(), OoXmlCryptoError> {
+) -> Result<(), Error> {
     if block_size == 0 {
-        return Err(OoXmlCryptoError::BadParameters(
+        return Err(Error::BadParameters(
             "an RC4 block size of zero is a bug in the caller".to_string(),
         ));
     }
     for (i, chunk) in data.chunks_mut(block_size).enumerate() {
         let block = u32::try_from(i).map_err(|_| {
-            OoXmlCryptoError::BadParameters(
+            Error::BadParameters(
                 "more than 2^32 RC4 blocks; the block number is a 32-bit field".to_string(),
             )
         })?;
@@ -104,7 +104,7 @@ pub(crate) fn decrypt_with_block(
     schedule: &dyn BlockKeySchedule,
     data: &mut [u8],
     block: u32,
-) -> Result<(), OoXmlCryptoError> {
+) -> Result<(), Error> {
     Keystream::new(&schedule.block_key(block))?.apply(data);
     Ok(())
 }
@@ -122,7 +122,7 @@ pub(crate) fn verify_password(
     encrypted_verifier: &[u8],
     encrypted_verifier_hash: &[u8],
     digest: fn(&[u8]) -> Vec<u8>,
-) -> Result<(), OoXmlCryptoError> {
+) -> Result<(), Error> {
     let mut keystream = Keystream::new(&schedule.block_key(0))?;
     let verifier = VerifierPlaintext::new({
         let mut v = encrypted_verifier.to_vec();
@@ -141,7 +141,7 @@ pub(crate) fn verify_password(
     if matches {
         Ok(())
     } else {
-        Err(OoXmlCryptoError::WrongPassword)
+        Err(Error::WrongPassword)
     }
 }
 
@@ -208,7 +208,7 @@ mod tests {
             assert!(
                 matches!(
                     Keystream::new(&DerivedKey::new(vec![0u8; len])),
-                    Err(OoXmlCryptoError::BadParameters(_))
+                    Err(Error::BadParameters(_))
                 ),
                 "{len}-byte key must be refused"
             );
@@ -275,7 +275,7 @@ mod tests {
         assert_ne!(evh, evh_reset);
         assert!(matches!(
             verify_password(&Counting, &ev, &evh_reset, digest),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ));
     }
 }

@@ -15,7 +15,7 @@
 //! carries a control differing only in the field under test, so a green result cannot
 //! come from the synthetic container being rejected for some unrelated reason.
 
-use crate::{decrypt_ooxml, OoXmlCryptoError};
+use crate::{decrypt_ooxml, Error};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use std::io::Write;
 
@@ -236,8 +236,7 @@ fn agile_key_bits_out_of_range_is_an_error_not_a_panic() {
         let err = decrypt_ooxml(&data, "irrelevant")
             .expect_err("keyBits outside the ECMA-376 set must be refused");
         assert!(
-            matches!(err, OoXmlCryptoError::BadParameters(_))
-                && err.to_string().contains("keyBits"),
+            matches!(err, Error::BadParameters(_)) && err.to_string().contains("keyBits"),
             "keyBits={key_bits} must be refused by name, got: {err}"
         );
     }
@@ -252,7 +251,7 @@ fn agile_key_bits_256_passes_the_bound() {
     assert!(
         matches!(
             decrypt_ooxml(&data, "irrelevant"),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ),
         "a legal keyBits must reach the verifier comparison"
     );
@@ -271,7 +270,7 @@ fn agile_key_bits_128_and_192_reach_the_verifier_comparison() {
         assert!(
             matches!(
                 decrypt_ooxml(&data, "irrelevant"),
-                Err(OoXmlCryptoError::WrongPassword)
+                Err(Error::WrongPassword)
             ),
             "keyBits={key_bits} must reach the verifier comparison"
         );
@@ -303,7 +302,7 @@ fn agile_key_data_key_bits_disagreeing_with_the_session_key_blob_is_refused_by_n
     let err = decrypt_ooxml(&data, "irrelevant")
         .expect_err("a keyData/@keyBits the session key cannot satisfy must be refused");
     assert!(
-        matches!(&err, OoXmlCryptoError::BadParameters(msg)
+        matches!(&err, Error::BadParameters(msg)
             if msg.contains("keyData/@keyBits")),
         "keyData keyBits=128 must be refused by name, got: {err:?}"
     );
@@ -314,7 +313,7 @@ fn agile_key_data_key_bits_disagreeing_with_the_session_key_blob_is_refused_by_n
     assert!(
         matches!(
             decrypt_ooxml(&data, "irrelevant"),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ),
         "keyData keyBits=192 over a 32-byte blob is the padded AES-192 shape and must reach the verifier"
     );
@@ -335,7 +334,7 @@ fn agile_key_data_key_bits_disagreeing_with_the_session_key_blob_is_refused_by_n
         );
         let err = decrypt_ooxml(&data, "irrelevant").expect_err("out-of-set keyBits is refused");
         assert!(
-            matches!(&err, OoXmlCryptoError::BadParameters(msg)
+            matches!(&err, Error::BadParameters(msg)
                 if msg.contains("keyData/@keyBits")),
             "keyData keyBits={key_data_key_bits} got: {err:?}"
         );
@@ -354,7 +353,7 @@ fn agile_key_data_key_bits_of_256_reaches_the_verifier_comparison() {
     );
     assert!(matches!(
         decrypt_ooxml(&data, "irrelevant"),
-        Err(OoXmlCryptoError::WrongPassword)
+        Err(Error::WrongPassword)
     ));
 }
 
@@ -377,7 +376,7 @@ fn agile_unimplemented_hash_name_is_its_own_error_not_a_wrong_password() {
         let err = decrypt_ooxml(&data, "irrelevant")
             .expect_err("an unimplemented hashAlgorithm must be refused");
         assert!(
-            matches!(&err, OoXmlCryptoError::UnsupportedAlgorithm { what, name: got }
+            matches!(&err, Error::UnsupportedAlgorithm { what, name: got }
                 if *what == "p:encryptedKey/@hashAlgorithm" && got == name),
             "hashAlgorithm={name} got: {err:?}"
         );
@@ -401,7 +400,7 @@ fn agile_implemented_hash_names_reach_the_verifier_comparison() {
         assert!(
             matches!(
                 decrypt_ooxml(&data, "irrelevant"),
-                Err(OoXmlCryptoError::WrongPassword)
+                Err(Error::WrongPassword)
             ),
             "hashAlgorithm={name} must reach the verifier comparison"
         );
@@ -425,7 +424,7 @@ fn agile_key_bits_longer_than_the_named_digest_is_refused_by_name() {
             decrypt_ooxml(&data, "irrelevant").expect_err("SHA-1 cannot fill a 24- or 32-byte key");
         let text = err.to_string();
         assert!(
-            matches!(err, OoXmlCryptoError::BadParameters(_))
+            matches!(err, Error::BadParameters(_))
                 && text.contains("keyBits")
                 && text.contains("SHA1"),
             "keyBits={key_bits} got: {text}"
@@ -444,7 +443,7 @@ fn agile_key_bits_longer_than_the_named_digest_is_refused_by_name() {
     assert!(
         matches!(
             decrypt_ooxml(&data, "irrelevant"),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ),
         "AES-128/SHA-1 must reach the verifier comparison"
     );
@@ -475,7 +474,7 @@ fn agile_cipher_chaining_other_than_cbc_is_its_own_error() {
         let err = decrypt_ooxml(&data, "irrelevant")
             .expect_err("an unimplemented cipherChaining must be refused");
         assert!(
-            matches!(&err, OoXmlCryptoError::UnsupportedAlgorithm { what, name }
+            matches!(&err, Error::UnsupportedAlgorithm { what, name }
                 if *what == "p:encryptedKey/@cipherChaining" && name == chaining),
             "cipherChaining={chaining} got: {err:?}"
         );
@@ -501,7 +500,7 @@ fn agile_chaining_mode_cbc_reaches_the_verifier_comparison() {
     );
     assert!(matches!(
         decrypt_ooxml(&data, "irrelevant"),
-        Err(OoXmlCryptoError::WrongPassword)
+        Err(Error::WrongPassword)
     ));
 }
 
@@ -537,7 +536,7 @@ fn agile_reserved_word_must_be_0x40_not_zero() {
         let err =
             decrypt_ooxml(&data, "irrelevant").expect_err("a wrong Reserved word must be refused");
         assert!(
-            matches!(&err, OoXmlCryptoError::BadParameters(msg) if msg.contains("Reserved")),
+            matches!(&err, Error::BadParameters(msg) if msg.contains("Reserved")),
             "reserved={reserved:#010x} must be refused by name, got: {err:?}"
         );
     }
@@ -562,7 +561,7 @@ fn agile_reserved_word_of_0x40_is_accepted() {
     );
     assert!(matches!(
         decrypt_ooxml(&data, "irrelevant"),
-        Err(OoXmlCryptoError::WrongPassword)
+        Err(Error::WrongPassword)
     ));
 }
 
@@ -576,7 +575,7 @@ fn the_reserved_check_does_not_apply_to_standard_encryption() {
     assert!(
         matches!(
             decrypt_ooxml(&data, "irrelevant"),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ),
         "standard encryption writes Flags, not 0x40, in the same four bytes"
     );
@@ -599,7 +598,7 @@ fn agile_spin_count_above_the_ceiling_is_refused_before_the_spin_runs() {
     let elapsed = start.elapsed();
 
     assert!(
-        matches!(err, OoXmlCryptoError::BadParameters(_)) && err.to_string().contains("spinCount"),
+        matches!(err, Error::BadParameters(_)) && err.to_string().contains("spinCount"),
         "the refusal must name spinCount, got: {err}"
     );
     assert!(
@@ -623,7 +622,7 @@ fn standard_short_encryption_verifier_is_an_error_not_a_panic() {
         let err = decrypt_ooxml(&data, "irrelevant")
             .expect_err("a truncated EncryptionVerifier must be refused");
         assert!(
-            matches!(err, OoXmlCryptoError::MissingStream(_)),
+            matches!(err, Error::MissingStream(_)),
             "verifier_len={verifier_len} must be a MissingStream error, got: {err}"
         );
     }
@@ -637,7 +636,7 @@ fn standard_full_encryption_verifier_reaches_the_password_check() {
     assert!(
         matches!(
             decrypt_ooxml(&data, "irrelevant"),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ),
         "72 bytes is the full AES EncryptionVerifier and must be accepted"
     );
@@ -664,7 +663,7 @@ fn standard_rc4_cryptoapi_is_named_not_reported_as_a_wrong_password() {
         );
         let err = decrypt_ooxml(&data, "irrelevant").expect_err("RC4 CryptoAPI is not implemented");
         assert!(
-            matches!(&err, OoXmlCryptoError::UnsupportedAlgorithm { what, name }
+            matches!(&err, Error::UnsupportedAlgorithm { what, name }
                 if *what == "EncryptionHeader/@AlgID" && name.contains("RC4")),
             "flags={flags:#x} algId={alg_id:#x} got: {err:?}"
         );
@@ -692,7 +691,7 @@ fn standard_conforming_aes128_alg_id_reaches_the_password_check() {
         assert!(
             matches!(
                 decrypt_ooxml(&data, "irrelevant"),
-                Err(OoXmlCryptoError::WrongPassword)
+                Err(Error::WrongPassword)
             ),
             "flags={flags:#x} algId={alg_id:#x} must reach the verifier comparison"
         );
@@ -715,8 +714,7 @@ fn standard_key_size_other_than_128_is_an_error_not_a_panic() {
         );
         let err = decrypt_ooxml(&data, "irrelevant").expect_err("AES-128 means a 128-bit key");
         assert!(
-            matches!(err, OoXmlCryptoError::BadParameters(_))
-                && err.to_string().contains("KeySize"),
+            matches!(err, Error::BadParameters(_)) && err.to_string().contains("KeySize"),
             "KeySize={key_size_bits} must be refused by name, got: {err}"
         );
     }
@@ -859,6 +857,6 @@ fn agile_key_data_may_name_a_different_hash_from_the_password_encryptor() {
     // And the file really is tagless: the default policy says so by name.
     assert!(matches!(
         decrypt_ooxml(&honest, PASSWORD),
-        Err(OoXmlCryptoError::IntegrityElementMissing)
+        Err(Error::IntegrityElementMissing)
     ));
 }

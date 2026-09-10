@@ -33,8 +33,7 @@
 
 use msoffice_crypto::{
     classify, decrypt_ooxml, decrypt_ooxml_with_policy, encrypt_ooxml, encrypt_ooxml_standard,
-    is_cfb_office, Family, IntegrityDeclaration, IntegrityOutcome, IntegrityPolicy,
-    OoXmlCryptoError,
+    is_cfb_office, Error, Family, IntegrityDeclaration, IntegrityOutcome, IntegrityPolicy,
 };
 
 const PASSWORD: &str = "testpass";
@@ -95,7 +94,7 @@ fn both_entry_points_round_trip_and_only_the_agile_one_authenticates() {
     assert!(
         matches!(
             decrypt_ooxml_with_policy(&standard, PASSWORD, IntegrityPolicy::Require),
-            Err(OoXmlCryptoError::IntegrityUnavailable(_))
+            Err(Error::IntegrityUnavailable(_))
         ),
         "Require must refuse a standard file as IntegrityUnavailable"
     );
@@ -111,7 +110,7 @@ fn both_entry_points_round_trip_and_only_the_agile_one_authenticates() {
         assert!(
             matches!(
                 decrypt_ooxml(file, "not the password"),
-                Err(OoXmlCryptoError::WrongPassword)
+                Err(Error::WrongPassword)
             ),
             "{name}: a wrong password must be WrongPassword, not another variant"
         );

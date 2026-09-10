@@ -372,7 +372,7 @@ fn a_cfb_built_container_around_a_tampered_payload_is_still_caught() {
     // and bury the assertion that failed.
     let result = crate::decrypt_ooxml(&container, "testpass").map(|p| p.len());
     assert!(
-        matches!(result, Err(OoXmlCryptoError::IntegrityCheckFailed)),
+        matches!(result, Err(Error::IntegrityCheckFailed)),
         "a flipped ciphertext bit must fail the package HMAC, got: {result:?}"
     );
 }

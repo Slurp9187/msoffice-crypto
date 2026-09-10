@@ -55,7 +55,7 @@
 //! LibreOffice `oox/source/crypto/AgileEngine.cxx:390-451` (MPL-2.0, read-only — no
 //! expression from it is reproduced here).
 
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use crate::hash::{derive_iv, HashAlgorithm};
 use crate::sensitive::{IntegrityKey, IntegrityTag, SessionKey};
 use secure_gate::{ConstantTimeEq, RevealSecret};
@@ -99,7 +99,7 @@ const AES_BLOCK_LEN: usize = 16;
 ///     IntegrityPolicy::Require,
 /// )?;
 /// assert_eq!(outcome, IntegrityOutcome::Verified);
-/// # Ok::<(), msoffice_crypto::OoXmlCryptoError>(())
+/// # Ok::<(), msoffice_crypto::Error>(())
 /// ```
 ///
 /// # See Also
@@ -114,7 +114,7 @@ pub enum IntegrityPolicy {
     ///
     /// Stricter than the default by exactly one case: ECMA-376 standard encryption
     /// (Office 2007), which has no integrity element by spec, is refused with
-    /// [`crate::OoXmlCryptoError::IntegrityUnavailable`] rather than decrypted. Choose
+    /// [`crate::Error::IntegrityUnavailable`] rather than decrypted. Choose
     /// it when unauthenticated plaintext is unacceptable whatever the file claims to be;
     /// choose the default when a 2007-era file should still open.
     Require,
@@ -122,8 +122,8 @@ pub enum IntegrityPolicy {
     /// report [`IntegrityOutcome::NotApplicable`] for a format that defines none.
     ///
     /// Concretely: an agile file must carry `<dataIntegrity>` — its absence is
-    /// [`crate::OoXmlCryptoError::IntegrityElementMissing`] — and the tag must verify, or
-    /// the file is refused with [`crate::OoXmlCryptoError::IntegrityCheckFailed`];
+    /// [`crate::Error::IntegrityElementMissing`] — and the tag must verify, or
+    /// the file is refused with [`crate::Error::IntegrityCheckFailed`];
     /// ECMA-376 standard encryption decrypts and reports
     /// [`IntegrityOutcome::NotApplicable`].
     ///
@@ -182,7 +182,7 @@ pub enum IntegrityPolicy {
 /// )?;
 /// assert_eq!(outcome, IntegrityOutcome::Verified);
 /// assert!(outcome.is_authenticated());
-/// # Ok::<(), msoffice_crypto::OoXmlCryptoError>(())
+/// # Ok::<(), msoffice_crypto::Error>(())
 /// ```
 ///
 /// # See Also
@@ -297,7 +297,7 @@ pub(crate) fn verify(
     session_key: &SessionKey,
     material: &IntegrityMaterial<'_>,
     encrypted_package: &[u8],
-) -> Result<(), OoXmlCryptoError> {
+) -> Result<(), Error> {
     let hash = material.hash;
     let hash_size = material.hash_size as usize;
     let block_size = material.block_size as usize;
@@ -306,7 +306,7 @@ pub(crate) fn verify(
     // the algorithm before trusting it, exactly as herumi does when parsing
     // (`include/crypto_util.hpp:156-166`).
     if hash_size != hash.digest_len() {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "keyData hashSize {} does not match hashAlgorithm {} (expected {})",
             hash_size,
             hash.name(),
@@ -314,7 +314,7 @@ pub(crate) fn verify(
         )));
     }
     if block_size != AES_BLOCK_LEN {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "keyData blockSize {block_size} is not the AES block size ({AES_BLOCK_LEN})"
         )));
     }
@@ -357,7 +357,7 @@ pub(crate) fn verify(
         actual.with_secret(|a| expected.with_secret(|e| a.as_slice().ct_eq(e.as_slice())));
 
     if !matches {
-        return Err(OoXmlCryptoError::IntegrityCheckFailed);
+        return Err(Error::IntegrityCheckFailed);
     }
     Ok(())
 }
@@ -382,9 +382,9 @@ fn unwrap_blob(
     iv: &[u8],
     hash_size: usize,
     what: &'static str,
-) -> Result<Vec<u8>, OoXmlCryptoError> {
+) -> Result<Vec<u8>, Error> {
     if blob.len() < hash_size || blob.len() % AES_BLOCK_LEN != 0 {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "dataIntegrity {what} is {} bytes; expected a non-zero multiple of {} at least {} long",
             blob.len(),
             AES_BLOCK_LEN,
@@ -420,9 +420,9 @@ pub(crate) fn generate<R: rand::TryRng + rand::TryCryptoRng>(
     block_size: usize,
     encrypted_package: &[u8],
     rng: &mut R,
-) -> Result<IntegrityBlobs, OoXmlCryptoError> {
+) -> Result<IntegrityBlobs, Error> {
     let hmac_key = IntegrityKey::from_rng(hash.digest_len(), rng)
-        .map_err(|e| OoXmlCryptoError::RandomSource(e.to_string()))?;
+        .map_err(|e| Error::RandomSource(e.to_string()))?;
     generate_with_key(
         session_key,
         hash,
@@ -471,10 +471,10 @@ pub(crate) fn generate_with_key(
     block_size: usize,
     encrypted_package: &[u8],
     hmac_key: &IntegrityKey,
-) -> Result<IntegrityBlobs, OoXmlCryptoError> {
+) -> Result<IntegrityBlobs, Error> {
     // The same pin `verify` applies: this crate writes AES-CBC and nothing else.
     if block_size != AES_BLOCK_LEN {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "keyData blockSize {block_size} is not the AES block size ({AES_BLOCK_LEN})"
         )));
     }
@@ -683,7 +683,7 @@ mod tests {
         tampered[8 + 4096 + 7] ^= 0x80;
         assert!(matches!(
             verify(&sk, &material(&salt, &a), &tampered),
-            Err(OoXmlCryptoError::IntegrityCheckFailed)
+            Err(Error::IntegrityCheckFailed)
         ));
     }
 
@@ -836,7 +836,7 @@ mod tests {
         tampered[20] ^= 0x01;
         assert!(matches!(
             verify(&sk, &material, &tampered),
-            Err(OoXmlCryptoError::IntegrityCheckFailed)
+            Err(Error::IntegrityCheckFailed)
         ));
 
         // The 8-byte size prefix is inside the HMAC too.
@@ -844,7 +844,7 @@ mod tests {
         prefix_tampered[0] ^= 0x01;
         assert!(matches!(
             verify(&sk, &material, &prefix_tampered),
-            Err(OoXmlCryptoError::IntegrityCheckFailed)
+            Err(Error::IntegrityCheckFailed)
         ));
     }
 
@@ -861,7 +861,7 @@ mod tests {
         };
         assert!(matches!(
             verify(&sk, &material, b""),
-            Err(OoXmlCryptoError::BadParameters(_))
+            Err(Error::BadParameters(_))
         ));
     }
 
@@ -884,7 +884,7 @@ mod tests {
             };
             assert!(matches!(
                 verify(&sk, &material, b""),
-                Err(OoXmlCryptoError::BadParameters(_))
+                Err(Error::BadParameters(_))
             ));
         }
     }
@@ -902,7 +902,7 @@ mod tests {
         };
         assert!(matches!(
             verify(&sk, &material, b""),
-            Err(OoXmlCryptoError::BadParameters(_))
+            Err(Error::BadParameters(_))
         ));
     }
 

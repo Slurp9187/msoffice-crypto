@@ -14,7 +14,7 @@
 //! under test is not one a fixture has. Neither is committed, for the reason
 //! `malformed_input.rs` gives.
 
-use crate::{decrypt_binary_office, OoXmlCryptoError};
+use crate::{decrypt_binary_office, Error};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
 const PASSWORD: &str = "testpass";
@@ -74,8 +74,8 @@ fn biff(records: &[(u16, &[u8])]) -> Vec<u8> {
     out
 }
 
-fn bad_parameters_naming(got: &Result<Vec<u8>, OoXmlCryptoError>, needle: &str) -> bool {
-    matches!(got, Err(OoXmlCryptoError::BadParameters(m)) if m.contains(needle))
+fn bad_parameters_naming(got: &Result<Vec<u8>, Error>, needle: &str) -> bool {
+    matches!(got, Err(Error::BadParameters(m)) if m.contains(needle))
 }
 
 // ---- Word ------------------------------------------------------------------------------
@@ -152,7 +152,7 @@ fn word_fib_flags_decide_not_encrypted_and_xor_by_name() {
     );
     assert!(matches!(
         decrypt_binary_office(&plain, PASSWORD),
-        Err(OoXmlCryptoError::NotEncrypted)
+        Err(Error::NotEncrypted)
     ));
     // fObfuscated set: Word's XOR method, refused by name and never as a wrong password.
     let xor = patch_stream(
@@ -163,7 +163,7 @@ fn word_fib_flags_decide_not_encrypted_and_xor_by_name() {
     );
     assert!(matches!(
         decrypt_binary_office(&xor, PASSWORD),
-        Err(OoXmlCryptoError::UnsupportedAlgorithm {
+        Err(Error::UnsupportedAlgorithm {
             what: "FibBase.fObfuscated",
             ..
         })
@@ -183,7 +183,7 @@ fn word_key_size_is_bounded_and_verified() {
     let forty = patch_stream(&doc, "/1Table", TABLE_KEY_SIZE_AT, &0u32.to_le_bytes());
     assert!(matches!(
         decrypt_binary_office(&forty, PASSWORD),
-        Err(OoXmlCryptoError::WrongPassword)
+        Err(Error::WrongPassword)
     ));
     for bits in [8u32, 136, 1024] {
         let tampered = patch_stream(&doc, "/1Table", TABLE_KEY_SIZE_AT, &bits.to_le_bytes());
@@ -197,7 +197,7 @@ fn word_key_size_is_bounded_and_verified() {
     let versioned = patch_stream(&doc, "/1Table", 0, &[5, 0, 2, 0]);
     assert!(matches!(
         decrypt_binary_office(&versioned, PASSWORD),
-        Err(OoXmlCryptoError::UnsupportedEncryptionVersion(5, 2))
+        Err(Error::UnsupportedEncryptionVersion(5, 2))
     ));
 }
 
@@ -216,7 +216,7 @@ fn word_document_shorter_than_the_fib_is_refused() {
         PASSWORD,
     );
     assert!(
-        matches!(got, Err(OoXmlCryptoError::MissingStream(m)) if m.contains("68-byte")),
+        matches!(got, Err(Error::MissingStream(m)) if m.contains("68-byte")),
         "{got:?}"
     );
 
@@ -311,7 +311,7 @@ fn word_office97_rc4_container_decrypts_and_reports_a_wrong_password() {
 
     assert!(matches!(
         decrypt_binary_office(&container, "not-the-password"),
-        Err(OoXmlCryptoError::WrongPassword)
+        Err(Error::WrongPassword)
     ));
 }
 
@@ -399,7 +399,7 @@ fn excel_filepass_out_of_order_is_refused_and_absence_is_not_encrypted() {
     assert!(decrypt_binary_office(&cfb_with(&[("/Workbook", &in_order)]), PASSWORD).is_ok());
     assert!(matches!(
         decrypt_binary_office(&cfb_with(&[("/Workbook", &in_order)]), "wrongpass"),
-        Err(OoXmlCryptoError::WrongPassword)
+        Err(Error::WrongPassword)
     ));
 
     let out_of_order = biff(&[(BOF, &BOF_BODY), (MMS, &[0, 0]), (FILEPASS, &filepass)]);
@@ -416,7 +416,7 @@ fn excel_filepass_out_of_order_is_refused_and_absence_is_not_encrypted() {
     ]);
     assert!(matches!(
         decrypt_binary_office(&cfb_with(&[("/Workbook", &plain)]), PASSWORD),
-        Err(OoXmlCryptoError::NotEncrypted)
+        Err(Error::NotEncrypted)
     ));
 
     let not_bof = biff(&[(MMS, &[0, 0]), (FILEPASS, &filepass)]);
@@ -449,7 +449,7 @@ fn excel_filepass_shapes_are_refused_by_name() {
             PASSWORD,
         );
         assert!(
-            matches!(got, Err(OoXmlCryptoError::BadParameters(_))),
+            matches!(got, Err(Error::BadParameters(_))),
             "{what}: {got:?}"
         );
     }
@@ -459,10 +459,7 @@ fn excel_filepass_shapes_are_refused_by_name() {
         PASSWORD,
     );
     assert!(
-        matches!(
-            got,
-            Err(OoXmlCryptoError::UnsupportedEncryptionVersion(5, 2))
-        ),
+        matches!(got, Err(Error::UnsupportedEncryptionVersion(5, 2))),
         "{got:?}"
     );
 
@@ -471,7 +468,7 @@ fn excel_filepass_shapes_are_refused_by_name() {
     assert!(
         matches!(
             got,
-            Err(OoXmlCryptoError::UnsupportedAlgorithm {
+            Err(Error::UnsupportedAlgorithm {
                 what: "Book stream",
                 ..
             })
@@ -500,12 +497,12 @@ fn excel_xor_key_and_verifier_are_both_checked() {
     let bad_key = patch_stream(&xls, "/Workbook", 26, &0xA6CFu16.to_le_bytes());
     assert!(matches!(
         decrypt_binary_office(&bad_key, PASSWORD),
-        Err(OoXmlCryptoError::WrongPassword)
+        Err(Error::WrongPassword)
     ));
     let bad_verifier = patch_stream(&xls, "/Workbook", 28, &0x9726u16.to_le_bytes());
     assert!(matches!(
         decrypt_binary_office(&bad_verifier, PASSWORD),
-        Err(OoXmlCryptoError::WrongPassword)
+        Err(Error::WrongPassword)
     ));
 }
 
@@ -707,7 +704,7 @@ fn powerpoint_user_edit_shapes_decide_by_name() {
     let plain = patch_stream(&ppt, PPT_DOC, o.edit_at + 4, &0x1Cu32.to_le_bytes());
     assert!(matches!(
         decrypt_binary_office(&plain, PASSWORD),
-        Err(OoXmlCryptoError::NotEncrypted)
+        Err(Error::NotEncrypted)
     ));
 
     let odd = patch_stream(&ppt, PPT_DOC, o.edit_at + 4, &0x30u32.to_le_bytes());
@@ -728,7 +725,7 @@ fn powerpoint_key_size_is_bounded_and_verified() {
     let forty = patch_stream(&ppt, PPT_DOC, o.key_size_at, &0u32.to_le_bytes());
     assert!(matches!(
         decrypt_binary_office(&forty, PASSWORD),
-        Err(OoXmlCryptoError::WrongPassword)
+        Err(Error::WrongPassword)
     ));
     let off_grid = patch_stream(&ppt, PPT_DOC, o.key_size_at, &200u32.to_le_bytes());
     let got = decrypt_binary_office(&off_grid, PASSWORD);
@@ -740,14 +737,14 @@ fn powerpoint_key_size_is_bounded_and_verified() {
 fn something_that_is_not_a_binary_document_is_named() {
     assert!(matches!(
         decrypt_binary_office(&fixture("agile_encrypted.docx"), PASSWORD),
-        Err(OoXmlCryptoError::MissingStream(_))
+        Err(Error::MissingStream(_))
     ));
     assert!(matches!(
         decrypt_binary_office(&fixture("plain.docx"), PASSWORD),
-        Err(OoXmlCryptoError::NotACfbFile)
+        Err(Error::NotACfbFile)
     ));
     assert!(matches!(
         decrypt_binary_office(b"", PASSWORD),
-        Err(OoXmlCryptoError::NotACfbFile)
+        Err(Error::NotACfbFile)
     ));
 }

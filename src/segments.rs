@@ -36,7 +36,7 @@
 //! this does, are the same operation: 4096 is a multiple of 16, so no interior segment can
 //! be short.
 
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use crate::hash::{derive_iv, HashAlgorithm};
 
 /// [MS-OFFCRYPTO] §2.3.4.15 — the agile package segment length.
@@ -101,7 +101,7 @@ impl<'a> Segments<'a> {
     ///
     /// # Errors
     ///
-    /// [`OoXmlCryptoError::BadParameters`] if `block_size` exceeds the digest the named
+    /// [`Error::BadParameters`] if `block_size` exceeds the digest the named
     /// hash produces — the IV would be a slice past the end — or if `data` would need more
     /// than `u32::MAX` segments.
     ///
@@ -117,9 +117,9 @@ impl<'a> Segments<'a> {
         hash: HashAlgorithm,
         salt: &'a [u8],
         block_size: usize,
-    ) -> Result<Self, OoXmlCryptoError> {
+    ) -> Result<Self, Error> {
         if block_size > hash.digest_len() {
-            return Err(OoXmlCryptoError::BadParameters(format!(
+            return Err(Error::BadParameters(format!(
                 "keyData blockSize {} exceeds the {} digest length {}",
                 block_size,
                 hash.name(),
@@ -127,7 +127,7 @@ impl<'a> Segments<'a> {
             )));
         }
         if data.len().div_ceil(SEGMENT_LEN) > u32::MAX as usize {
-            return Err(OoXmlCryptoError::BadParameters(format!(
+            return Err(Error::BadParameters(format!(
                 "a {}-byte payload needs more than u32::MAX {SEGMENT_LEN}-byte segments",
                 data.len()
             )));
@@ -153,7 +153,7 @@ impl<'a> Iterator for Segments<'a> {
     /// The constructor's check is for the message; this is so that no future edit to
     /// [`derive_iv`] can turn a violated invariant into a slice panic. Yielding the error
     /// costs a caller one `?` and costs a hostile file its denial of service.
-    type Item = Result<Segment<'a>, OoXmlCryptoError>;
+    type Item = Result<Segment<'a>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let start = (self.next_index as usize).checked_mul(SEGMENT_LEN)?;

@@ -18,7 +18,7 @@
 //! long way, and which the known-answer tests below check against msoffcrypto's output
 //! for four passwords.
 
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use crate::limits::XOR_PASSWORD_MAX_LEN;
 use crate::sensitive::XorObfuscationArray;
 use secure_gate::{ConstantTimeEq, RevealSecret};
@@ -116,18 +116,18 @@ impl XorObfuscator {
     /// Excel convert the user's Unicode password to the system ANSI code page first. A
     /// password no Excel could have used — longer than 15 characters, or holding a
     /// character above U+00FF — cannot be the one that produced any file, so it is
-    /// reported as [`OoXmlCryptoError::WrongPassword`] rather than as a parameter
+    /// reported as [`Error::WrongPassword`] rather than as a parameter
     /// problem: the file is fine. Characters U+0080..=U+00FF are taken as their code
     /// unit, which is the Windows-1252 byte for the Latin-1 range and is what
     /// msoffcrypto's `ord(ch)` does.
-    pub(crate) fn new(password: &str) -> Result<Self, OoXmlCryptoError> {
+    pub(crate) fn new(password: &str) -> Result<Self, Error> {
         let bytes: Option<Vec<u8>> = password
             .chars()
             .map(|c| u8::try_from(u32::from(c)).ok())
             .collect();
         let bytes = match bytes {
             Some(b) if (1..=XOR_PASSWORD_MAX_LEN).contains(&b.len()) => b,
-            _ => return Err(OoXmlCryptoError::WrongPassword),
+            _ => return Err(Error::WrongPassword),
         };
         let key = xor_key(&bytes);
         Ok(Self {
@@ -145,7 +145,7 @@ impl XorObfuscator {
     /// verifier that matches beside a key that does not is a malformed file or a wrong
     /// password, and decrypting under a key the file disagrees with would produce
     /// garbage with no error. Constant-time, as every comparison in this crate.
-    pub(crate) fn verify(&self, key: u16, verification_bytes: u16) -> Result<(), OoXmlCryptoError> {
+    pub(crate) fn verify(&self, key: u16, verification_bytes: u16) -> Result<(), Error> {
         let key_ok = self.key.to_le_bytes().ct_eq(&key.to_le_bytes());
         let verifier_ok = self
             .verifier
@@ -154,7 +154,7 @@ impl XorObfuscator {
         if key_ok & verifier_ok {
             Ok(())
         } else {
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         }
     }
 
@@ -230,12 +230,12 @@ mod tests {
         assert!(o.verify(0xB359, 0x9A0A).is_ok());
         assert!(matches!(
             o.verify(0xB359, 0x9A0B),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ));
         // The key is checked as well as the verifier.
         assert!(matches!(
             o.verify(0xB358, 0x9A0A),
-            Err(OoXmlCryptoError::WrongPassword)
+            Err(Error::WrongPassword)
         ));
     }
 
@@ -271,10 +271,7 @@ mod tests {
             "日本語",
         ] {
             assert!(
-                matches!(
-                    XorObfuscator::new(password),
-                    Err(OoXmlCryptoError::WrongPassword)
-                ),
+                matches!(XorObfuscator::new(password), Err(Error::WrongPassword)),
                 "{password:?}"
             );
         }

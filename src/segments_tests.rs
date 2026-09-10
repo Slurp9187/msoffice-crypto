@@ -131,7 +131,7 @@ fn a_block_size_past_the_digest_is_an_error_not_a_panic() {
     let data = vec![0u8; SEGMENT_LEN];
     let got = Segments::new(&data, HashAlgorithm::Sha1, &SALT, 32).map(|s| s.len());
     assert!(
-        matches!(&got, Err(OoXmlCryptoError::BadParameters(msg))
+        matches!(&got, Err(Error::BadParameters(msg))
             if msg.contains("blockSize") && msg.contains("SHA1")),
         "a 32-byte block under SHA-1 must be refused, got: {got:?}"
     );

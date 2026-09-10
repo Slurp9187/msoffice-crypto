@@ -32,7 +32,7 @@ use crate::binary_office::{
     self, biff_records, BiffRecord, BIFF_BOF, BIFF_BOUNDSHEET8, BIFF_FILEPASS,
     BIFF_NEVER_ENCRYPTED, BOOK,
 };
-use crate::error::OoXmlCryptoError;
+use crate::error::Error;
 use crate::legacy_container::LegacyContainer;
 use crate::rc4::{self, BlockKeySchedule};
 use crate::xor_obfuscation::XorObfuscator;
@@ -52,15 +52,12 @@ enum Scheme {
 }
 
 /// Decrypt the container in place. The container is left untouched on any error.
-pub(crate) fn decrypt(
-    container: &mut LegacyContainer,
-    password: &str,
-) -> Result<(), OoXmlCryptoError> {
+pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result<(), Error> {
     let name = container
         .workbook_stream_name()
-        .ok_or(OoXmlCryptoError::MissingStream("Workbook"))?;
+        .ok_or(Error::MissingStream("Workbook"))?;
     if name == BOOK {
-        return Err(OoXmlCryptoError::UnsupportedAlgorithm {
+        return Err(Error::UnsupportedAlgorithm {
             what: "Book stream",
             name: "a BIFF5 (Excel 5.0/95) workbook; this crate reads BIFF8".to_string(),
         });
@@ -87,7 +84,7 @@ pub(crate) fn decrypt(
     let mut out_of_order = None;
     for record in biff_records(&book) {
         let record = record.map_err(|e| {
-            OoXmlCryptoError::BadParameters(format!(
+            Error::BadParameters(format!(
                 "Workbook record at offset {} has no readable header or declares a length \
                  past the end of the stream",
                 e.at
@@ -109,15 +106,15 @@ pub(crate) fn decrypt(
         }
     }
     if first_id != Some(BIFF_BOF) {
-        return Err(OoXmlCryptoError::BadParameters(
+        return Err(Error::BadParameters(
             "the Workbook stream does not open with BOF".to_string(),
         ));
     }
     let Some(filepass_record) = filepass_record else {
-        return Err(OoXmlCryptoError::NotEncrypted);
+        return Err(Error::NotEncrypted);
     };
     if let Some(out_of_order) = out_of_order {
-        return Err(OoXmlCryptoError::BadParameters(format!(
+        return Err(Error::BadParameters(format!(
             "FILEPASS follows record {out_of_order:#06x}, which must be encrypted; a \
              workbook's FILEPASS directly follows BOF",
         )));
@@ -131,7 +128,7 @@ pub(crate) fn decrypt(
                 binary_office::le16(filepass, 2),
                 binary_office::le16(filepass, 4),
             ) else {
-                return Err(OoXmlCryptoError::BadParameters(format!(
+                return Err(Error::BadParameters(format!(
                     "FILEPASS declares XOR obfuscation in {} bytes; XORObfuscation takes 4",
                     filepass.len().saturating_sub(2)
                 )));
@@ -164,10 +161,10 @@ pub(crate) fn decrypt(
                     Box::new(schedule)
                 }
                 (Some(major), Some(minor)) => {
-                    return Err(OoXmlCryptoError::UnsupportedEncryptionVersion(major, minor))
+                    return Err(Error::UnsupportedEncryptionVersion(major, minor))
                 }
                 _ => {
-                    return Err(OoXmlCryptoError::BadParameters(
+                    return Err(Error::BadParameters(
                         "FILEPASS declares RC4 but holds no EncryptionVersionInfo".to_string(),
                     ))
                 }
@@ -175,12 +172,12 @@ pub(crate) fn decrypt(
             Scheme::Rc4(schedule)
         }
         Some(other) => {
-            return Err(OoXmlCryptoError::BadParameters(format!(
+            return Err(Error::BadParameters(format!(
                 "FILEPASS.wEncryptionType is {other:#06x}; 0 is XOR obfuscation and 1 is RC4"
             )))
         }
         None => {
-            return Err(OoXmlCryptoError::BadParameters(
+            return Err(Error::BadParameters(
                 "FILEPASS is shorter than its wEncryptionType field".to_string(),
             ))
         }
