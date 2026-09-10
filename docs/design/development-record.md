@@ -232,14 +232,39 @@ changelog. Any document still saying LibreOffice cannot be driven is superseded.
 
 These are the reason "read the reference sceptically" is a rule here rather than a slogan.
 
-- **herumi generates a weak session key.** `FillRand(secretKey, encryptedKey.saltSize)` draws
-  the **salt** size (16) and then pads to `keyBits / 8` with the constant `0x36` — an AES-256
-  key with **128 bits of entropy and a constant top half**. It reads like `saltSize` was
-  written where `keyBits / 8` was meant. Nothing downstream notices, because the key is
-  whatever the writer says it is: **no round-trip test in any implementation could find it.**
-  `ms-offcrypto-writer` does not share the bug, which is what makes it herumi's rather than a
-  reading of the format. This crate draws all 32, with a test asserting every byte position
-  varies across 23 seeds.
+- **herumi draws a short session key on the AES-256 path.**
+  `FillRand(secretKey, encryptedKey.saltSize)` draws the **salt** size (16) and
+  `normalizeKey` then pads to `keyBits / 8` with the constant `0x36`, so an AES-256 key
+  carries **128 bits of entropy with a known top half**. It reads like `saltSize` was written
+  where `keyBits / 8` was meant. Nothing downstream notices, because the key is whatever the
+  writer says it is: **no round-trip test in any implementation could find it.**
+
+  **Scope, corrected 2026-09-10 after independent verification.** An earlier version of this
+  bullet, and the way it was first described in conversation, implied the defect was
+  unconditional. It is not: `setByName` hardcodes `saltSize = 16` for both ciphers, so on the
+  **AES-128** path `keyBits / 8 == saltSize` and the padding is a no-op with a fully random
+  key. It fires only where `keyBits / 8 > saltSize` — `msoffice-crypt --encMode 1`, and
+  unconditionally through the DLL API, which hardcodes `isOffice2013 = true` with no cipher
+  selector. Stating it more broadly than the code supports is the error this record exists to
+  avoid, so the narrower claim is the one to carry.
+
+  Two further facts from that verification: the same buffer is used as the package AES key and
+  to wrap the `dataIntegrity` HMAC key, so the shortfall does not stop at `encryptedKeyValue`;
+  and `normalizeKey` itself is **not** the bug — its `0x36` pad is what [MS-OFFCRYPTO] 2.3.4.11
+  specifies for padding a short *hash digest*. Applying it to a freshly drawn *random* key is
+  the slip.
+
+  `ms-offcrypto-writer` does not share the shape, and neither does LibreOffice
+  (`AgileEngine.cxx:713-721` draws `keyBits / 8` random bytes and uses `saltSize` only for the
+  salt — behaviour, read-only, per § *Provenance*), which is what makes it herumi's rather
+  than a reading of the format. This crate draws all 32, with a test asserting every byte
+  position varies across 23 seeds.
+
+  **Reported upstream:** _pending — add the issue URL here once filed._
+
+The four items below are ordinary correctness bugs with no security dimension, and are
+recorded here rather than reported upstream. The entropy item above is the only one where
+notice was owed before publishing.
 
 - **`msoffcrypto-tool` omits the `hashSize` truncation** (`ecma376_agile.py:466`) and
   consequently rejects correct passwords on SHA-1 agile files. herumi and LibreOffice both
