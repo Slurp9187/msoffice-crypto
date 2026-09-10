@@ -253,6 +253,22 @@ private repo the API answers `404 Not Found` and the Settings toggle is absent, 
 window between going public and enabling it is a window in which the security policy points
 at a button that is not there.
 
+**Re-enable the CI workflow.** It was disabled by hand on 2026-09-10
+(`state: disabled_manually`) because a private repository consumes Actions minutes, the
+account hit its spending limit, and every job began failing before it ran a single step --
+sixteen red entries that said nothing about the code. A permanently red board trains people
+to stop reading it, so switching it off was right; leaving it off after the flip would be a
+silent loss of the entire gate.
+
+```bash
+gh workflow enable ci.yml
+gh api repos/<owner>/msoffice-crypto/actions/workflows --jq '.workflows[] | "\(.name): \(.state)"'
+```
+
+Public repositories get unlimited standard-runner minutes, so the condition that forced the
+disable disappears at the flip. Re-run the matrix once from the Actions tab and confirm all
+sixteen jobs are green before trusting the board again.
+
 Two more things that only make sense once the repository is public:
 
 - **`homepage`** can point at the rendered documentation, which exists only after
