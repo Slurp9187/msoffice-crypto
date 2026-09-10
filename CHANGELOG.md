@@ -47,30 +47,37 @@ implementations. The applications parse the package and never hand the ZIP back,
 bar is *opens, content matches, and a wrong password is refused for the password reason*;
 the implementations' bar is byte-identity with the original.
 
-Last recorded run, against artifact SHA-256
-`3d0eceb7a0b3b48415c1977c64dff9fc690e50e3e706600418d7111ec0e26637`:
+Run against this release's own artifact, written into a private directory by this tree's
+build — 41,984 bytes, SHA-256
+`c279812c8fc0f44bc0d1b7402451c27bcafb71ca1cdc44608483874629abde9c`:
 
 ```
-office         PASS  Word 16.0.19127: OPENED, content matches; wrong password REFUSED 0x800A1520
-libreoffice    PASS  LibreOffice 26.2.1.2: OPENED, content matches; wrong password REFUSED (password request, aborted)
-msoffcrypto    PASS  msoffcrypto-tool 6.0.0: byte-identical to plain.docx; dataIntegrity HMAC verifies
-office-crypto  PASS  office-crypto 0.3: byte-identical to plain.docx
-GATE: PASS (4 of 4 readers ran)
+office         PASS  Word 16.0 build 16.0.19127: OPENED, content matches plain_content.txt
+                     wrong password REFUSED 0x800A1520 (container, header, XML and KDF all accepted)
+libreoffice    PASS  LibreOffice 26.2.1.2: OPENED, content matches plain_content.txt
+                     wrong password REFUSED -- the verifier rejected it and LibreOffice asked again
+msoffcrypto    PASS  msoffcrypto-tool 6.0.0: byte-identical to plain.docx (36,678 bytes)
+                     dataIntegrity HMAC verifies; wrong password InvalidKeyError
+office-crypto  PASS  office-crypto 0.3: byte-identical to plain.docx (36,678 bytes)
+GATE: PASS (4 of 4 readers ran; 0 not selected)
 ```
 
-`msoffcrypto-tool` is the only reader there that verifies the `dataIntegrity` HMAC, and the
+Word's `0x800A1520` is worth reading closely: it is *password incorrect*, which means Word
+walked the container, the header, the `EncryptionInfo` XML and the key derivation and failed
+only at the verifier. A malformed file fails earlier and differently.
+
+`msoffcrypto-tool` is the only reader here that verifies the `dataIntegrity` HMAC, and the
 gate drives it through the library rather than the CLI for exactly that reason — the CLI
 leaves verification off by default, so a `dataIntegrity` regression would otherwise pass
 unnoticed.
 
-**This run predates the final pre-publication changes** (the `quick-xml` bump below among
-them) and is recorded as the last measured verdict, not as this release's. `docs/RELEASING.md`
-§ 2 requires a fresh run against the released artifact; its four `PASS` lines and hash
-replace the block above when the version is cut.
-
-The gate is proven to fail when it should: `--tamper` (one bit in the ciphertext body) and
-`--corrupt-integrity` (the `dataIntegrity` blobs rewritten as same-length base64) each drive
-it to `GATE: FAIL`, and both run in CI with the exit code inverted.
+**The gate is proven to fail when it should**, and both proofs run in CI on every push with
+the exit code inverted. `--tamper` flips one bit in the ciphertext body: both implementations
+return the wrong bytes and the gate fails. `--corrupt-integrity` rewrites the `dataIntegrity`
+blobs as same-length base64, which is the sharper case — `msoffcrypto-tool` decrypts to
+*byte-identical* plaintext and still refuses, `Payload integrity verification failed`, while
+`office-crypto` accepts it, because only one of the two checks the tag at all. A gate that
+selected only the second reader would have called that file good.
 
 #### Byte-exact goldens
 

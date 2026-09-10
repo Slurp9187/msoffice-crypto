@@ -165,9 +165,12 @@ gh repo edit --description "Microsoft Office document encryption per MS-OFFCRYPT
 gh repo edit --add-topic rust --add-topic cryptography --add-topic ooxml --add-topic ecma-376 --add-topic ms-offcrypto
 ```
 
-Also enable **private vulnerability reporting** in Settings → Security. `SECURITY.md` names
-it as the only reporting channel, so if it is off, the policy points at a button that is not
-there.
+**Private vulnerability reporting cannot be enabled yet, and that is not an oversight.** It
+is a public-repository feature: on a private repo the API returns
+`404 Not Found` for `PUT /repos/{owner}/{repo}/private-vulnerability-reporting`, and the
+Settings toggle is absent. So it belongs to step 8, after the flip — but it is listed here
+too because `SECURITY.md` names it as the **only** reporting channel, and between going
+public and enabling it the policy points at a button that does not exist.
 
 `gh repo view --json description,repositoryTopics,homepageUrl` reads the current state back.
 
@@ -208,7 +211,36 @@ git grep -n -iE 'unpublished|never been published|repo is (currently )?private|n
 
 Close GH #9 with the evidence from steps 3 and 6, then GH #1 once its last slice is closed.
 
-## 8. If something is wrong after publishing
+## 8. Go public, and turn on private vulnerability reporting
+
+The flip is its own step because something depends on it that cannot be done sooner.
+
+```bash
+gh repo edit --visibility public --accept-visibility-change-consequences
+gh api --method PUT repos/<owner>/msoffice-crypto/private-vulnerability-reporting
+gh api repos/<owner>/msoffice-crypto --jq .security_and_analysis   # read it back
+```
+
+**Enable reporting immediately after the flip, in the same sitting.** `SECURITY.md` names
+GitHub's private advisory flow as the *only* channel — deliberately, so that no address has
+to be published or kept working — and the feature exists only on public repositories. On a
+private repo the API answers `404 Not Found` and the Settings toggle is absent, so the
+window between going public and enabling it is a window in which the security policy points
+at a button that is not there.
+
+Two more things that only make sense once the repository is public:
+
+- **`homepage`** can point at the rendered documentation, which exists only after
+  `cargo publish` has run: `gh repo edit --homepage https://docs.rs/msoffice-crypto`.
+- **Branch protection on `main`**, if wanted. Everything in this repository was assembled
+  by direct commits; from here on the CI matrix is the gate, and requiring it on a pull
+  request is what makes that gate binding rather than advisory.
+
+Check the flip did what you meant with `gh repo view --json visibility`. Going public is
+not reversible in the way that matters: anything already pushed is public from that moment,
+and un-publishing a repository does not un-publish what people already fetched.
+
+## 9. If something is wrong after publishing
 
 `cargo yank --version <v>` stops new dependants resolving it; it does **not** remove the
 files, and anything with it already in a lockfile keeps building. There is no unpublish.
