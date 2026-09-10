@@ -56,9 +56,9 @@ ALL_DOCS = LIVE_DOCS + [
     "deny.toml",
     "build.rs",
     ".github/workflows/ci.yml",
-    "docs/development-record.md",
+    "docs/design/development-record.md",
     "docs/plan-workflow.md",
-    "docs/msoffice-crypto-format-history.md",
+    "docs/design/msoffice-crypto-format-history.md",
 ]
 
 DEFAULT_CLONES = pathlib.Path("O:/projects-github-clones")

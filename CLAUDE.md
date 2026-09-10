@@ -241,10 +241,11 @@ build.rs               sets cfg(fixture_corpus): the corpus tests are #[ignore]d
 deny.toml              the dependency half of the licence rule: what may arrive in the graph
 SECURITY.md            the disclosure policy, and what this crate counts as a vulnerability
 docs/RELEASING.md      the release runbook; a live procedure, not a dated snapshot
-docs/development-record.md  what the issues and PRs decided, reversed and deferred; the #N index
-docs/plans/            dated plan files; the arc lives in msoffice-crypto-foundation-2026-09-04.md
-docs/handoffs/         session handoffs; each is a dated snapshot, not a live document
 docs/plan-workflow.md  how plans become issues
+docs/design/           why the crate is shaped as it is -- development-record.md (what the
+                       issues and PRs decided, reversed and deferred, and the #N index) and
+                       msoffice-crypto-format-history.md (the formats, and what converts)
+docs/plans/            dated plan files; the arc lives in msoffice-crypto-foundation-2026-09-04.md
 .claude/skills/        msoffice-crypto-secure-gate (policy), file-plan-issues (protocol)
 ```
 

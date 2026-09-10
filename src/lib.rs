@@ -123,7 +123,7 @@
 //! They are kept because the surrounding sentence usually needs them to make sense: the
 //! reason a guard is shaped the way it is, or the change that made a hardcoded value
 //! configurable, is often the only record of why an obvious-looking simplification is
-//! wrong. `docs/development-record.md` in the repository is the index that maps every one
+//! wrong. `docs/design/development-record.md` in the repository is the index that maps every one
 //! of them to what it was, alongside the decisions that were reversed and the negative
 //! results worth not repeating. Plan slice identifiers (`S1`–`S12`) appear beside many of
 //! them and are defined in the same place.

@@ -43,7 +43,7 @@ categories = ["cryptography", "parser-implementations"]
 # which were ~666 KB raw and two thirds of the .crate. A consumer therefore cannot re-run
 # the fixture suite from the tarball alone; the repository is where the evidence is checked,
 # and CHANGELOG.md is where the external readers' verdicts are recorded. That is a
-# reversal of the earlier posture -- see docs/development-record.md section 2.4.
+# reversal of the earlier posture -- see docs/design/development-record.md section 2.4.
 include = [
     "src/**/*.rs",
     "build.rs",

@@ -11,7 +11,7 @@ for a reader who has just run `cargo add`. That repository is archived and holds
 
 What survives that move is in two places, deliberately:
 
-- **[`docs/development-record.md`](docs/development-record.md)** — the decisions. What was
+- **[`docs/design/development-record.md`](docs/design/development-record.md)** — the decisions. What was
   settled and then reversed, what was tried and did not work, what was closed without being
   finished, the bugs found in the upstream implementations this crate ports from, and the
   index that makes the archived repository's issue numbers resolvable.
