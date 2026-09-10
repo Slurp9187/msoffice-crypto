@@ -1,0 +1,357 @@
+name: CI
+
+on:
+  # Every branch, not just main: work here lands on feature branches that often have
+  # no PR open yet, and a push is the only signal there. The cost is a duplicate run
+  # once a PR does exist. Narrow to `[main]` if that noise outweighs the earlier
+  # feedback. Same shape as odf-crypto's workflow, deliberately.
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Supersede a running check when the same ref is pushed again.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Nothing is reused between CI runs, so incremental artifacts are written and then
+  # thrown away.
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+
+# `-D warnings` is deliberately NOT set as a global RUSTFLAGS here. RUSTFLAGS reaches
+# every crate Cargo compiles, dependencies included, so a new warning in quick-xml or
+# cfb would fail this workflow over code nobody here can edit. Passing `-- -D warnings`
+# to clippy instead applies the denial to this crate alone, which is the intent.
+#
+# What is NOT here, and why: the two shipping-product legs of the four-reader acceptance
+# gate (GH #8) -- Microsoft Office over COM and LibreOffice over UNO. They need the
+# applications installed and an interactive desktop session, which no hosted runner has.
+# They are the local gate: `python tools/acceptance_gate.py` on Windows, before a change
+# to the encrypt path merges, with the verdicts recorded in CHANGELOG.md against the
+# exact artifact a test writes. The gate's two independent-implementation legs DO run
+# here, in `acceptance-gate` below.
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: detect-only
+            flags: --no-default-features
+          - name: crypto-ops
+            flags: --no-default-features --features crypto-ops
+          - name: legacy-binary
+            flags: --no-default-features --features legacy-binary
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      # --all-targets compiles the library BOTH as a plain lib (cfg(test) off) and as a
+      # test harness (cfg(test) on). The plain-lib pass is what catches an item that has
+      # no non-test caller left -- which matters here more than usual: four pieces of
+      # the encrypt path are gated `cfg(all(test, feature = "crypto-ops"))` until GH #6
+      # step 6 flips them, and an `allow(dead_code)` would hide the flip being missed.
+      # It is also the pass that enforces the panic lints every file-parsing module
+      # denies on itself: src/classify.rs, src/binary_office.rs, and under
+      # legacy-binary the eight rc4*/xor_obfuscation/legacy_container/word97/excel97/
+      # powerpoint97 modules. Adding one is not free -- the lint covers a file's own
+      # #[cfg(test)] module too -- so each of those carries an inner allow for its
+      # tests, and this pass is what would catch the header being dropped.
+      - run: cargo clippy --locked --all-targets ${{ matrix.flags }} -- -D warnings
+
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `classify_tests` and the detection half of the suite only; every
+          # cipher-touching test lives behind the feature and compiles out here.
+          - name: detect-only
+            flags: --no-default-features
+          - name: crypto-ops
+            flags: --no-default-features --features crypto-ops
+          # The 97-2003 binary formats (GH #4): the byte-identity suite against
+          # msoffcrypto-tool's recorded digests and the hostile-input suite over tampered
+          # fixtures. A superset of crypto-ops, so the agile and standard suites run
+          # here a third time; that is cheaper than a configuration nobody runs.
+          - name: legacy-binary
+            flags: --no-default-features --features legacy-binary
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      # The fixtures under tests/fixtures/ are read through CARGO_MANIFEST_DIR and are
+      # committed, so nothing here needs Office, LibreOffice or msoffcrypto-tool -- those
+      # generated the fixtures, they do not read them at test time. A missing fixture
+      # fails the suite rather than skipping; that is the point of committing them.
+      - run: cargo test --locked ${{ matrix.flags }}
+
+  acceptance-gate:
+    # The half of GH #8's four-reader gate a Linux runner can hold: the file
+    # `encrypt_ooxml` writes must decrypt to tests/fixtures/plain.docx BYTE FOR BYTE in
+    # two implementations that share no code with this crate -- msoffcrypto-tool (MIT,
+    # Python) through its CLI, and office-crypto (MIT, Rust) through
+    # examples/office_crypto_check.rs -- its `dataIntegrity` HMAC must verify under
+    # msoffcrypto's `verify_integrity=True`, and a wrong password must not yield the
+    # plaintext. The same script runs Word/Excel/PowerPoint and LibreOffice locally; here
+    # those two readers are deselected, and the script reports them NOT RUN rather than
+    # passed.
+    #
+    # The HMAC clause is not decoration, and it is not free. Review of the PR that added
+    # this job measured the gap: an artifact whose `encryptedHmacKey` and
+    # `encryptedHmacValue` were replaced by same-length base64 'A' runs -- container,
+    # stream lengths and ciphertext untouched -- was `GATE: PASS`, exit 0, on this exact
+    # reader set, because the CLI leaves `verify_integrity` off and office-crypto checks
+    # nothing at all. `dataIntegrity` was then guarded only by this crate agreeing with
+    # itself, so a symmetric error in the HMAC derivation passed every job here.
+    #
+    # The two mutation steps below are what makes the whole job non-vacuous: each mutates
+    # the artifact, requires `GATE: FAIL`, and turns green only then (`--expect-fail`
+    # inverts the exit code). Delete the leg's integrity check and the corrupt-integrity
+    # step reports `UNEXPECTED PASS` and exits 1 -- measured, CHANGELOG 2026-09-05
+    # § *Review*.
+    #
+    # The artifact is written by THIS job, into $RUNNER_TEMP, by the test that exists to
+    # write it -- not taken from the `test` job, and not from wherever the system temp
+    # directory points on a shared runner.
+    name: acceptance gate (independent readers)
+    runs-on: ubuntu-latest
+    env:
+      GATE_ARGS: >-
+        --expect-package tests/fixtures/plain.docx
+        --expect-text-file tests/fixtures/plain_content.txt
+        --readers msoffcrypto,office-crypto
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: acceptance-gate
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # olefile arrives with msoffcrypto-tool; the mutation steps below need it.
+      - run: python -m pip install --disable-pip-version-check msoffcrypto-tool==6.0.0
+      - run: cargo test --locked --no-default-features --features crypto-ops encrypt_ooxml_writes_the_artifact
+        env:
+          MSOFFICE_CRYPTO_ARTIFACT_DIR: ${{ runner.temp }}
+      - name: the gate itself
+        run: python tools/acceptance_gate.py "$RUNNER_TEMP/msoffice_crypto_encrypt_ooxml.docx" $GATE_ARGS
+      - name: negative control -- one flipped ciphertext bit must fail the gate
+        run: python tools/acceptance_gate.py "$RUNNER_TEMP/msoffice_crypto_encrypt_ooxml.docx" $GATE_ARGS --tamper --expect-fail
+      - name: negative control -- blanked dataIntegrity blobs must fail the gate
+        run: python tools/acceptance_gate.py "$RUNNER_TEMP/msoffice_crypto_encrypt_ooxml.docx" $GATE_ARGS --corrupt-integrity --expect-fail
+      # The local gate is a documented command a human types, and it used to name the
+      # shared system temp directory -- where EVERY session's `cargo test` writes this
+      # same file name, so the gate could measure another build's artifact and be
+      # recorded as evidence for this one. That happened during #8 (CHANGELOG
+      # 2026-09-05). The env var above is the fix; this step is why the documents cannot
+      # drift back off it.
+      - name: the documented local gate must name a private artifact directory
+        run: |
+          for f in README.md CLAUDE.md; do
+            if ! grep -q 'acceptance_gate.py' "$f"; then
+              echo "$f no longer documents the gate command -- move this check to wherever it went"; exit 1
+            fi
+            if grep -n 'TEMP[^ ]*msoffice_crypto_encrypt_ooxml' "$f"; then
+              echo "$f gates the shared system temp path; use MSOFFICE_CRYPTO_ARTIFACT_DIR, as this job does"; exit 1
+            fi
+            if ! grep -q 'MSOFFICE_CRYPTO_ARTIFACT_DIR' "$f"; then
+              echo "$f documents the gate without naming MSOFFICE_CRYPTO_ARTIFACT_DIR"; exit 1
+            fi
+          done
+
+  no-cipher-in-detection:
+    # The claim `cargo add msoffice-crypto` makes with default features: detecting
+    # encryption costs a CFB reader and an XML parser and no cryptography at all. This
+    # checks the PROPERTY -- no cipher, hash, MAC, RNG or key-wrapping crate in the
+    # graph -- rather than a crate count, because the count differs by platform (libc
+    # arrives via getrandom on unix) and a number is not what a consumer is promised.
+    name: detection build links no cipher
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          cargo tree --locked -e normal --prefix none --no-default-features > graph.txt
+          echo "detection-build graph:"; cat graph.txt
+          if grep -E '^(aes|cbc|ecb|sha1|sha2|hmac|subtle|rand|rand_core|getrandom|chacha20|secure-gate|zeroize|base64|rc4|md-5) ' graph.txt; then
+            echo "::error::a cipher, hash, MAC, RNG or key-wrapping crate is in the detection build"
+            exit 1
+          fi
+      # The second property, from GH #4: the RC4 stream cipher and MD5 exist for the
+      # 97-2003 binary formats alone, and a consumer of `crypto-ops` -- modern Office --
+      # never links them. `legacy-binary` is the only feature that may.
+      - run: |
+          cargo tree --locked -e normal --prefix none --no-default-features --features crypto-ops > graph-crypto-ops.txt
+          if grep -E '^(rc4|md-5) ' graph-crypto-ops.txt; then
+            echo "::error::rc4 or md-5 is in the crypto-ops build; they belong to legacy-binary alone"
+            exit 1
+          fi
+          cargo tree --locked -e normal --prefix none --no-default-features --features legacy-binary > graph-legacy.txt
+          if ! grep -qE '^rc4 ' graph-legacy.txt || ! grep -qE '^md-5 ' graph-legacy.txt; then
+            echo "::error::the legacy-binary build must link rc4 and md-5; the property check above would be vacuous"
+            exit 1
+          fi
+
+  prose:
+    # Reads README.md, CLAUDE.md, SECURITY.md, docs/** and the comment blocks in
+    # Cargo.toml, deny.toml and ci.yml back against the tree. GH #25 did this for the
+    # rustdoc and corrected 58 claims, but its scope stopped at src/ -- which is how a dead
+    # link in the plan's *provenance* section, the one that governs what may be ported and
+    # under which licence, survived that whole audit from 2026-09-04 to 2026-09-06.
+    #
+    # Checks: relative links resolve; `file.rs:NNN` citations are in range; backticked
+    # `module::item` paths exist; CLAUDE.md's Layout block names every src/*.rs and only
+    # files that exist; MSRV and version figures agree with Cargo.toml.
+    #
+    # The upstream-citation check needs the clones CLAUDE.md § Provenance names, which live
+    # outside the repository and which no runner has. It SKIPS rather than fails when they
+    # are absent, so this runs unchanged here and does more on a maintainer's machine --
+    # `docs/RELEASING.md` § 1 is where the fuller invocation lives.
+    #
+    # No Rust toolchain: the source files are read as text.
+    name: prose matches the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: python tools/audit_claims.py
+
+  supply-chain:
+    # The dependency half of the licence discipline CLAUDE.md calls load-bearing. The
+    # provenance table there is about source we might *port* and is a rule about reading,
+    # so no job can check it; this checks the half that is checkable -- what arrives in the
+    # graph -- and it was unenforced until now.
+    #
+    # Four checks in one: `licenses` against the allow-list in deny.toml, `advisories`
+    # against RustSec (with `yanked = "deny"`, since every build here is `--locked`),
+    # `bans` for wildcard requirements, and `sources` to assert everything comes from
+    # crates.io -- which a crate about to be published needs anyway, because `cargo publish`
+    # refuses a git dependency outright.
+    name: licences and advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # `--all-features`: optional dependencies are the point. `rc4`, `md-5` and
+          # `secure-gate` are all behind features and all reach a consumer who turns one
+          # on, so a default-features check would be blind to exactly the crates that
+          # carry key material.
+          arguments: --all-features
+          command: check licenses advisories bans sources
+
+  msrv:
+    # Keep in step with `rust-version` in Cargo.toml; bump both together.
+    name: MSRV 1.85
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      # --locked matters most here: without it Cargo may resolve a dependency release
+      # that raised its own MSRV, and the job would fail for a reason that has nothing
+      # to do with this crate.
+      #
+      # Build, not test: dev-dependencies are free to require a newer toolchain than the
+      # library's own MSRV promise. `legacy-binary` is the superset of every feature, so
+      # one build covers all three configurations' library code.
+      - run: cargo build --locked --no-default-features --features legacy-binary
+
+  docs:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: docs
+      # Mirrors [package.metadata.docs.rs] all-features = true, so a broken link is
+      # caught here rather than on the docs.rs build after publishing.
+      - run: cargo doc --locked --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      # And the detection-only build, which the pass above cannot see: gating
+      # OoXmlCryptoError behind crypto-ops left one public doc in classify.rs linking a
+      # type that no longer exists without the feature, and --all-features rendered it
+      # without complaint. This is the configuration a default-feature consumer reads.
+      - run: cargo doc --locked --no-default-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  docsrs:
+    name: docs.rs build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # docs.rs builds on nightly with --cfg docsrs. The `docs` job above uses stable
+      # and does not pass that cfg, so it cannot see anything that only breaks under it.
+      # odf-crypto shipped a release whose docs.rs build was broken while every stable
+      # CI job stayed green; this job is that lesson.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: docsrs
+      - run: cargo doc --locked --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
+
+  package:
+    name: cargo package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package
+      # Guards two things at once.
+      #
+      # The `include` allowlist in Cargo.toml: the verification build compiles the
+      # unpacked tarball, so a file the crate needs but the allowlist omits fails here
+      # instead of after publishing. Run with legacy-binary so the tarball is checked
+      # against the largest source set.
+      #
+      # And --locked catches a stale Cargo.lock, which `cargo package` refuses.
+      - run: cargo package --locked --features legacy-binary
+
+# The generators under tools/ are deliberately NOT run here. gen_agile_fixtures.py
+# drives msoffcrypto-tool and gen_plain_binary_fixtures.ps1 drives Microsoft Office
+# over COM; both are developer tooling that produced committed fixtures, and no Rust
+# test invokes them. The fixtures they produced are what the suite reads. Of the gate's
+# drivers, office_com_check.ps1 and libreoffice_uno_check.py are likewise local-only;
+# acceptance_gate.py itself runs above with the two legs a runner can hold.
