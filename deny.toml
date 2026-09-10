@@ -1,0 +1,134 @@
+# cargo-deny: the dependency half of this project's licence discipline, enforced.
+#
+# CLAUDE.md calls licence discipline load-bearing and encodes it in a table, but that table
+# is about *source we might port* -- herumi is BSD-3 and portable, LibreOffice is MPL-2.0
+# and read-only, CoreOffice is Apache-2.0 and not to be opened. Nothing there is checkable
+# by a machine, because it is a rule about reading.
+#
+# This file covers the other half, which is checkable: what arrives in the dependency
+# graph. The two are separate concerns and this one has been unenforced until now.
+#
+#   cargo deny check
+#
+# Runs in CI on every push. `graph.all-features` is on because the licence question is
+# about every crate a consumer could pull, not the ones the default build happens to need
+# -- `rc4`, `md-5` and `secure-gate` are all optional and all in scope.
+
+[graph]
+all-features = true
+
+# Answer the question a *consumer* is asking. `office-crypto` is a dev-dependency and a
+# differential oracle: it is compiled here, against fixtures this repository chose, and it
+# is never in anything a consumer builds. Two advisories reach the graph through it alone
+# -- RUSTSEC-2024-0388 (`derivative` unmaintained) and, until this crate moved to
+# quick-xml 0.41, a second copy of quick-xml 0.38 carrying RUSTSEC-2026-0194/0195.
+#
+# The alternative was an `ignore` list, and it is worse: an ignore is keyed by advisory ID
+# and would silence that ID *everywhere*, including a future reappearance in the normal
+# graph, which is the one place it would matter. Excluding dev dependencies drops the
+# noise without ever hiding a finding about shipped code.
+#
+# The cost is that a dev-dependency advisory goes unreported, so a maintainer should
+# occasionally run the wider check by hand:
+#
+#   cargo deny --all-features --exclude-dev=false check advisories
+#
+# and treat what it finds as a note about this machine, not about the crate.
+exclude-dev = true
+# Empty means "every target". A dependency whose licence is only acceptable on some
+# platforms is not acceptable, and this crate is portable Rust with no per-target deps.
+targets = []
+
+[licenses]
+version = 2
+
+# This crate is offered as `MIT OR Apache-2.0`, and the point of the dual offer is that a
+# downstream consumer may take *either*. A dependency licensed Apache-2.0-only does not
+# relicense this crate, but it does mean the consumer who chose MIT still has to satisfy
+# Apache-2.0 for that dependency -- so the offer stops being the clean either/or it reads
+# as. Everything below is either permissive-with-notice or public-domain-equivalent, and
+# every one of them can travel under both halves.
+#
+# Anything absent is denied: under `version = 2` this list is exhaustive, not advisory.
+# The absences that matter, and are deliberate:
+#
+#   MPL-2.0    file-level copyleft. It drags the file it lands in, which is exactly the
+#              reason `oox/source/crypto/` is read-only rather than portable. A dependency
+#              would not land in a file here, but taking one would make the prose above
+#              read as a rule with an exception, and there is no MPL crate this needs.
+#   GPL/LGPL/AGPL  incompatible with a permissive offer in the ways everyone already knows.
+#   BUSL, SSPL, Elastic, and the other source-available licences: not open source, and a
+#              consumer's legal review would stop on them.
+#
+# Adding one is a deliberate act with a comment, not a silent edit.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    # The RustCrypto and rand stacks ship the LLVM exception on their Apache half.
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    # herumi/msoffice is BSD-3 and so is `excelize`; the licence is in the graph's
+    # vocabulary already, and NOTICE carries the attribution the ported code requires.
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    # Public-domain-equivalent. Present in the graph through the usual small leaves.
+    "Unlicense",
+    "CC0-1.0",
+    # `unicode-ident`, which quick-xml's ecosystem pulls. Permissive, and the successor to
+    # the old Unicode-DFS-2016 that cargo-deny used to have to special-case.
+    "Unicode-3.0",
+]
+
+# The allow-list above is a **policy**, not an inventory of today's graph, so an entry that
+# nothing currently uses is the normal case and not a finding. Without this, cargo-deny
+# reports five `license-not-encountered` warnings and the honest fix -- trimming the list to
+# exactly what is in the graph -- would mean a dependency bump that legitimately introduces
+# BSD-2-Clause fails the build until someone re-adds a licence that was always acceptable.
+unused-allowed-license = "allow"
+
+# 0.93 is cargo-deny's default and is the right place for it: lower starts accepting
+# licence texts that merely resemble a known one, which for a crate whose whole licence
+# posture is written down is the wrong direction to be sloppy in.
+confidence-threshold = 0.93
+
+# No exceptions today. An entry here is a crate allowed a licence the list above denies,
+# and it needs a comment saying why the offer above survives it.
+exceptions = []
+
+[advisories]
+version = 2
+
+# A yanked dependency fails rather than warns. This crate builds with `--locked`
+# everywhere, so the lockfile is the thing under test, and a yank is upstream saying the
+# pinned version should not be used -- which for a crate that handles key material is not
+# a warning-level fact. The fix is a lockfile bump, which is a one-line change.
+yanked = "deny"
+
+# Empty on purpose. An ignored advisory is a decision to ship a known flaw, and it belongs
+# here with the ID, the date and the reason it does not reach this crate's use of the
+# dependency -- not as a silent default.
+ignore = []
+
+[bans]
+# Warn, not deny. Duplicate versions are a size and compile-time problem rather than a
+# correctness one, and the dev graph legitimately carries more than one `rand` line while
+# `office-crypto` is a differential oracle. The normal graph is what matters and CI's
+# `no-cipher-in-detection` job already asserts its shape directly.
+multiple-versions = "warn"
+wildcards = "deny"
+
+# The property "the detection build links no cryptography, and the crypto-ops build links
+# neither rc4 nor md-5" is NOT expressed here, deliberately. It is per-feature-set, and
+# `graph.all-features` above makes this file blind to it by design -- every optional crate
+# is in scope for the licence question. That property has its own CI job, which greps
+# `cargo tree` under each feature configuration, and it stays there.
+deny = []
+
+[sources]
+# Everything comes from crates.io. A git dependency in a crate that is about to be
+# published would also block `cargo publish` outright, so this fails earlier and says why.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

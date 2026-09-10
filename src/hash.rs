@@ -1,0 +1,279 @@
+//! Everything this crate computes with the hash algorithm a file names.
+//!
+//! An agile file names *two* hashes and they drive disjoint halves of the algorithm:
+//! `keyData/@hashAlgorithm` governs the per-segment package IVs, the two `dataIntegrity`
+//! IVs and the package HMAC, while `p:encryptedKey/@hashAlgorithm` governs the spin hash,
+//! the block-key derivation and the password verifier.
+//!
+//! [MS-OFFCRYPTO] §2.3.4.10 tells a *writer* to make them equal — the
+//! `PasswordKeyEncryptor`'s "hashing algorithm specified MUST be the same as the hashing
+//! algorithm specified for the Encryption.keyData element" — and Office obliges, which is
+//! what hides a crossed-element bug in any round trip against your own writer (herumi
+//! `include/encode.hpp:146-147` sets both from one pair). A *reader* is handed bytes, not
+//! a promise: a file whose two elements disagree is non-conforming and still has to
+//! decrypt under the hash each half was actually written with, because assuming they
+//! match means silently using the wrong one on whichever half was guessed. The two
+//! callers therefore pass their own algorithm in; nothing here decides which is in force,
+//! and nothing here refuses the disagreement.
+//!
+//! Sources for the derivations: herumi/msoffice (BSD-3)
+//! `include/crypto_util.hpp:432-452`, `include/decode.hpp:88-101`; msoffcrypto-tool (MIT)
+//! `msoffcrypto/method/ecma376_agile.py:169-201`. Behaviour cross-checked against
+//! LibreOffice `oox/source/crypto/AgileEngine.cxx:194-232, 252-262` (MPL-2.0, read-only —
+//! no expression from it is reproduced here).
+//!
+//! **Why this is its own module.** The four operations below used to be private to
+//! `integrity`, whose one-sentence purpose is verifying the `dataIntegrity` HMAC. Once
+//! the password path needed the same dispatch (issue #11), leaving them there would have
+//! given that module a second job and forced `agile` to import its hashing from the
+//! integrity checker. The enum itself stays in `classify`, which must *report* the hash
+//! in a build with no cipher crate at all; this module is the `crypto-ops` half.
+
+use crate::error::OoXmlCryptoError;
+use hmac::{Hmac, Mac};
+use sha1::Sha1;
+use sha2::{Digest, Sha256, Sha384, Sha512};
+
+/// The hash named by `keyData/@hashAlgorithm` or `p:encryptedKey/@hashAlgorithm`.
+///
+/// Declared in `classify` — the detection build has to *report* it, and a second copy
+/// here would be a second spelling table to keep in step. Re-exported rather than
+/// re-declared so every module keeps one import path.
+pub(crate) use crate::classify::HashAlgorithm;
+
+impl HashAlgorithm {
+    /// The unhyphenated ECMA-376 spelling — what Office writes, and what this crate
+    /// prints in errors. `HashAlgorithm::parse` also accepts the hyphenated form
+    /// (`SHA-1`), so a file that used it is reported back in the canonical spelling
+    /// rather than in its own.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Sha1 => "SHA1",
+            Self::Sha256 => "SHA256",
+            Self::Sha384 => "SHA384",
+            Self::Sha512 => "SHA512",
+        }
+    }
+
+    /// Digest length in bytes. A `hashSize` attribute is checked against this before it
+    /// is trusted as a truncation length, and `keyBits / 8` before it is trusted as one.
+    pub(crate) fn digest_len(self) -> usize {
+        match self {
+            Self::Sha1 => 20,
+            Self::Sha256 => 32,
+            Self::Sha384 => 48,
+            Self::Sha512 => 64,
+        }
+    }
+
+    /// `H(data)`.
+    ///
+    /// One operand, used by the password verifier over the *whole* decrypted
+    /// `encryptedVerifierHashInput` (herumi `include/decode.hpp:97-98`).
+    pub(crate) fn digest(self, data: &[u8]) -> Vec<u8> {
+        self.digest_two(data, &[])
+    }
+
+    /// `H(first || second)` — order matters, and reversing the two is a silently-wrong
+    /// key or IV rather than an error (herumi `include/crypto_util.hpp:438` for the IV, `:449` for the key of the same shape).
+    ///
+    /// Every hash this format performs has this shape, which is why it takes two slices
+    /// rather than an 8-byte block key: the two `dataIntegrity` IVs and the three block
+    /// keys append an 8-byte constant, the package IVs a 4-byte little-endian segment
+    /// index, the spin hash's first round the UTF-16LE password and its later rounds the
+    /// previous digest.
+    pub(crate) fn digest_two(self, first: &[u8], second: &[u8]) -> Vec<u8> {
+        macro_rules! run {
+            ($d:ty) => {{
+                let mut h = <$d>::new();
+                h.update(first);
+                h.update(second);
+                h.finalize().to_vec()
+            }};
+        }
+        match self {
+            Self::Sha1 => run!(Sha1),
+            Self::Sha256 => run!(Sha256),
+            Self::Sha384 => run!(Sha384),
+            Self::Sha512 => run!(Sha512),
+        }
+    }
+
+    pub(crate) fn hmac(self, key: &[u8], message: &[u8]) -> Vec<u8> {
+        macro_rules! run {
+            ($d:ty) => {{
+                // HMAC accepts a key of any length, so `new_from_slice` cannot fail
+                // here; the `expect` documents that rather than hiding a real case.
+                let mut mac =
+                    <Hmac<$d>>::new_from_slice(key).expect("HMAC accepts keys of any length");
+                mac.update(message);
+                mac.finalize().into_bytes().to_vec()
+            }};
+        }
+        match self {
+            Self::Sha1 => run!(Sha1),
+            Self::Sha256 => run!(Sha256),
+            Self::Sha384 => run!(Sha384),
+            Self::Sha512 => run!(Sha512),
+        }
+    }
+}
+
+/// `H(keyData.saltValue || suffix)` truncated to `keyData/@blockSize`.
+///
+/// Every IV in the agile format that is seeded by `<keyData>` comes from this one
+/// derivation, and both of its consumers live outside this module: the two
+/// `dataIntegrity` blob IVs (suffix = an 8-byte block key) and [`crate::segments`]'s
+/// per-segment package IVs (suffix = the little-endian segment index), which both the
+/// agile decrypt and encrypt paths run through since plan D4. They are the same shape and
+/// take their hash from the same file attribute, so they share the function rather than
+/// each spelling it out — a package IV that hardcoded SHA-512 while the integrity path
+/// honoured the file is precisely how a mixed-algorithm document could be reported
+/// `Verified` and then decrypted with the wrong IVs.
+///
+/// Truncation only. herumi's shared `normalizeKey` would 0x36-pad a digest shorter than
+/// `block_size` (`include/crypto_util.hpp:38-41`), but every supported hash produces at
+/// least 20 bytes and `block_size` is pinned to 16 by both callers, so that branch is
+/// unreachable here — and a file that reached it would be one we should reject rather
+/// than pad.
+pub(crate) fn derive_iv(
+    hash: HashAlgorithm,
+    salt: &[u8],
+    suffix: &[u8],
+    block_size: usize,
+) -> Result<Vec<u8>, OoXmlCryptoError> {
+    let digest = hash.digest_two(salt, suffix);
+    if digest.len() < block_size {
+        return Err(OoXmlCryptoError::BadParameters(format!(
+            "keyData blockSize {} exceeds the {} digest length {}",
+            block_size,
+            hash.name(),
+            digest.len()
+        )));
+    }
+    Ok(fit_iv(&digest, block_size))
+}
+
+/// [MS-OFFCRYPTO] §2.3.4.12 last step: an IV shorter than `blockSize` is padded with
+/// `0x36`; a longer one is truncated.
+///
+/// Package and `dataIntegrity` IVs go through [`derive_iv`] first, whose digest is
+/// always longer than the AES block, so they only ever truncate. The password-encryptor
+/// blobs use the salt itself as the IV ("if a blockKey is not provided", same section),
+/// and `saltSize` is 1..=65 536 — a short salt used to fail inside AES as a 16-byte-IV
+/// mismatch rather than being padded the way the spec writes.
+pub(crate) fn fit_iv(bytes: &[u8], block_size: usize) -> Vec<u8> {
+    if bytes.len() >= block_size {
+        bytes[..block_size].to_vec()
+    } else {
+        let mut iv = Vec::with_capacity(block_size);
+        iv.extend_from_slice(bytes);
+        iv.resize(block_size, 0x36);
+        iv
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each variant must actually run the algorithm it names. A `match` arm that fell
+    /// through to the wrong hasher would be invisible to every other test in the crate
+    /// as long as writer and reader agreed on it — which, this crate being both, they
+    /// would.
+    #[test]
+    fn each_variant_runs_the_algorithm_it_names() {
+        // Known-answer vectors for the empty string, from FIPS 180-4.
+        for (hash, want) in [
+            (
+                HashAlgorithm::Sha1,
+                "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            ),
+            (
+                HashAlgorithm::Sha256,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                HashAlgorithm::Sha384,
+                "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da\
+                 274edebfe76f65fbd51ad2f14898b95b",
+            ),
+            (
+                HashAlgorithm::Sha512,
+                "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
+                 47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+            ),
+        ] {
+            let got: String = hash
+                .digest(b"")
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            assert_eq!(got, want.replace(' ', ""), "{hash:?}");
+            assert_eq!(hash.digest_len(), got.len() / 2);
+        }
+    }
+
+    /// `digest` is `digest_two` with an empty tail, and the split must not change the
+    /// bytes: the verifier hashes one operand, every other site hashes two.
+    #[test]
+    fn digest_is_digest_two_with_nothing_appended() {
+        for hash in [
+            HashAlgorithm::Sha1,
+            HashAlgorithm::Sha256,
+            HashAlgorithm::Sha384,
+            HashAlgorithm::Sha512,
+        ] {
+            assert_eq!(hash.digest(b"abc"), hash.digest_two(b"a", b"bc"));
+            assert_ne!(hash.digest_two(b"a", b"bc"), hash.digest_two(b"bc", b"a"));
+        }
+    }
+
+    /// [MS-OFFCRYPTO] §2.3.4.12 step 3, both directions: short pads with `0x36`, long
+    /// truncates, exact is left alone.
+    ///
+    /// The pad byte is `0x36` and not zero. A zero pad is the same length and the same
+    /// shape, decrypts to rubbish, and — on a file with no `<dataIntegrity>` element —
+    /// produces no error at all, so the constant is the whole content of this test.
+    #[test]
+    fn fit_iv_pads_short_with_0x36_and_truncates_long() {
+        // Short: eight salt bytes then eight pad bytes.
+        let mut want = vec![0x11u8; 8];
+        want.resize(16, 0x36);
+        assert_eq!(fit_iv(&[0x11u8; 8], 16), want);
+
+        // Long: the first blockSize bytes, nothing appended.
+        assert_eq!(fit_iv(&[0x22u8; 32], 16), vec![0x22u8; 16]);
+
+        // Exact: identity, which is every file Office writes.
+        assert_eq!(fit_iv(&[0x33u8; 16], 16), vec![0x33u8; 16]);
+
+        // A single byte is still a whole IV, and every byte after the first is the pad.
+        assert_eq!(
+            fit_iv(&[0x44u8], 16),
+            [&[0x44u8][..], &[0x36u8; 15][..]].concat()
+        );
+    }
+
+    /// `derive_iv` truncates and never reaches [`fit_iv`]'s pad branch: every hash this
+    /// crate accepts produces at least 20 bytes and `blockSize` is pinned to 16, so a
+    /// `blockSize` past the digest is refused above rather than padded. Stated as a test
+    /// so that wiring `fit_iv` into the salt-as-IV path cannot quietly turn this one into
+    /// a pad as well — the two cases are the same spec sentence and different code.
+    #[test]
+    fn derive_iv_truncates_and_refuses_rather_than_padding() {
+        for hash in [
+            HashAlgorithm::Sha1,
+            HashAlgorithm::Sha256,
+            HashAlgorithm::Sha384,
+            HashAlgorithm::Sha512,
+        ] {
+            let iv = derive_iv(hash, b"salt", b"\x00\x00\x00\x00", 16).expect("16 <= 20");
+            assert_eq!(iv, hash.digest_two(b"salt", b"\x00\x00\x00\x00")[..16]);
+            // One byte past the digest is an error, not a 0x36 tail.
+            let err = derive_iv(hash, b"salt", b"", hash.digest_len() + 1)
+                .expect_err("blockSize past the digest must be refused");
+            assert!(matches!(err, OoXmlCryptoError::BadParameters(_)));
+        }
+    }
+}

@@ -1,0 +1,29 @@
+/target
+
+# Secondary CARGO_TARGET_DIRs. Concurrent agents share the primary `target/`
+# (cargo's own lock serialises them) and use a separate one for the MSRV
+# toolchain so a 1.85 build does not evict the stable artifacts.
+/target-msrv
+
+# Worktrees the agent harness creates for parallel work. They contain full
+# checkouts, so an unguarded `git add -A` from this directory would commit a
+# copy of the repository into itself.
+/.claude/worktrees/
+
+# Office lock files. Word, Excel and PowerPoint write `~$<name>` beside a file while it
+# is open, and it carries the user name of whoever holds it -- the very thing the fixture
+# metadata is scrubbed of, appearing in tests/fixtures/ exactly while that scrubbing is
+# being done. The tarball allowlist globs `tests/fixtures/*` on purpose, so without this
+# `cargo package` picks one up: verified with `cargo package --list`.
+~$*
+
+# The [MS-OFFCRYPTO] specification PDF, which this crate is written against and cites
+# throughout. Microsoft publishes it under the Open Specification Promise -- a patent
+# promise that grants no redistribution right -- so the document is read here and never
+# committed. 3.8 MB of someone else's copyright is also two thirds of what the whole
+# repository weighs.
+#
+# This lived in .git/info/exclude, which is per-clone and does not travel: a fresh clone
+# had no such rule, so the first `git add -A` beside a downloaded copy would have committed
+# it. Ignore rules that protect the repository belong in the repository.
+MS-OFFCRYPTO.pdf
