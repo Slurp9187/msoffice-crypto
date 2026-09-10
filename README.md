@@ -140,15 +140,17 @@ repository with its generator beside it, so the evidence can be re-run rather th
 faith — `git clone` and `cargo test`, not a screenshot in a README. Where an encrypt path
 exists, the bar is that real Microsoft Word opens what it wrote
 and that independent implementations recover the same bytes — not that it round-trips
-against itself. `CHANGELOG.md` records what was run and what each reader answered, against
-the artifact's hash; the guard-deletion proof behind each individual check — delete it, watch
+against itself. `CHANGELOG.md` **in the repository** — it is not part of the published
+crate — records what was run and what each reader answered, against the artifact's hash; the guard-deletion proof behind each individual check — delete it, watch
 the named test fail, restore — is in the archived development record, and the practice is
 `CLAUDE.md` § *Evidence over intent*.
 
 Points 3 and 5 are checkable in one command each rather than taken on trust:
 `cargo tree --no-default-features` is the dependency claim, and
-[`CHANGELOG.md`](CHANGELOG.md) carries the acceptance gate's verdict verbatim, each reader
-named and versioned, including how each one refuses a wrong password.
+[`CHANGELOG.md`](https://github.com/Slurp9187/msoffice-crypto/blob/main/CHANGELOG.md)
+carries the acceptance gate's verdict verbatim, each reader named and versioned, including
+how each one refuses a wrong password. It lives in the repository rather than the crate, so
+a reader who has only the `.crate` should follow that link.
 
 ## Scope
 
@@ -229,7 +231,8 @@ Two properties are enforced rather than claimed: the crate contains no `unsafe`
 `cargo deny` runs over licences, advisories, bans and sources on every push. The first thing
 that job found was a reachable quadratic-time denial of service in this crate's XML
 parser — `RUSTSEC-2026-0194`, remediated by the `quick-xml` floor in `Cargo.toml`, and
-recorded under *Security posture* in [`CHANGELOG.md`](CHANGELOG.md).
+recorded under *Security posture* in
+[`CHANGELOG.md`](https://github.com/Slurp9187/msoffice-crypto/blob/main/CHANGELOG.md).
 
 ## Sibling
 

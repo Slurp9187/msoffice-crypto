@@ -272,6 +272,49 @@ jobs:
           arguments: --all-features
           command: check licenses advisories bans sources
 
+  packaging-invariants:
+    # Two properties that no test can see, both found untested by the 2026-09-10
+    # pre-publish audit. Each is asserted here because the failure is SILENT everywhere
+    # else -- which is precisely what makes them worth a job.
+    #
+    # 1. `build.rs` must be in the `include` allowlist. Drop that one line and
+    #    `cargo package` does NOT fail: it emits a *warning*, rewrites the packaged
+    #    manifest to `build = false`, and produces a tarball whose `cargo test` output is
+    #    byte-identical to a correct one -- because with no build script the
+    #    `fixture_corpus` cfg is never set, every corpus test is ignored, and a correct
+    #    tarball ignores them too (the corpus is not shipped). Correct operation and total
+    #    absence are indistinguishable from outside. Verified by mutation, 2026-09-10.
+    #
+    # 2. `rc4` must keep its `zeroize` feature. It wipes the 256-byte key schedule on drop,
+    #    and the schedule is a function of the block key -- so losing it leaves key material
+    #    behind. Deleting the feature leaves the entire suite green: the property has no
+    #    test, and cannot easily have one, since it is about memory after a drop.
+    name: packaging invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build.rs is in the include allowlist
+        run: |
+          cargo package --locked --list > files.txt
+          if ! grep -qx 'build.rs' files.txt; then
+            echo "::error::build.rs is missing from Cargo.toml's include allowlist."
+            echo "Without it cargo sets build = false in the packaged manifest and every"
+            echo "corpus test is silently ignored -- a tarball indistinguishable from correct."
+            exit 1
+          fi
+          echo "build.rs ships"
+      - name: rc4 keeps its zeroize feature
+        run: |
+          cargo tree --locked -e features --no-default-features --features legacy-binary > feats.txt
+          if ! grep -q 'rc4 feature "zeroize"' feats.txt; then
+            echo "::error::the rc4 dependency has lost its zeroize feature; the key schedule"
+            echo "is a function of the block key, so it would survive the drop in memory."
+            exit 1
+          fi
+          echo "rc4/zeroize enabled"
+
   msrv:
     # Keep in step with `rust-version` in Cargo.toml; bump both together.
     name: MSRV 1.85

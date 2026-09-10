@@ -121,15 +121,26 @@ def main():
                 flag("A dead relative link",
                      f"{p.relative_to(ROOT).as_posix()}:{line_of(txt, m.start())} -> {target}")
 
-    # ---- B: internal file.rs:NNN citations -------------------------------------------
-    cite = re.compile(r"\b([A-Za-z0-9_./-]+\.rs):(\d+)")
+    # ---- B: internal citations -------------------------------------------------------
+    # Not only `.rs`. This repository's own tools get cited as `acceptance_gate.py:84` and
+    # `audit_claims.py:59`, and until 2026-09-10 check F treated every `.py` citation as
+    # upstream and reported both as missing from the clones -- a false positive the
+    # pre-publish audit's own report triggered. A citation is INTERNAL when a file of that
+    # name exists in the tree; only what is left goes to F.
+    local_files = {}
+    for d in ("src", "tools", "tests", "examples", "."):
+        for q in pathlib.Path(d).glob("*"):
+            if q.is_file():
+                local_files.setdefault(q.name, q)
+
+    cite = re.compile(r"\b([A-Za-z0-9_./-]+\.(?:rs|py|ps1)):(\d+)")
     for p in DOCS:
         txt = read(p)
         for m in cite.finditer(txt):
             base = pathlib.Path(m.group(1)).name
-            if base not in src_names:
+            if base not in local_files:
                 continue
-            n = src_text[base].count("\n") + 1
+            n = read(local_files[base]).count("\n") + 1
             if int(m.group(2)) > n:
                 flag("B citation past end of file",
                      f"{p.relative_to(ROOT).as_posix()}:{line_of(txt, m.start())} -> "
@@ -224,6 +235,8 @@ def main():
             txt = read(p)
             for m in up.finditer(txt):
                 name = m.group(1)
+                if name in local_files:
+                    continue  # this repository's own file; check B range-checked it
                 hi = int(m.group(3) or m.group(2))
                 cands = index.get(name, [])
                 where = f"{p.relative_to(ROOT).as_posix()}:{line_of(txt, m.start())}"

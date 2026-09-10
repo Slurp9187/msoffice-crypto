@@ -75,8 +75,8 @@ another crate:
 
 ## Supported versions
 
-Pre-1.0 and pre-release. **Only the most recently published version is supported.** A fix
-ships as a new release rather than a backport; there is no version to backport to yet.
+Pre-1.0. **Only the most recently published version is supported.** A fix ships as a new
+release rather than a backport.
 
 ## Design notes a reporter may find useful
 
@@ -85,7 +85,13 @@ ships as a new release rather than a backport; there is no version to backport t
   `classify` has none of the attack surface below it.
 - The crate contains **no `unsafe`**, enforced by `#![forbid(unsafe_code)]` at the crate
   root, so memory-safety findings would have to originate in a dependency.
-- Every module that parses a file denies `clippy::unwrap_used`, `expect_used` and `panic`
-  on itself, and CI runs clippy under `-D warnings`.
+- `classify`, the binary-format prober and every 97-2003 parser (`word97`, `excel97`,
+  `powerpoint97`, the three RC4 families, `xor_obfuscation`, `legacy_container`) deny
+  `clippy::unwrap_used`, `expect_used` and `panic` on themselves, and CI runs clippy under
+  `-D warnings`. **The modern-format parsers do not carry that header today** — `agile`,
+  `standard`, `integrity`, `cfb_reader`, `hash`, `segments` and `dataspaces` are held to the
+  same rule by review and by the malformed-input suite, but not by the compiler. Treat a
+  panic reachable in those as in scope exactly as if the lint were on; the missing header is
+  a gap in enforcement, not a relaxation of the standard.
 
 None of these are guarantees against a logic flaw, which is what the list above is about.

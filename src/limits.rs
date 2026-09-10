@@ -249,6 +249,23 @@ mod crypto {
     /// zero spin count just reaches a clean error faster.
     pub(crate) const SPIN_COUNT_MAX: u32 = 1 << 21;
 
+    /// Pins the figure itself, for the same reason `PAYLOAD_CEILING` is pinned one screen
+    /// away — and it was not pinned until the 2026-09-10 pre-publish audit demonstrated
+    /// why. **Every test of this bound is written relative to the constant**
+    /// (`SPIN_COUNT_MAX + 1`, `SPIN_COUNT_MAX.to_string()`), so the guards move with it:
+    /// raising this to `u32::MAX - 1` leaves all 205 tests green while the hang guard it
+    /// exists to be is gone. A ceiling that its own tests cannot see move is not a ceiling.
+    ///
+    /// The upper bound is the property that matters — a *lower* value only refuses files
+    /// this crate could have opened, which is a compatibility bug and loud. So the
+    /// assertion names the magnitude rather than merely a range: 2^21, about 21x the
+    /// 100 000 Office writes, and 21x under [MS-OFFCRYPTO] §2.3.4.10's own 10,000,000.
+    const _: () = {
+        assert!(SPIN_COUNT_MAX == 1 << 21);
+        assert!(SPIN_COUNT_MAX > 100_000); // must not refuse what Office itself writes
+        assert!(SPIN_COUNT_MAX < 10_000_000); // must stay stricter than the spec ceiling
+    };
+
     /// The values of agile `keyBits` this crate will act on — on **either** element.
     ///
     /// `<keyData>` and `<p:encryptedKey>` each declare one, about two different keys:

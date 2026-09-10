@@ -245,6 +245,7 @@ docs/plan-workflow.md  how plans become issues
 docs/design/           why the crate is shaped as it is -- development-record.md (what the
                        issues and PRs decided, reversed and deferred, and the #N index) and
                        msoffice-crypto-format-history.md (the formats, and what converts)
+docs/audits/           external audit reports; deltas only, dated, not revised after filing
 docs/plans/            dated plan files; the arc lives in msoffice-crypto-foundation-2026-09-04.md
 .claude/skills/        msoffice-crypto-secure-gate (policy), file-plan-issues (protocol)
 ```
@@ -305,7 +306,9 @@ seen while something else was building is not evidence of anything.
 in another, and the detection build is the one people forget. `.github/workflows/ci.yml`
 runs this matrix plus an MSRV 1.85 build, the docs.rs nightly build, `cargo package
 --locked`, a `cargo deny` job over licences, advisories, bans and sources, a `prose` job
-running `tools/audit_claims.py`, and a job asserting three graph properties — the detection graph contains no cipher, hash, MAC, RNG
+running `tools/audit_claims.py`, a `packaging-invariants` job (build.rs stays in the
+`include` allowlist; `rc4` keeps `zeroize` -- both silent failures otherwise), and a job
+asserting three graph properties — the detection graph contains no cipher, hash, MAC, RNG
 or key-wrapping crate; the `crypto-ops` graph contains neither `rc4` nor `md-5`; and the
 `legacy-binary` graph contains both, without which the first two would be vacuous — the
 properties, not crate counts. Every module that parses a file

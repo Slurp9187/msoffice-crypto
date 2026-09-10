@@ -197,7 +197,7 @@ Each of these is a true statement today that publishing falsifies. Grep before e
 the list is what was there on 2026-09-05 and may have moved:
 
 ```bash
-git grep -n -iE 'unpublished|never been published|repo is (currently )?private|not published'
+git grep -n -iE 'unpublished|never been published|repo is (currently )?private|not published|no version to backport|pre-release'
 ```
 
 | File | What changes |
