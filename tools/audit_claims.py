@@ -14,6 +14,7 @@ Lints check shape, not truth. This checks the truths a machine can reach:
   D  CLAUDE.md's Layout block names every `src/*.rs`, and only files that exist
   E  version and MSRV figures in the live documents agree with `Cargo.toml`
   F  upstream `file.ext:NNN` citations resolve against the local clones  (local only)
+  G  CHANGELOG.md's top version heading matches Cargo.toml, and is dated iff tagged
 
 Exit status is 1 if anything is flagged, 0 otherwise.
 
@@ -252,6 +253,52 @@ def main():
     else:
         print(f"check F: SKIPPED, no clones at {clones} "
               f"(expected on CI; CLAUDE.md § Provenance names the paths)")
+
+    # ---- G: the changelog's top heading -----------------------------------------------
+    # `.claude/skills/changelog-protocol/SKILL.md` is the rule; this is the enforcement.
+    # Only the NEWEST section: historical ones are frozen, and failures nobody can act on
+    # are how a whole check gets switched off.
+    changelog = ROOT / "CHANGELOG.md"
+    if changelog.exists():
+        txt = read(changelog)
+        head = re.search(r"^## +(\S+?) +[-\u2014] +(.+?)\s*$", txt, re.M)
+        if head is None:
+            flag("G changelog has no version heading",
+                 "CHANGELOG.md: expected a top heading like '## vX.Y.Z - unreleased'")
+        else:
+            heading_ver, marker = head.group(1), head.group(2).strip()
+            want = "v" + pkg
+
+            # Invariant 1: the top heading names the manifest version.
+            if heading_ver != want:
+                flag("G top heading disagrees with Cargo.toml",
+                     f"CHANGELOG.md:{line_of(txt, head.start())} says {heading_ver}, "
+                     f"Cargo.toml says {pkg} (expected {want})")
+
+            # Invariant 2: dated if and only if the tag exists.
+            tags = set()
+            try:
+                import subprocess
+                tags = set(subprocess.run(["git", "tag", "-l"], cwd=ROOT, capture_output=True,
+                                          text=True, timeout=30).stdout.split())
+            except Exception as exc:  # noqa: BLE001 - a missing git is not a claim failure
+                print(f"check G: could not list tags ({exc}); tag half skipped")
+                tags = None
+
+            dated = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", marker))
+            if tags is not None:
+                tagged = heading_ver in tags
+                if dated and not tagged:
+                    flag("G dated heading with no tag",
+                         f"CHANGELOG.md:{line_of(txt, head.start())} is dated {marker} but "
+                         f"tag {heading_ver} does not exist -- the date IS the release marker")
+                if tagged and not dated:
+                    flag("G tagged version still marked unreleased",
+                         f"CHANGELOG.md:{line_of(txt, head.start())} says '{marker}' but "
+                         f"tag {heading_ver} exists; date it")
+            if not dated and marker != "unreleased":
+                flag("G heading marker is neither a date nor 'unreleased'",
+                     f"CHANGELOG.md:{line_of(txt, head.start())} -> {marker!r}")
 
     # ---- report ----------------------------------------------------------------------
     print(f"audited {len(DOCS)} documents against {len(src)} source files")

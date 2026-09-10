@@ -247,7 +247,8 @@ docs/design/           why the crate is shaped as it is -- development-record.md
                        msoffice-crypto-format-history.md (the formats, and what converts)
 docs/audits/           external audit reports; deltas only, dated, not revised after filing
 docs/plans/            dated plan files; the arc lives in msoffice-crypto-foundation-2026-09-04.md
-.claude/skills/        msoffice-crypto-secure-gate (policy), file-plan-issues (protocol)
+.claude/skills/        msoffice-crypto-secure-gate (policy), file-plan-issues (protocol),
+                       changelog-protocol (version headings, dates and tags)
 ```
 
 One module, one job. A module whose purpose needs an "and" to state has two.
@@ -256,9 +257,16 @@ One module, one job. A module whose purpose needs an "and" to state has two.
 
 ## Conventions
 
-**Changelog.** Dated entries, newest first, **no version headings until release**. When
-`v0.1.0-rc.1` is cut, a version heading goes on top and the dated record stays beneath it as
-written — a release heading summarizing them would lose the reasoning.
+**Changelog.** Version headings, newest first: `## vX.Y.Z — unreleased` while the work is in
+flight, and the ISO date substituted the moment that tag is cut. **The date is the release
+marker, not a note about when the work happened** — git already records that, and a typed
+date drifts (five entries here were once stamped in UTC on a UTC-7 machine and read a day
+into the future). Entries carry a date only when the date is part of the claim: a
+measurement against particular versions of external readers needs one, a rename does not.
+Full rule and the tagging step: [`.claude/skills/changelog-protocol/SKILL.md`](.claude/skills/changelog-protocol/SKILL.md);
+enforced as check G of `tools/audit_claims.py`. The pre-publication changelog was 3,397 lines
+of dated entries and stayed with the archived development repository — frozen, not a
+violation to tidy.
 
 **Plans and issues.** A plan is a dated file in `docs/plans/`. A parent issue (label `plan`)
 with one closeable sub-issue per slice (label `slice`) coordinates it. The file is the design;

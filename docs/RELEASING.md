@@ -174,6 +174,31 @@ public and enabling it the policy points at a button that does not exist.
 
 `gh repo view --json description,repositoryTopics,homepageUrl` reads the current state back.
 
+## 5a. Date the heading and tag the commit
+
+Until 2026-09-10 this runbook went from the tarball straight to `cargo publish` and never
+mentioned a tag. That is a real gap for a crate arguing its claims are checkable: the
+`.crate` on crates.io is immutable, but without a tag a consumer holding `0.1.0-rc.1` has no
+ref to check out and re-run the suite against.
+
+Per `.claude/skills/changelog-protocol/SKILL.md`, the date **is** the release marker:
+
+```bash
+# 1. substitute the ISO date for "unreleased" in CHANGELOG.md's top heading, and commit
+# 2. tag that commit, annotated -- lightweight tags are not pushed by --follow-tags
+git tag -a v0.1.0-rc.1 -m "v0.1.0-rc.1"
+git push --follow-tags
+```
+
+Between dating the heading and pushing the tag the tree fails its own check G
+(`dated heading with no tag`). `--follow-tags` sends both refs in one push and closes that
+window; push the tag first if you want certainty rather than reasoning.
+
+**Moving a tag is a separate command and the failure is silent.** `--follow-tags` pushes only
+tags *missing* from the remote — it will not move one, and reports `Everything up-to-date`
+while the remote quietly keeps the old commit. To move one: `git push -f origin vX.Y.Z`, by
+name. Never `git push --tags`, which publishes every local tag including scratch markers.
+
 ## 6. Publish
 
 ```bash

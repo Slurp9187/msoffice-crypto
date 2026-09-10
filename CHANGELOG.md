@@ -35,6 +35,32 @@ so `msoffice-crypto = "0.1"` will not resolve to this and a consumer must name t
 version. That is the right shape while the API is still free to move: nothing has yet used
 it in anger, and publishing `0.1.0` would make it a promise on the day it landed.
 
+### Release process
+
+Version headings, newest first: `## vX.Y.Z — unreleased` while the work is in flight, and the
+ISO date substituted the moment that tag is cut. **The date is the release marker**, not a
+note about when the work happened — git records that, and a typed date drifts. This crate's
+own evidence: five entries in the archived pre-publication changelog were stamped in UTC on a
+UTC-7 machine and read a day into the future.
+
+Entries carry a date only when the date is part of the claim. A gate verdict against
+particular versions of four external readers needs one, because it tells you how stale the
+observation is; a rename does not, because git already knows.
+
+Both invariants — the top heading matches `Cargo.toml`, and it is dated if and only if that
+tag exists — are check G of `tools/audit_claims.py`, which the `prose` CI job runs on every
+push. All four of its failure modes were proved by causing them. That job now checks out with
+`fetch-depth: 0`, because `actions/checkout` fetches no tags by default and every dated
+heading would otherwise look untagged the moment a release was cut.
+
+`docs/RELEASING.md` gained the step that dates the heading and tags the commit; it previously
+went from the tarball straight to `cargo publish` and never mentioned a tag at all. That is a
+gap for a crate arguing its claims are checkable: the `.crate` is immutable, but without a tag
+a consumer has no ref to check out and re-run the suite against.
+
+The rule lives in `.claude/skills/changelog-protocol/SKILL.md`, adapted from a sibling
+project's protocol.
+
 ### Evidence
 
 Every figure below was measured, not asserted. The commands that produce them are in

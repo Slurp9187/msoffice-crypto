@@ -242,7 +242,13 @@ jobs:
     name: prose matches the tree
     runs-on: ubuntu-latest
     steps:
+      # Tags, not just the branch. Check G asserts a version heading is dated if and only if
+      # that tag exists, and actions/checkout fetches no tags by default -- without this
+      # every dated release heading would look untagged and the job would fail the moment a
+      # release is cut.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
