@@ -260,7 +260,14 @@ These are the reason "read the reference sceptically" is a rule here rather than
   than a reading of the format. This crate draws all 32, with a test asserting every byte
   position varies across 23 seeds.
 
-  **Reported upstream:** _pending — add the issue URL here once filed._
+  **Reported upstream:** notified privately by email to the project's maintainer on
+  2026-09-10, before this crate was published. Email rather than GitHub's private
+  vulnerability reporting because that repository has the feature disabled
+  (`private-vulnerability-reporting` returns `{"enabled": false}`) and carries no
+  `SECURITY.md`, in its own tree or at the account level. The message stated that there
+  is no practical attack, offered a public issue instead if preferred, and said plainly
+  that publishing this crate would make the finding public either way, since it is
+  documented in `src/` and `src/**/*.rs` ships in the `.crate`.
 
 The four items below are ordinary correctness bugs with no security dimension, and are
 recorded here rather than reported upstream. The entropy item above is the only one where
