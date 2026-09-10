@@ -232,11 +232,11 @@ changelog. Any document still saying LibreOffice cannot be driven is superseded.
 
 These are the reason "read the reference sceptically" is a rule here rather than a slogan.
 
-- **herumi draws a short session key on the AES-256 path.**
-  `FillRand(secretKey, encryptedKey.saltSize)` draws the **salt** size (16) and
-  `normalizeKey` then pads to `keyBits / 8` with the constant `0x36`, so an AES-256 key
-  carries **128 bits of entropy with a known top half**. It reads like `saltSize` was written
-  where `keyBits / 8` was meant. Nothing downstream notices, because the key is whatever the
+- **herumi drew a short session key on the AES-256 path. Reported, and fixed upstream the
+  same day.** `FillRand(secretKey, encryptedKey.saltSize)` drew the **salt** size (16) and
+  `normalizeKey` then padded to `keyBits / 8` with the constant `0x36`, so an AES-256 key
+  carried **128 bits of entropy with a known top half**. It read like `saltSize` written
+  where `keyBits / 8` was meant. Nothing downstream noticed, because the key is whatever the
   writer says it is: **no round-trip test in any implementation could find it.**
 
   **Scope, corrected 2026-09-10 after independent verification.** An earlier version of this
@@ -260,14 +260,27 @@ These are the reason "read the reference sceptically" is a rule here rather than
   than a reading of the format. This crate draws all 32, with a test asserting every byte
   position varies across 23 seeds.
 
-  **Reported upstream:** notified privately by email to the project's maintainer on
-  2026-09-10, before this crate was published. Email rather than GitHub's private
+  **Reported upstream, confirmed and fixed — 2026-09-10.** Notified privately by email to
+  the maintainer before this crate was published. Email rather than GitHub's private
   vulnerability reporting because that repository has the feature disabled
   (`private-vulnerability-reporting` returns `{"enabled": false}`) and carries no
-  `SECURITY.md`, in its own tree or at the account level. The message stated that there
-  is no practical attack, offered a public issue instead if preferred, and said plainly
-  that publishing this crate would make the finding public either way, since it is
-  documented in `src/` and `src/**/*.rs` ships in the `.crate`.
+  `SECURITY.md`, in its own tree or at the account level. The message stated that there is
+  no practical attack, offered a public issue instead if preferred, and said plainly that
+  publishing this crate would make the finding public either way, since it is documented in
+  `src/` and `src/**/*.rs` ships in the `.crate`.
+
+  He replied the same day confirming the finding — *"You are right: the secret key was drawn
+  with saltSize bytes. I have fixed it as you suggested"* — and gave permission to publish
+  the description unchanged. The fix is herumi/msoffice commit **`b5fed299`**, "fix key size
+  in AES-256", which changes the draw to `FillRand(secretKey, encryptedKey.keyBits / 8)`.
+  Verified against the upstream repository: `include/encode.hpp:177` now reads that.
+
+  **The write-ups in `src/agile_encrypt.rs` and `src/agile_encrypt_tests.rs` were moved to
+  the past tense as a result.** They ship in the `.crate`, and a present-tense claim about
+  another project's code that has since been fixed is exactly the kind of stale assertion the
+  rest of this record exists to prevent. The history is kept rather than deleted, because it
+  is why this crate draws at full length and why the guard test exists — but a reader who
+  checks upstream today will find the two implementations agree.
 
 The four items below are ordinary correctness bugs with no security dimension, and are
 recorded here rather than reported upstream. The entropy item above is the only one where

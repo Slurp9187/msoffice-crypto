@@ -15,20 +15,29 @@
 //! key_data_salt  <- random(16)                       public: keyData/@saltValue
 //! ```
 //!
-//! # The session key is 32 random bytes, not herumi's 16
+//! # The session key is 32 random bytes, drawn at full length
 //!
-//! **This is the one place this module deliberately does not do what the reference does.**
-//! herumi draws the session key with `FillRand(secretKey, encryptedKey.saltSize)` — the
-//! *salt* size, 16 — and then calls `normalizeKey(secretKey, encryptedKey.keyBits / 8)`,
-//! which is `key.resize(keySize, char(0x36))` (`include/crypto_util.hpp:38-41`,
-//! `include/encode.hpp:177` and `:184`). The result is an AES-**256** key whose top 16 bytes are
-//! the constant `36 36 … 36`: 128 bits of entropy in a 256-bit key.
+//! **This module deliberately diverged from the reference here, and the reference has since
+//! been corrected.** Until 2026-09-10 herumi drew the session key with
+//! `FillRand(secretKey, encryptedKey.saltSize)` — the *salt* size, 16 — and then called
+//! `normalizeKey(secretKey, encryptedKey.keyBits / 8)`, which is
+//! `key.resize(keySize, char(0x36))` (`include/crypto_util.hpp:38-41`). On the AES-256 path
+//! that produced a key whose top 16 bytes were the constant `36 36 … 36`: 128 bits of
+//! entropy in a 256-bit key. The AES-128 path was unaffected, since `keyBits / 8` and
+//! `saltSize` are both 16 there and the padding was a no-op.
 //!
-//! It reads like `saltSize` was written where `keyBits / 8` was meant. Nothing downstream
-//! notices — the file decrypts perfectly, in every reader, because the key is whatever the
+//! It read like `saltSize` written where `keyBits / 8` was meant. Nothing downstream
+//! noticed — the file decrypts perfectly, in every reader, because the key is whatever the
 //! writer says it is — so no round-trip test anywhere could find it. `ms-offcrypto-writer`
-//! does not share it (`src/lib.rs:474`, `intermediate_key: [u8; 32]`), which is what makes
-//! this a herumi bug rather than a reading of the format.
+//! did not share it (`src/lib.rs:474`, `intermediate_key: [u8; 32]`), which is what made it
+//! a bug rather than a reading of the format.
+//!
+//! **Reported privately to the maintainer and fixed upstream the same day**, in
+//! herumi/msoffice commit `b5fed299`, which changes the draw to
+//! `FillRand(secretKey, encryptedKey.keyBits / 8)` — the fix suggested in the report. He
+//! confirmed the finding and gave permission to describe it. The history is kept because it
+//! is why this module draws at full length and why the test below exists; anyone reading
+//! today's upstream will find the two implementations agree.
 //!
 //! This crate draws `SESSION_KEY_LEN` bytes. Porting the padding would have been the
 //! easier read of `encode.hpp` and is the kind of thing § *Every input is hostile* exists
@@ -160,8 +169,8 @@ pub(crate) fn generate<R: TryRng + TryCryptoRng>(
         skey_verifier_hash.with_secret(|k| aes_cbc_encrypt(vh, k, &password_salt))
     })?;
 
-    // encode.hpp:177-184 -- the session key. `SESSION_KEY_LEN` random bytes, NOT herumi's
-    // `saltSize` bytes padded with 0x36; see the module header for the measurement.
+    // encode.hpp:177 -- the session key. `SESSION_KEY_LEN` random bytes, drawn at full
+    // length rather than drawn short and padded to fit; see the module header.
     let session_key = SessionKey::from_rng(SESSION_KEY_LEN, rng).map_err(random_source)?;
     let encrypted_key_value = session_key
         .with_secret(|sk| skey_key_value.with_secret(|k| aes_cbc_encrypt(sk, k, &password_salt)))?;

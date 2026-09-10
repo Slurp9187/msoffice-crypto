@@ -205,27 +205,28 @@ fn every_blob_unwraps_to_what_produced_it() {
     assert_eq!(unique.len(), 3, "the three block keys must differ");
 }
 
-/// **The session key is 32 drawn bytes, not herumi's 16 padded with `0x36`.**
+/// **The session key is 32 drawn bytes, never a short draw padded to length.**
 ///
-/// herumi draws `encryptedKey.saltSize` bytes and then `normalizeKey`s up to `keyBits / 8`,
-/// which is `resize(32, 0x36)` — an AES-256 key with 128 bits of entropy and a constant
-/// top half (`crypto_util.hpp:38-41`, `encode.hpp:180-186`). Nothing downstream notices:
-/// the file decrypts perfectly in every reader, because the key is whatever the writer says
-/// it is, so no round-trip test in any implementation could find it.
+/// The reference this module was ported from once drew `encryptedKey.saltSize` bytes and
+/// `normalizeKey`d up to `keyBits / 8` — `resize(32, 0x36)`, an AES-256 key with 128 bits of
+/// entropy and a constant top half. Nothing downstream noticed: the file decrypts perfectly
+/// in every reader, because the key is whatever the writer says it is, so no round-trip test
+/// in any implementation could find it. It was reported privately and **fixed upstream on
+/// 2026-09-10** (herumi/msoffice `b5fed299`); see `agile_encrypt`'s module header.
 ///
-/// This is the assertion that would fail if someone "fixed" this module by following the
-/// reference more closely. The last 16 bytes must not be the `0x36` filler, and — the
-/// stronger form — every byte position must vary across seeds, which a constant tail
-/// cannot do.
+/// The test stays, because the property is worth guarding on its own: a short draw padded to
+/// length is a mistake any implementation can make, and this is the assertion that catches
+/// it here. The last 16 bytes must not be a constant filler, and — the stronger form — every
+/// byte position must vary across seeds, which a constant tail cannot do.
 #[test]
-fn the_session_key_is_fully_drawn_not_padded_like_herumis() {
+fn the_session_key_is_fully_drawn_never_padded_to_length() {
     let material = generate(PASSWORD, SPIN_COUNT, &mut seeded()).unwrap();
     material.session_key.with_secret(|k| {
         assert_eq!(k.len(), 32, "AES-256 takes 32 bytes");
         assert_ne!(
             &k[16..],
             &[0x36u8; 16],
-            "the top half is herumi's normalizeKey filler, not entropy"
+            "the top half must be entropy, not a constant filler"
         );
     });
 
