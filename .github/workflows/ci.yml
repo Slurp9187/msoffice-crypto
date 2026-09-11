@@ -14,6 +14,15 @@ name: CI
 # a pull request from a fork can run arbitrary code on the runner host. Falling back to
 # ubuntu-latest is one command. docs/RELEASING.md step 8 carries this.
 
+# rustc's own codegen threads, not this crate's runtime. Compiling the lib test target under
+# `crypto-ops` overflowed the default thread stack on the self-hosted runner and rustc died
+# with SIGSEGV, diagnosing itself: "help: you can increase rustc's stack size by setting
+# RUST_MIN_STACK=16777216". The same commit compiled fine on ubuntu-latest, whose images
+# allow a larger stack, so this is a property of the runner host rather than of the code.
+#
+# Set at workflow level so every job gets it, and left in place after the runner goes away:
+# it is inert where the default already suffices, and a silent 16 MiB reservation is cheaper
+# than rediscovering a compiler segfault.
 on:
   # Every branch, not just main: work here lands on feature branches that often have
   # no PR open yet, and a push is the only signal there. The cost is a duplicate run
@@ -34,6 +43,14 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # rustc's own codegen threads, not this crate's runtime. Compiling the lib test target
+  # under `crypto-ops` overflowed the default thread stack on the self-hosted runner and
+  # rustc died with SIGSEGV, diagnosing itself: "help: you can increase rustc's stack size
+  # by setting RUST_MIN_STACK=16777216". The same commit compiled on ubuntu-latest, whose
+  # images allow a larger stack, so this is a property of the runner host, not the code.
+  # Left in place after the runner goes away: inert where the default suffices, and cheaper
+  # than rediscovering a compiler segfault.
+  RUST_MIN_STACK: 16777216
   # Nothing is reused between CI runs, so incremental artifacts are written and then
   # thrown away.
   CARGO_INCREMENTAL: 0
