@@ -22,7 +22,7 @@ What survives that move is in two places, deliberately:
 
 ---
 
-## v0.1.0-rc.1 — unreleased
+## v0.1.0-rc.1 — 2026-09-11
 
 First public version. Detection, decryption and encryption of the formats [MS-OFFCRYPTO]
 defines, with key material held in `secure-gate` wrappers that zeroize on drop.
