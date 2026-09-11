@@ -25,6 +25,27 @@ name: CI
 # Set at workflow level so every job gets it, and left in place after the runner goes away:
 # it is inert where the default already suffices, and a silent 16 MiB reservation is cheaper
 # than rediscovering a compiler segfault.
+# Every `uses:` is pinned to a commit SHA, with the version it was in a trailing comment.
+#
+# A tag is a mutable pointer: `actions/checkout@v7` resolves when the job runs, so if that
+# repository were compromised an attacker moves the tag and every workflow referencing it
+# executes new code -- no change here, no diff to review. That is how the
+# tj-actions/changed-files compromise propagated in 2025. A 40-character SHA makes an
+# action upgrade an explicit edit somebody reviews.
+#
+# This is the standard `deny.toml` already applies to crates through its `sources` check,
+# which asserts every dependency comes from crates.io. Actions were the half of the supply
+# chain this repository asserted nothing about.
+#
+# To bump one: resolve the ref, then replace the SHA *and* the comment together --
+#   gh api repos/actions/checkout/commits/v7 --jq .sha
+# `sha_pinning_required` is set on the repository, so a tag reintroduced here fails the
+# run rather than quietly working.
+#
+# `dtolnay/rust-toolchain` publishes no releases: `stable`, `nightly` and `1.85.0` are
+# branches. Pinning fixes the action's own code; which toolchain it installs is still
+# resolved at run time, which is the reason to use it at all.
+
 on:
   # Every branch, not just main: work here lands on feature branches that often have
   # no PR open yet, and a push is the only signal there. The cost is a duplicate run
@@ -76,8 +97,8 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # branch `stable`, resolved 2026-09-11
         with:
           components: rustfmt
       - run: cargo fmt --all --check
@@ -96,11 +117,11 @@ jobs:
           - name: legacy-binary
             flags: --no-default-features --features legacy-binary
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # branch `stable`, resolved 2026-09-11
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.name }}
       # --all-targets compiles the library BOTH as a plain lib (cfg(test) off) and as a
@@ -136,9 +157,9 @@ jobs:
           - name: legacy-binary
             flags: --no-default-features --features legacy-binary
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # branch `stable`, resolved 2026-09-11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.name }}
       # The fixtures under tests/fixtures/ are read through CARGO_MANIFEST_DIR and are
@@ -183,12 +204,12 @@ jobs:
         --expect-text-file tests/fixtures/plain_content.txt
         --readers msoffcrypto,office-crypto
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # branch `stable`, resolved 2026-09-11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: acceptance-gate
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       # olefile arrives with msoffcrypto-tool; the mutation steps below need it.
@@ -231,8 +252,8 @@ jobs:
     name: detection build links no cipher
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # branch `stable`, resolved 2026-09-11
       - run: |
           cargo tree --locked -e normal --prefix none --no-default-features > graph.txt
           echo "detection-build graph:"; cat graph.txt
@@ -279,10 +300,10 @@ jobs:
       # that tag exists, and actions/checkout fetches no tags by default -- without this
       # every dated release heading would look untagged and the job would fail the moment a
       # release is cut.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.x'
       - run: python tools/audit_claims.py
@@ -318,10 +339,10 @@ jobs:
       CARGO_DENY_VERSION: '0.20.2'
       CARGO_DENY_SHA256: '9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # cargo-deny shells out to `cargo metadata` to build the crate graph, so a toolchain
       # is needed even though nothing here is compiled.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # branch `stable`, resolved 2026-09-11
       - name: Install cargo-deny
         run: |
           set -euo pipefail
@@ -370,9 +391,9 @@ jobs:
     name: packaging invariants
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # branch `stable`, resolved 2026-09-11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: build.rs is in the include allowlist
         run: |
           cargo package --locked --list > files.txt
@@ -398,9 +419,9 @@ jobs:
     name: MSRV 1.85
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.85.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@3230091d7ef9483f601620abacc570c22cf44d22 # branch `1.85.0`, resolved 2026-09-11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: msrv
       # --locked matters most here: without it Cargo may resolve a dependency release
@@ -416,9 +437,9 @@ jobs:
     name: rustdoc
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # branch `stable`, resolved 2026-09-11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: docs
       # Mirrors [package.metadata.docs.rs] all-features = true, so a broken link is
@@ -438,13 +459,13 @@ jobs:
     name: docs.rs build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # docs.rs builds on nightly with --cfg docsrs. The `docs` job above uses stable
       # and does not pass that cfg, so it cannot see anything that only breaks under it.
       # odf-crypto shipped a release whose docs.rs build was broken while every stable
       # CI job stayed green; this job is that lesson.
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # branch `nightly`, resolved 2026-09-11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: docsrs
       - run: cargo doc --locked --all-features --no-deps
@@ -455,9 +476,9 @@ jobs:
     name: cargo package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # branch `stable`, resolved 2026-09-11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: package
       # Guards two things at once.
