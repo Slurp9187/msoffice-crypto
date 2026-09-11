@@ -253,19 +253,31 @@ private repo the API answers `404 Not Found` and the Settings toggle is absent, 
 window between going public and enabling it is a window in which the security policy points
 at a button that is not there.
 
-**Point CI back at hosted runners, and remove the self-hosted one.**
+**Point CI back at hosted runners, and remove the self-hosted one.** *Done on
+2026-09-11, at the flip; kept here because it is the one step whose omission is silent.*
 
 ```bash
-gh variable delete CI_RUNNER          # ci.yml then falls back to ubuntu-latest
+gh variable delete CI_RUNNER
+gh api repos/<owner>/msoffice-crypto/actions/runners --jq '.total_count'   # must be 0
 ```
 
-Then remove the runner itself from Settings -> Actions -> Runners, and uninstall the
-service on that host. `msoc-linux` was registered on 2026-09-11 only because a private
-repository consumes Actions minutes and the account had hit its spending limit. Public
-repositories get unlimited hosted minutes, so the reason ends here -- and GitHub advises
-against self-hosted runners on public repositories, because a pull request from a fork can
-execute arbitrary code on the runner host. That host is a workstation holding this
-repository and others.
+`msoc-linux` was registered on 2026-09-11 only because a private repository consumes
+Actions minutes and the account had hit its spending limit. Public repositories get
+unlimited hosted minutes, so the reason ended there -- and GitHub advises against
+self-hosted runners on public repositories, because a pull request from a fork can execute
+arbitrary code on the runner host. That host is a workstation holding this repository and
+others.
+
+Deleting the variable was not treated as sufficient. `ci.yml` had `runs-on:
+${{ vars.CI_RUNNER || 'ubuntu-latest' }}` in all twelve jobs, which on a *public*
+repository is a latent hazard rather than a convenience: one settings change redirects
+every job onto a self-hosted host, and nothing about it appears in a diff. All twelve are
+now hard-coded to `ubuntu-latest`, so reintroducing the indirection is a workflow edit
+somebody can review. The runner was also deregistered from the repository, not merely
+stopped -- an offline runner is a registration waiting for a host to come back.
+
+Also uninstall the service on that host; deregistering here does not stop it running
+there.
 
 **Re-enable the CI workflow.** It was disabled by hand on 2026-09-10
 (`state: disabled_manually`) because a private repository consumes Actions minutes, the

@@ -1,18 +1,20 @@
 name: CI
 
-# `runs-on` is the repository variable CI_RUNNER, falling back to ubuntu-latest when it is
-# unset. It exists so that swapping between the self-hosted runner and GitHub's hosted ones
-# is `gh variable set CI_RUNNER` rather than an edit to twelve jobs.
+# `runs-on` is ubuntu-latest, hard-coded, and should stay that way.
 #
-# Set to `msoc-linux` on 2026-09-11: a private repository consumes Actions minutes, the
-# account hit its spending limit, and every job began failing before it ran a step. A
-# self-hosted runner is free for private repositories.
+# For one day this repository was private and out of Actions minutes -- the account had hit
+# its spending limit and every job failed before running a step -- so a self-hosted runner
+# (`msoc-linux`) was registered and `runs-on` read
+# `${{ vars.CI_RUNNER || 'ubuntu-latest' }}` so the swap was one variable rather than an
+# edit to twelve jobs. The repository went public on 2026-09-11, the variable was deleted
+# and the runner deregistered, per docs/RELEASING.md step 8.
 #
-# DELETE THE VARIABLE WHEN THIS REPOSITORY GOES PUBLIC -- `gh variable delete CI_RUNNER`.
-# Hosted minutes are unlimited for public repositories, so the reason for the runner
-# disappears; and GitHub advises against self-hosted runners on public repositories, because
-# a pull request from a fork can run arbitrary code on the runner host. Falling back to
-# ubuntu-latest is one command. docs/RELEASING.md step 8 carries this.
+# DO NOT REINTRODUCE THE INDIRECTION HERE. On a public repository, a `runs-on` driven by a
+# repository variable means one settings change redirects all sixteen jobs onto a
+# self-hosted host -- and a pull request from a fork then runs arbitrary code on it. That
+# host is a workstation. Hard-coded, the same change is a workflow edit that shows up in a
+# reviewable diff. Public repositories get unlimited hosted minutes, so the reason the
+# indirection existed cannot recur.
 
 # rustc's own codegen threads, not this crate's runtime. Compiling the lib test target under
 # `crypto-ops` overflowed the default thread stack on the self-hosted runner and rustc died
@@ -72,7 +74,7 @@ env:
 jobs:
   fmt:
     name: rustfmt
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -82,7 +84,7 @@ jobs:
 
   clippy:
     name: clippy (${{ matrix.name }})
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -116,7 +118,7 @@ jobs:
 
   test:
     name: test (${{ matrix.name }})
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -174,7 +176,7 @@ jobs:
     # write it -- not taken from the `test` job, and not from wherever the system temp
     # directory points on a shared runner.
     name: acceptance gate (independent readers)
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     env:
       GATE_ARGS: >-
         --expect-package tests/fixtures/plain.docx
@@ -227,7 +229,7 @@ jobs:
     # graph -- rather than a crate count, because the count differs by platform (libc
     # arrives via getrandom on unix) and a number is not what a consumer is promised.
     name: detection build links no cipher
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -271,7 +273,7 @@ jobs:
     #
     # No Rust toolchain: the source files are read as text.
     name: prose matches the tree
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       # Tags, not just the branch. Check G asserts a version heading is dated if and only if
       # that tag exists, and actions/checkout fetches no tags by default -- without this
@@ -311,7 +313,7 @@ jobs:
     # that serves the artifact detects corruption, not substitution. Bump the two together,
     # from a download verified off this machine.
     name: licences and advisories
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     env:
       CARGO_DENY_VERSION: '0.20.2'
       CARGO_DENY_SHA256: '9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f'
@@ -366,7 +368,7 @@ jobs:
     #    behind. Deleting the feature leaves the entire suite green: the property has no
     #    test, and cannot easily have one, since it is about memory after a drop.
     name: packaging invariants
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -394,7 +396,7 @@ jobs:
   msrv:
     # Keep in step with `rust-version` in Cargo.toml; bump both together.
     name: MSRV 1.85
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.85.0
@@ -412,7 +414,7 @@ jobs:
 
   docs:
     name: rustdoc
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -434,7 +436,7 @@ jobs:
 
   docsrs:
     name: docs.rs build
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       # docs.rs builds on nightly with --cfg docsrs. The `docs` job above uses stable
@@ -451,7 +453,7 @@ jobs:
 
   package:
     name: cargo package
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
