@@ -422,7 +422,7 @@ pub(crate) fn generate<R: rand::TryRng + rand::TryCryptoRng>(
     rng: &mut R,
 ) -> Result<IntegrityBlobs, Error> {
     let hmac_key = IntegrityKey::from_rng(hash.digest_len(), rng)
-        .map_err(|e| Error::RandomSource(e.to_string()))?;
+        .map_err(crate::agile_encrypt::random_source)?;
     generate_with_key(
         session_key,
         hash,

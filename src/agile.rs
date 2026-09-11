@@ -992,7 +992,7 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
                 }
             }
             Ok(Event::Eof) => break,
-            Err(e) => return Err(Error::XmlParse(e.to_string())),
+            Err(e) => return Err(xml_error(&e)),
             _ => {}
         }
         buf.clear();
@@ -1358,25 +1358,92 @@ fn inner_or_outer_salt(declared: Option<Vec<u8>>, missing: &'static str) -> Resu
 fn decode_b64_attr(attr: &quick_xml::events::attributes::Attribute) -> Result<Vec<u8>, Error> {
     let val = attr
         .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-        .map_err(|e| Error::XmlParse(e.to_string()))?;
-    BASE64
-        .decode(val.as_ref())
-        .map_err(|e| Error::XmlParse(format!("base64 decode: {e}")))
+        .map_err(|e| xml_error(&e))?;
+    BASE64.decode(val.as_ref()).map_err(|e| base64_error(&e))
+}
+
+/// Classify a `quick-xml` failure into a fixed description of its *kind*, forwarding
+/// nothing the parser wrote.
+///
+/// **This exists because `e.to_string()` here was a hole.** `quick_xml::Error::Escape`
+/// carries the text between `&` and the next `;` of whatever was being unescaped
+/// (`escape.rs:807` in 0.41.0), and the values this module unescapes are `saltValue`,
+/// `encryptedKeyValue` and the two verifier blobs. Forwarding the `Display` therefore put
+/// attacker-chosen text into the error string, bounded only by
+/// `limits::ENCRYPTION_INFO_READ_CAP` -- 1 MiB. Measured against 0.41.0: the attribute
+/// value `&AAAA...;` with a 4096-character body produced a 4130-byte message reading
+/// ``at 1..4097: unrecognized entity `AAAA...` ``.
+///
+/// That is not key material -- the attacker supplies the text -- so it is not the leak it
+/// first looks like. It is still wrong twice over: it is *unbounded* attacker-chosen
+/// content, which is exactly what [`unsupported_algorithm`] truncates to 32 characters and
+/// documents doing; and it is a standing conduit, because a quick-xml that echoed an
+/// attribute *value* would put `encryptedKeyValue` into an error message without a line
+/// changing here. Reported by the downstream consumer, who had shipped a fix for the same
+/// shape that day: `rusqlite::Error::SqlInputError`'s `Display` prints the failing SQL, and
+/// a `#[from]` variant rendered with `{0}` had carried a live SQLCipher key into a UI
+/// string. The rule that follows from it -- *an error-hygiene rule governs the strings this
+/// crate writes, never the strings its dependencies write* -- is why this is a function and
+/// not a tidier `{e}`.
+///
+/// Matched exhaustively, with no `_` arm, on purpose: `quick_xml::Error` is not
+/// `#[non_exhaustive]`, so a variant added upstream becomes a compile error here rather
+/// than a silent forward. The same discipline as `IntegrityOutcome::is_authenticated`.
+fn xml_error(e: &quick_xml::Error) -> Error {
+    use quick_xml::Error as Qx;
+    Error::XmlParse(
+        match e {
+            Qx::Io(_) => "the XML could not be read",
+            Qx::Syntax(_) => "syntactically invalid XML",
+            Qx::IllFormed(_) => "the XML is not well-formed",
+            Qx::InvalidAttr(_) => "an attribute is malformed",
+            Qx::Encoding(_) => "the XML is not valid UTF-8",
+            Qx::Escape(_) => "an attribute value contains an unterminated or unrecognized entity",
+            Qx::Namespace(_) => "the XML has a namespace error",
+        }
+        .to_string(),
+    )
+}
+
+/// Classify a base64 failure, keeping the offset and dropping the byte.
+///
+/// `DecodeError::InvalidByte` and `InvalidLastSymbol` carry the offending byte, which is
+/// one character of the blob being decoded. That blob is `encryptedKeyValue` or a verifier
+/// -- ciphertext, already in the file, so one character of it is not a disclosure. It is
+/// dropped anyway for the reason in [`xml_error`]: one character of diagnostics is not
+/// worth keeping a foreign `Display` in the path. The offset is a position, which is the
+/// class of value this crate's messages carry everywhere.
+///
+/// Exhaustive for the same reason as [`xml_error`]; `base64::DecodeError` is likewise not
+/// `#[non_exhaustive]`.
+fn base64_error(e: &base64::DecodeError) -> Error {
+    use base64::DecodeError as B64;
+    Error::XmlParse(match e {
+        B64::InvalidByte(at, _) => format!("base64: invalid symbol at offset {at}"),
+        B64::InvalidLength(at) => format!("base64: invalid length at offset {at}"),
+        B64::InvalidLastSymbol(at, _) => format!("base64: invalid final symbol at offset {at}"),
+        B64::InvalidPadding => "base64: incorrect padding".to_string(),
+    })
 }
 
 /// An attribute whose value is a plain token (`hashAlgorithm="SHA512"`).
 fn decode_str_attr(attr: &quick_xml::events::attributes::Attribute) -> Result<String, Error> {
     attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
         .map(|v| v.into_owned())
-        .map_err(|e| Error::XmlParse(e.to_string()))
+        .map_err(|e| xml_error(&e))
 }
 
 fn parse_u32_attr(attr: &quick_xml::events::attributes::Attribute) -> Result<u32, Error> {
     let val = attr
         .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-        .map_err(|e| Error::XmlParse(e.to_string()))?;
+        .map_err(|e| xml_error(&e))?;
+    // `ParseIntError`'s own `Display` is content-free and would be safe to forward. It is
+    // classified anyway, so that the invariant below is "no foreign `Display` reaches
+    // `XmlParse`" rather than "no foreign `Display` except the ones audited as harmless" --
+    // the first is checkable by reading this module, the second needs re-auditing on every
+    // dependency bump.
     val.parse::<u32>()
-        .map_err(|e| Error::XmlParse(format!("integer parse: {e}")))
+        .map_err(|_| Error::XmlParse("not a decimal integer, or out of range for u32".into()))
 }
 
 #[cfg(test)]

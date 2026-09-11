@@ -607,6 +607,127 @@ fn agile_spin_count_above_the_ceiling_is_refused_before_the_spin_runs() {
     );
 }
 
+// ---- agile: what the error message is allowed to carry -------------------------------
+
+/// The same stream with one attribute value replaced verbatim, escaping nothing.
+///
+/// Every other builder here poisons a *number* the file declares. This one poisons the
+/// attribute *text*, which is a different attack surface: the value is unescaped by the
+/// XML parser before this crate ever sees it, so a value can make the parser itself
+/// produce a message.
+fn agile_with_attr_value(attr: &str, value: &str) -> Vec<u8> {
+    let info = agile_encryption_info(100_000, 256);
+    let (header, xml_bytes) = info.split_at(8);
+    let xml = std::str::from_utf8(xml_bytes).expect("the builder writes UTF-8");
+    let needle = format!("{attr}=\"");
+    let start = xml.find(&needle).expect("the builder emits this attribute") + needle.len();
+    let end = start
+        + xml[start..]
+            .find('"')
+            .expect("the attribute value is quoted");
+
+    let mut out = header.to_vec();
+    out.extend_from_slice(&xml.as_bytes()[..start]);
+    out.extend_from_slice(value.as_bytes());
+    out.extend_from_slice(&xml.as_bytes()[end..]);
+    out
+}
+
+/// **The file's own text must never come back in the error message.**
+///
+/// `encryptedKeyValue` is unescaped by quick-xml before this crate reads it, and an
+/// unrecognized entity makes quick-xml's `Display` quote the text between `&` and the
+/// next `;` verbatim -- bounded only by `ENCRYPTION_INFO_READ_CAP`, 1 MiB. `agile.rs`
+/// forwarded that `Display` into `Error::XmlParse` until `xml_error` classified it.
+///
+/// Both halves are load-bearing and neither implies the other: a message could be short
+/// and still quote a truncated marker, or marker-free and still be a megabyte of the
+/// parser's opinion. `Debug` is checked beside `Display` because both are public API and
+/// the leak this guards against reached a UI through `Display` in the consumer that
+/// reported it.
+///
+/// Proven by reverting `xml_error` to `Error::XmlParse(e.to_string())`: the assertion
+/// fails with `the file's own text reached the message: EncryptionInfo XML parse error:
+/// at 1..4609: unrecognized entity `CANARYcanaryCANARY...`.
+#[test]
+fn a_hostile_entity_in_an_attribute_value_never_reaches_the_error_message() {
+    const MARKER: &str = "CANARYcanaryCANARY";
+    let body = MARKER.repeat(256);
+    let data = build_cfb(
+        &agile_with_attr_value("encryptedKeyValue", &format!("&{body};")),
+        &encrypted_package(),
+    );
+
+    let err = decrypt_ooxml(&data, "irrelevant").expect_err("an unrecognized entity is refused");
+    let display = err.to_string();
+    let debug = format!("{err:?}");
+
+    assert!(matches!(err, Error::XmlParse(_)), "got: {err}");
+    assert!(
+        !display.contains(MARKER),
+        "the file's own text reached the message: {display}"
+    );
+    assert!(
+        !debug.contains(MARKER),
+        "the file's own text reached Debug: {debug}"
+    );
+    assert!(
+        display.len() < 200,
+        "the message is unbounded ({} bytes): {display}",
+        display.len()
+    );
+}
+
+/// The negative control for the test above.
+///
+/// Without it, that test cannot tell "the message is clean" from "this container is
+/// rejected before the XML is read at all", which would make it pass against a parser
+/// that never ran. The same builder, the same attribute, a *well-formed* value: the file
+/// must get past XML parsing and fail somewhere later.
+#[test]
+fn the_same_attribute_with_a_well_formed_value_gets_past_the_xml() {
+    let data = build_cfb(
+        &agile_with_attr_value("encryptedKeyValue", &BASE64.encode([0u8; 32])),
+        &encrypted_package(),
+    );
+
+    let err = decrypt_ooxml(&data, "irrelevant").expect_err("the package is not decryptable");
+
+    assert!(
+        !matches!(err, Error::XmlParse(_)),
+        "a well-formed value must parse; the poisoned test proves nothing otherwise: {err}"
+    );
+}
+
+/// The base64 decoder is the other foreign `Display` on this path.
+///
+/// `DecodeError::InvalidByte` carries the offending character. The offset is kept because
+/// it is a position; the character is dropped because it is content.
+#[test]
+fn a_bad_base64_symbol_is_reported_by_offset_and_not_by_value() {
+    // `*` is outside the base64 alphabet and is not an XML metacharacter, so it reaches
+    // the decoder rather than the parser.
+    let mut value = BASE64.encode([0u8; 32]);
+    value.replace_range(4..5, "*");
+    let data = build_cfb(
+        &agile_with_attr_value("encryptedKeyValue", &value),
+        &encrypted_package(),
+    );
+
+    let err = decrypt_ooxml(&data, "irrelevant").expect_err("invalid base64 is refused");
+    let msg = err.to_string();
+
+    assert!(matches!(err, Error::XmlParse(_)), "got: {err}");
+    assert!(
+        msg.contains("offset 4"),
+        "the offset locates the fault: {msg}"
+    );
+    assert!(
+        !msg.contains('*'),
+        "the offending symbol is content and must not be quoted: {msg}"
+    );
+}
+
 // ---- standard: EncryptionVerifier length --------------------------------------------
 
 /// The guard admitted 52 bytes; the last field ends at 72. Every verifier length in

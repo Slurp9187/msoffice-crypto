@@ -179,6 +179,41 @@ individual failures are in the archived development record. The practice is stat
 - **Distinct failures.** "Wrong password", "file tampered" and "unsupported algorithm" are
   separate error variants, because telling a user their password is wrong when the file was
   modified is actively misleading.
+- **No dependency's `Display` reaches a message built from the document.**
+  `Error::XmlParse` forwarded
+  `quick_xml::Error`'s `Display` from four call sites, three of which run on attribute
+  *values* — `saltValue`, `encryptedKeyValue` and the two verifier blobs. quick-xml quotes
+  the text between `&` and the next `;` of whatever it is unescaping, so a crafted
+  `encryptedKeyValue` put its own text into the error, bounded only by the 1 MiB
+  `ENCRYPTION_INFO_READ_CAP`. Measured before the fix: an attribute holding a 4608-byte
+  entity produced a 4609-byte message quoting all of it. Not key material — the attacker
+  supplies the text — but unbounded attacker-chosen content in an error string is precisely
+  what `UnsupportedAlgorithm` truncates to 32 characters and says it does. quick-xml and
+  base64 failures are now classified into fixed descriptions by exhaustive matches, so a
+  variant added upstream is a compile error rather than a silent forward, and `source()` is
+  left `None` rather than holding the foreign error, which would reopen the same conduit
+  through `source()` and the derived `Debug`. Guarded by
+  `a_hostile_entity_in_an_attribute_value_never_reaches_the_error_message`, with a
+  well-formed-value control; reverting the classifier fails it.
+
+  Found by the downstream consumer reading this crate's source, the same day they shipped a
+  fix for the identical shape in their own tree — `rusqlite::Error::SqlInputError`'s
+  `Display` prints the failing SQL, and a `#[from]` variant rendered with `{0}` had carried
+  a live SQLCipher key into a UI string. The rule generalised from it, and adopted here: an
+  error-hygiene rule governs the strings *this* crate writes, never the strings its
+  dependencies write.
+
+  Two variants still forward a foreign `Display`, and the difference from `XmlParse` is the
+  reason rather than an oversight. `Error::RandomSource` carries the RNG's sentence because
+  it names an *environment* failure — no `getrandom` in the sandbox, an exhausted descriptor
+  table — which is the entire diagnostic value of the variant, and because on a failure
+  there is nothing generated to disclose; it is truncated to 200 characters all the same,
+  since its constructor is generic over any `Display` and the length is therefore a property
+  of the caller rather than of anything checked. `Error::Io` carries `std::io::Error`'s,
+  audited against the only producers on these paths: `cfb` 0.14.0 interpolates lengths and
+  fixed strings and never a stream name or a file byte. Both are stated in the error type's
+  own docs as a three-row table, so the next reader does not have to re-derive which of the
+  three is which.
 
 [`SECURITY.md`](SECURITY.md) states what counts as a vulnerability in a crate whose entire
 job is parsing bytes an attacker chose — and, as usefully, what does not.

@@ -296,8 +296,33 @@ pub(crate) fn fill<R: TryRng + TryCryptoRng>(rng: &mut R, dst: &mut [u8]) -> Res
 
 /// The RNG's `Display`, which describes the *source* and never its output — on a failure
 /// there is no output to describe.
+///
+/// **This is the one foreign `Display` this crate forwards on purpose**, and it is the
+/// exception that `Error`'s own docs argue for rather than assume. `agile::xml_error`
+/// classifies quick-xml's instead of forwarding it, because quick-xml's carries text drawn
+/// from a document an attacker wrote. An RNG's does not: it names an environment failure —
+/// no `getrandom` in the sandbox, an exhausted descriptor table — and that sentence is the
+/// whole diagnostic value of the variant. Classifying it to "the random source failed"
+/// would leave a caller with an unactionable error where the actionable one was free.
+///
+/// It is **truncated** all the same. The bound is not about this RNG, whose messages are a
+/// short sentence; it is that the generic accepts any `Display`, so the length is a
+/// property of whatever is passed rather than of anything checked here. Same reasoning as
+/// `agile::unsupported_algorithm`'s 32-character cap on an attribute name: bounded at the
+/// construction site, and the variant says so.
 pub(crate) fn random_source<E: core::fmt::Display>(e: E) -> Error {
-    Error::RandomSource(e.to_string())
+    /// Long enough for any real `io::Error` or `getrandom` sentence, short enough that the
+    /// message cannot become a payload.
+    const MAX: usize = 200;
+
+    let text = e.to_string();
+    let bounded = match text.char_indices().nth(MAX) {
+        // `char_indices` keeps the cut on a boundary, so this cannot panic on a multi-byte
+        // character the way `truncate(MAX)` would.
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text,
+    };
+    Error::RandomSource(bounded)
 }
 
 #[cfg(test)]

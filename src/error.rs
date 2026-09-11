@@ -24,6 +24,54 @@
 /// interpolated into [`Error::BadParameters`] — it is bounded and truncated at
 /// the construction site, and the variant says so. Match with a `_` arm: the enum does
 /// not implement `PartialEq`.
+///
+/// # Who the messages are written for
+///
+/// **A programmer choosing a policy, not the person holding the file.** Several name a
+/// [`crate::IntegrityPolicy`] variant, which is a Rust path and useful only to whoever
+/// writes the call. A consumer that renders a failure to an end user should **match on
+/// the variant and write its own copy**, not forward `Display`.
+///
+/// That is a real hazard rather than a style note, and it was found by a consumer reading
+/// its own test output. The three integrity failures are *not* symmetric in what their
+/// opt-out costs:
+///
+/// - [`Error::IntegrityCheckFailed`] offers none, because there is none.
+/// - [`Error::IntegrityUnavailable`]'s is a property of the **format** — a 2007 file has
+///   no tag to check, and opening it anyway concedes only what that format never offered.
+/// - [`Error::IntegrityElementMissing`]'s is "decrypt evidence of tampering anyway", on a
+///   file whose missing element is, per that variant's docs, never innocent.
+///
+/// Forwarded uniformly, the third reaches the person holding the file as instructions for
+/// opening the document an attacker prepared for them. The message says what the opt-out
+/// concedes, so that forwarding it is at worst unhelpful rather than misleading — but the
+/// fix is to map the variant, and this paragraph exists so that nobody has to discover
+/// that by reading test output a second time.
+///
+/// # What `source()` returns, and why it is mostly `None`
+///
+/// `None` for every variant except [`Error::Io`] — deliberately, and not for want of
+/// `thiserror`. The variants that wrap a foreign failure reduce it to a string instead of
+/// holding it behind `#[source]`. Holding it would reopen, in two places rather than one,
+/// the conduit that reduction exists to close: `source()` would hand a caller the
+/// dependency's `Display`, and this enum's derived `Debug` would print it. A walkable
+/// error chain is worth less here than a message this crate can characterise completely —
+/// this type's whole input is a document an attacker wrote.
+///
+/// The three foreign failures are not treated alike, and the difference is the point:
+///
+/// | Variant | Foreign `Display` | Why |
+/// | --- | --- | --- |
+/// | [`Error::XmlParse`] | **never** — classified by an exhaustive match | quick-xml quotes text drawn from the document |
+/// | [`Error::RandomSource`] | forwarded, truncated to 200 characters | names an environment failure; on a failure nothing was generated |
+/// | [`Error::Io`] | forwarded | `cfb` 0.14.0 audited: lengths and fixed strings only |
+///
+/// [`Error::Io`] is the one `#[from]`, and it does forward `std::io::Error`'s `Display`.
+/// That is audited rather than assumed: on these paths the only producers are `cfb`,
+/// whose `invalid_data!` messages interpolate lengths and fixed strings and never a
+/// stream name or a file byte (`direntry.rs:118-140` in 0.14.0), and `std::io::Cursor`,
+/// which fails only on allocation. **Re-check it on a `cfb` bump** — that is the standing
+/// cost of a `#[from]` on a foreign error type, and the reason there is only one.
 // `unreachable_pub` fires on this type in the **detection** build and only there: the
 // re-export at `lib.rs` is `#[cfg(feature = "crypto-ops")]`, so without that feature this
 // is a `pub` item in a private module that nothing re-exports. That is the design the doc
@@ -86,9 +134,27 @@ pub enum Error {
     /// absent.
     ///
     /// Distinct from [`Self::BadParameters`]: that one is a value that parsed and is
-    /// out of range; this one is XML that did not yield a value at all. The string
-    /// describes the *shape* of the failure — an attribute name, a parse error — never
-    /// key material.
+    /// out of range; this one is XML that did not yield a value at all.
+    ///
+    /// **The string is always one this crate wrote.** No dependency's `Display` reaches
+    /// it: `agile::xml_error` and `agile::base64_error` classify quick-xml and base64
+    /// failures into fixed descriptions, and both match exhaustively, so a variant added
+    /// upstream is a compile error here rather than a silent forward.
+    ///
+    /// That is a correction and not a description of how it always was. Until
+    /// 2026-09-11 the quick-xml `Display` was forwarded verbatim by four call sites, three
+    /// of which run on attribute *values* — `saltValue`, `encryptedKeyValue` and the two
+    /// verifier blobs. quick-xml quotes the text between `&` and the next `;` of whatever
+    /// it is unescaping, so a crafted `encryptedKeyValue` put its own text here, bounded
+    /// only by `limits::ENCRYPTION_INFO_READ_CAP` — 1 MiB. Not key material, since the
+    /// attacker supplies the text, but unbounded attacker-chosen content in an error
+    /// string is the thing [`Error::UnsupportedAlgorithm`] truncates to 32 characters and
+    /// documents doing. Found by the downstream consumer, reading this file.
+    ///
+    /// The guard is
+    /// `malformed_input::a_hostile_entity_in_an_attribute_value_never_reaches_the_error_message`,
+    /// with a well-formed-value control beside it; reverting `xml_error` to
+    /// `e.to_string()` fails it with a 4609-byte message quoting 4608 bytes of the file.
     #[error("EncryptionInfo XML parse error: {0}")]
     #[cfg(feature = "crypto-ops")]
     XmlParse(String),
@@ -174,10 +240,19 @@ pub enum Error {
     /// to its `Display` string and a dead end is a worse answer than a signposted one.
     /// The `Display` text names [`crate::IntegrityPolicy`]'s opt-out in plain words
     /// because a `#[error]` string cannot carry an intra-doc link.
+    ///
+    /// **This is the one opt-out in the enum that concedes something a caller should not
+    /// concede lightly**, and the message therefore carries its cost rather than only its
+    /// name. [`Self::IntegrityCheckFailed`] offers no way out because none exists, and
+    /// [`Self::IntegrityUnavailable`]'s is a limit of the format; this one is "accept a
+    /// file whose tamper-evidence was deleted", on a file where — see above — the deletion
+    /// is never innocent. A consumer that forwards `Display` to an end user forwards that
+    /// too. See the enum's own docs: render integrity failures by matching the variant.
     #[error(
         "this file declares agile encryption but carries no <dataIntegrity> element: \
         every known agile writer emits one, so it was removed or the file is malformed. \
-        Pass IntegrityPolicy::VerifyIfPresent to decrypt it anyway, unverified"
+        IntegrityPolicy::VerifyIfPresent decrypts it unverified, which accepts a file \
+        whose tamper-evidence is absent"
     )]
     #[cfg(feature = "crypto-ops")]
     IntegrityElementMissing,
@@ -186,7 +261,15 @@ pub enum Error {
     /// all — `IntegrityPolicy::Require` on ECMA-376 standard encryption (Office 2007).
     ///
     /// An *agile* file missing its element is [`Self::IntegrityElementMissing`] instead:
-    /// that is a defect in the file, this is a limit of the format.
+    /// that is a defect in the file, this is a limit of the format. The two want different
+    /// words in front of a user — "this format cannot prove it was not modified" against
+    /// "this file's proof was removed" — which is the whole reason they are two variants.
+    ///
+    /// Like that sibling, the message names the way out, because a consumer flattens this
+    /// to its `Display`. Measured at one: the string reaches a user as *"integrity
+    /// verification was required, but ECMA-376 standard encryption (Office 2007) defines
+    /// no integrity element…"*, and a message that states the problem without the remedy
+    /// is a dead end where a signposted one costs nothing.
     ///
     /// Both this variant and [`crate::IntegrityPolicy`] exist only under `crypto-ops`,
     /// so the link resolves in every configuration that renders it.
@@ -205,6 +288,9 @@ pub enum Error {
     ///
     /// The string is the RNG's own `Display`, which describes *the source* — never its
     /// output. No generated byte can reach here: on failure there is nothing generated.
+    /// Truncated to 200 characters at the construction site, `agile_encrypt::random_source`,
+    /// which explains why this one foreign `Display` is forwarded where
+    /// [`Self::XmlParse`]'s is not.
     #[error("the random source failed while generating key material: {0}")]
     #[cfg(feature = "crypto-ops")]
     RandomSource(String),

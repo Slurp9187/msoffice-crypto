@@ -713,7 +713,10 @@ pub fn decrypt_ooxml_with_policy(
             match policy {
                 IntegrityPolicy::Require => {
                     return Err(Error::IntegrityUnavailable(
-                        "ECMA-376 standard encryption (Office 2007) defines no integrity element",
+                        "ECMA-376 standard encryption (Office 2007) defines no integrity \
+                         element. Re-saving the file with Office 2013 or later writes agile \
+                         encryption, which does; IntegrityPolicy::RequireWhereDefined opens \
+                         this one as it is, unauthenticated",
                     ))
                 }
                 IntegrityPolicy::RequireWhereDefined
