@@ -253,6 +253,20 @@ private repo the API answers `404 Not Found` and the Settings toggle is absent, 
 window between going public and enabling it is a window in which the security policy points
 at a button that is not there.
 
+**Point CI back at hosted runners, and remove the self-hosted one.**
+
+```bash
+gh variable delete CI_RUNNER          # ci.yml then falls back to ubuntu-latest
+```
+
+Then remove the runner itself from Settings -> Actions -> Runners, and uninstall the
+service on that host. `msoc-linux` was registered on 2026-09-11 only because a private
+repository consumes Actions minutes and the account had hit its spending limit. Public
+repositories get unlimited hosted minutes, so the reason ends here -- and GitHub advises
+against self-hosted runners on public repositories, because a pull request from a fork can
+execute arbitrary code on the runner host. That host is a workstation holding this
+repository and others.
+
 **Re-enable the CI workflow.** It was disabled by hand on 2026-09-10
 (`state: disabled_manually`) because a private repository consumes Actions minutes, the
 account hit its spending limit, and every job began failing before it ran a single step --
