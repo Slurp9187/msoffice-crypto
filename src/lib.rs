@@ -82,13 +82,35 @@
 //! all. `cargo add msoffice-crypto` installs that and nothing more.
 //!
 //! **Decryption and encryption are the `crypto-ops` feature.** `decrypt_ooxml`,
-//! `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_standard` and the
-//! `IntegrityPolicy` / `IntegrityOutcome` enums live behind it, together with `aes`,
-//! `cbc`, `ecb`, `sha1`, `sha2`, `hmac`, `base64` and `rand`:
+//! `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_standard`, the
+//! `Decrypted` struct and the `IntegrityPolicy` / `IntegrityOutcome` enums live behind
+//! it, together with `aes`, `cbc`, `ecb`, `sha1`, `sha2`, `hmac`, `base64` and `rand`:
 //!
 //! ```toml
 //! msoffice-crypto = { version = "0.1.0-rc.1", features = ["crypto-ops"] }
 //! ```
+//!
+//! <div class="warning">
+//!
+//! **If you see** `cannot find type Error in crate msoffice_crypto`, this is the
+//! feature you are missing.
+//!
+//! To be exact about what is gated, because the imprecise version misleads: the error
+//! *type* compiles in every configuration — every variant payload is a `&'static str`,
+//! `String`, `u16` or `std::io::Error`, so it costs the detection build nothing but
+//! `thiserror` — and it is only the `pub use` that `crypto-ops` gates. The reason is not
+//! that the type needs a cipher. It is that once the crypto-only variants are gated, an
+//! ungated re-export would be a public type whose *shape* changes with a feature the
+//! consumer cannot see from the name, in a build where `classify()` is infallible and
+//! nothing produces it.
+//!
+//! The first crate to wire against this reported that the failure surfaces on a function
+//! signature naming `Error`, which reads as a plumbing mistake rather than a missing
+//! feature. The diagnostic cannot be improved from inside the crate: a `compile_error!`
+//! on "no cryptography features" would break the detection-only build, which is a
+//! supported configuration and the default one.
+//!
+//! </div>
 //!
 //! `secure-gate` — this crate's zeroizing primitive — rides on `crypto-ops` as well: the
 //! detection build holds no key material. No secure-gate type crosses the public API,
@@ -244,6 +266,52 @@ pub use error::Error;
 #[cfg(feature = "crypto-ops")]
 pub use integrity::{IntegrityOutcome, IntegrityPolicy};
 
+/// What [`decrypt_ooxml_with_policy`] returns: the package, and what was established
+/// about it.
+///
+/// A struct rather than the `(Vec<u8>, IntegrityOutcome)` this returned until the first
+/// consumer wired against it, for two reasons that only showed up at a real call site.
+///
+/// **Arity.** A tuple freezes the number of facts at publication. There are two here and
+/// a plausible third — which cipher a file actually used, which spec branch it parsed as
+/// — and adding one to a tuple is a breaking change for every caller, while adding a
+/// field to a `#[non_exhaustive]` struct is not. `#[non_exhaustive]` is free before the
+/// first publish and impossible to add afterwards without the same break, which is why
+/// this is the shape that ships.
+///
+/// **Prominence.** [`Self::integrity`] is not a detail attached to the bytes; for a
+/// caller that stores what it decrypts it is the predicate deciding whether the bytes may
+/// be kept at all. `let (package, _) = ...` is eight characters and reads as idiom rather
+/// than as a decision, and this crate's own [`decrypt_ooxml`] is the demonstration — it is
+/// the one place that consumes this and it discards the outcome. That is correct *there*,
+/// because that wrapper exists to be the "I do not need to ask" path, which is exactly
+/// what made it the wrong default shape for everyone else. As a field the check reads as
+/// `decrypted.integrity`, named at every call site and in every review diff.
+///
+/// There is deliberately no `require_verified()` helper. [`IntegrityPolicy::Require`]
+/// already refuses unauthenticated plaintext *before* any work is done, and a second
+/// gate after the fact would have to invent an error variant for "the policy allowed this
+/// but I changed my mind", which is not a fact about the file.
+#[cfg(feature = "crypto-ops")]
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Decrypted {
+    /// The decrypted package: the plain `.docx` / `.xlsx` / `.pptx` ZIP.
+    ///
+    /// **Not zeroized on drop**, deliberately and unlike this crate's key material. It is
+    /// a document, its size is the file's, and a caller that needs it wiped knows that
+    /// better than this crate does — wrap it at the boundary. No `secure-gate` type
+    /// crosses this API by design; see the crate docs.
+    pub package: Vec<u8>,
+
+    /// What was established about [`Self::package`]'s integrity.
+    ///
+    /// Ask [`IntegrityOutcome::is_authenticated`] rather than matching: the enum is
+    /// `#[non_exhaustive]`, so a wildcard arm in a caller's `match` cannot know which side
+    /// a future variant belongs on, and that predicate can.
+    pub integrity: IntegrityOutcome,
+}
+
 /// Returns `true` if `data` begins with the CFB magic `D0 CF 11 E0 A1 B1 1A E1`.
 ///
 /// A Word / Excel / PowerPoint file encrypted via File → Protect → Encrypt with Password
@@ -349,8 +417,7 @@ pub fn is_cfb_office(data: &[u8]) -> bool {
 /// writes. [`classify()`] is the pre-flight that does not decrypt.
 #[cfg(feature = "crypto-ops")]
 pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, Error> {
-    decrypt_ooxml_with_policy(data, password, IntegrityPolicy::default())
-        .map(|(package, _)| package)
+    decrypt_ooxml_with_policy(data, password, IntegrityPolicy::default()).map(|d| d.package)
 }
 
 /// Encrypt an OOXML package with a password, producing the CFB container Office writes.
@@ -448,14 +515,14 @@ pub fn encrypt_ooxml(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
 ///
 /// let package = include_bytes!("../tests/fixtures/plain.docx");
 /// let sealed = encrypt_ooxml_standard(package, "testpass")?;
-/// let (plain, outcome) = decrypt_ooxml_with_policy(
+/// let decrypted = decrypt_ooxml_with_policy(
 ///     &sealed,
 ///     "testpass",
 ///     IntegrityPolicy::RequireWhereDefined,
 /// )?;
-/// assert_eq!(plain, package);
-/// assert_eq!(outcome, IntegrityOutcome::NotApplicable);
-/// assert!(!outcome.is_authenticated());
+/// assert_eq!(decrypted.package, package);
+/// assert_eq!(decrypted.integrity, IntegrityOutcome::NotApplicable);
+/// assert!(!decrypted.integrity.is_authenticated());
 /// # Ok::<(), msoffice_crypto::Error>(())
 /// ```
 ///
@@ -611,14 +678,14 @@ const AGILE_ENCRYPTION_RESERVED: u32 = 0x0000_0040;
 ///     decrypt_ooxml_with_policy, IntegrityOutcome, IntegrityPolicy,
 /// };
 ///
-/// let (package, outcome) = decrypt_ooxml_with_policy(
+/// let decrypted = decrypt_ooxml_with_policy(
 ///     include_bytes!("../tests/fixtures/agile_encrypted.docx"),
 ///     "testpass",
 ///     IntegrityPolicy::Require,
 /// )?;
-/// assert_eq!(outcome, IntegrityOutcome::Verified);
-/// assert!(outcome.is_authenticated());
-/// assert!(package.starts_with(b"PK\x03\x04"));
+/// assert_eq!(decrypted.integrity, IntegrityOutcome::Verified);
+/// assert!(decrypted.integrity.is_authenticated());
+/// assert!(decrypted.package.starts_with(b"PK\x03\x04"));
 /// # Ok::<(), msoffice_crypto::Error>(())
 /// ```
 ///
@@ -632,7 +699,7 @@ pub fn decrypt_ooxml_with_policy(
     data: &[u8],
     password: &str,
     policy: IntegrityPolicy,
-) -> Result<(Vec<u8>, IntegrityOutcome), Error> {
+) -> Result<Decrypted, Error> {
     if !is_cfb_office(data) {
         return Err(Error::NotACfbFile);
     }
@@ -693,6 +760,7 @@ pub fn decrypt_ooxml_with_policy(
                 password,
                 policy,
             )
+            .map(|(package, integrity)| Decrypted { package, integrity })
         }
         // Standard Encryption — binary EncryptionHeader starts after the 8-byte header
         // vMajor 2/3/4 all indicate Standard Encryption per MS-OFFCRYPTO spec.
@@ -728,7 +796,10 @@ pub fn decrypt_ooxml_with_policy(
                 &streams.encrypted_package,
                 password,
             )?;
-            Ok((package, IntegrityOutcome::NotApplicable))
+            Ok(Decrypted {
+                package,
+                integrity: IntegrityOutcome::NotApplicable,
+            })
         }
         _ => Err(Error::UnsupportedEncryptionVersion(v_major, v_minor)),
     }
@@ -871,9 +942,11 @@ mod tests {
             for name in NON_SHA512_AGILE_FIXTURES {
                 let data = fixture(name);
                 assert!(is_cfb_office(&data));
-                let (out, outcome) =
-                    decrypt_ooxml_with_policy(&data, "testpass", IntegrityPolicy::Require)
-                        .unwrap_or_else(|e| panic!("{name} must decrypt: {e}"));
+                let crate::Decrypted {
+                    package: out,
+                    integrity: outcome,
+                } = decrypt_ooxml_with_policy(&data, "testpass", IntegrityPolicy::Require)
+                    .unwrap_or_else(|e| panic!("{name} must decrypt: {e}"));
                 assert_eq!(out, plain, "{name} must decrypt to the known plaintext");
                 // Its dataIntegrity HMAC runs on the same non-SHA-512 algorithm, so
                 // `Require` also proves `<keyData>`'s half is honoured end to end.
@@ -1085,10 +1158,12 @@ mod tests {
             // "the policy is wired" from "these bytes always fail", and the opt-out #12
             // promises could be unreachable while every assertion above still passed.
             for policy in [IntegrityPolicy::VerifyIfPresent, IntegrityPolicy::Skip] {
-                let (plain, outcome) = decrypt_ooxml_with_policy(&data, "testpass", policy)
-                    .unwrap_or_else(|e| {
-                        panic!("{policy:?} must still decrypt a tag-less agile file: {e}")
-                    });
+                let crate::Decrypted {
+                    package: plain,
+                    integrity: outcome,
+                } = decrypt_ooxml_with_policy(&data, "testpass", policy).unwrap_or_else(|e| {
+                    panic!("{policy:?} must still decrypt a tag-less agile file: {e}")
+                });
                 // `Skip` reports `NotDeclared`, not `Skipped`: nothing was skipped.
                 assert_eq!(outcome, IntegrityOutcome::NotDeclared, "{policy:?}");
                 assert!(plain.starts_with(b"PK\x03\x04"), "{policy:?}");
@@ -1096,9 +1171,10 @@ mod tests {
 
             // The second control: the same bytes with the tag still in place verify, so
             // the refusals come from the deleted element and not from the rewrite.
-            let (_, outcome) =
-                decrypt_ooxml_with_policy(&agile_fixture(), "testpass", IntegrityPolicy::Require)
-                    .unwrap();
+            let crate::Decrypted {
+                integrity: outcome, ..
+            } = decrypt_ooxml_with_policy(&agile_fixture(), "testpass", IntegrityPolicy::Require)
+                .unwrap();
             assert_eq!(outcome, IntegrityOutcome::Verified);
         }
 
@@ -1106,9 +1182,11 @@ mod tests {
         /// HMAC were computed over the wrong bytes, this fails rather than the tamper test.
         #[test]
         fn test_agile_fixture_integrity_verifies() {
-            let (plain, outcome) =
-                decrypt_ooxml_with_policy(&agile_fixture(), "testpass", IntegrityPolicy::Require)
-                    .expect("the unmodified fixture must verify under Require");
+            let crate::Decrypted {
+                package: plain,
+                integrity: outcome,
+            } = decrypt_ooxml_with_policy(&agile_fixture(), "testpass", IntegrityPolicy::Require)
+                .expect("the unmodified fixture must verify under Require");
             assert_eq!(outcome, IntegrityOutcome::Verified);
             assert!(plain.starts_with(b"PK\x03\x04"));
         }
@@ -1129,7 +1207,7 @@ mod tests {
                 assert!(
                     matches!(result, Err(Error::IntegrityCheckFailed)),
                     "{policy:?} must refuse a tampered package, got {:?}",
-                    result.map(|(p, o)| (p.len(), o))
+                    result.map(|d| (d.package.len(), d.integrity))
                 );
             }
 
@@ -1148,9 +1226,11 @@ mod tests {
         #[test]
         fn test_agile_tampered_ciphertext_decrypts_under_skip() {
             let tampered = tamper_agile_fixture(8 + 20_000);
-            let (plain, outcome) =
-                decrypt_ooxml_with_policy(&tampered, "testpass", IntegrityPolicy::Skip)
-                    .expect("Skip must not check the HMAC");
+            let crate::Decrypted {
+                package: plain,
+                integrity: outcome,
+            } = decrypt_ooxml_with_policy(&tampered, "testpass", IntegrityPolicy::Skip)
+                .expect("Skip must not check the HMAC");
             assert_eq!(outcome, IntegrityOutcome::Skipped);
             assert!(
                 plain.starts_with(b"PK\x03\x04"),
@@ -1207,7 +1287,10 @@ mod tests {
                 IntegrityPolicy::VerifyIfPresent,
                 IntegrityPolicy::Skip,
             ] {
-                let (plain, outcome) = decrypt_ooxml_with_policy(&data, "testpass", policy)
+                let crate::Decrypted {
+                    package: plain,
+                    integrity: outcome,
+                } = decrypt_ooxml_with_policy(&data, "testpass", policy)
                     .unwrap_or_else(|e| panic!("{policy:?} must decrypt a standard file: {e}"));
                 assert_eq!(outcome, IntegrityOutcome::NotApplicable);
                 assert_eq!(plain, known, "{policy:?}");
@@ -1247,8 +1330,10 @@ mod tests {
                 let data = fixture(name);
                 let plain = decrypt_ooxml(&data, "testpass")
                     .unwrap_or_else(|e| panic!("{name} must decrypt under the default: {e}"));
-                let (with_policy, outcome) =
-                    decrypt_ooxml_with_policy(&data, "testpass", IntegrityPolicy::Require).unwrap();
+                let crate::Decrypted {
+                    package: with_policy,
+                    integrity: outcome,
+                } = decrypt_ooxml_with_policy(&data, "testpass", IntegrityPolicy::Require).unwrap();
                 assert_eq!(plain, with_policy, "{name}");
                 assert_eq!(plain, fixture("plain.docx"), "{name}");
                 assert_eq!(outcome, IntegrityOutcome::Verified, "{name}");

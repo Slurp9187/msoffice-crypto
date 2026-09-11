@@ -237,9 +237,11 @@ fn encrypt_ooxml_standard_round_trips_and_reports_no_integrity_element() {
     let container = crate::encrypt_ooxml_standard(&plain, PASSWORD).expect("encrypt");
     assert!(crate::is_cfb_office(&container));
 
-    let (back, outcome) =
-        crate::decrypt_ooxml_with_policy(&container, PASSWORD, crate::IntegrityPolicy::default())
-            .expect("what this crate wrote, it must read");
+    let crate::Decrypted {
+        package: back,
+        integrity: outcome,
+    } = crate::decrypt_ooxml_with_policy(&container, PASSWORD, crate::IntegrityPolicy::default())
+        .expect("what this crate wrote, it must read");
     assert_eq!(outcome, crate::IntegrityOutcome::NotApplicable);
     assert!(
         !outcome.is_authenticated(),
@@ -289,9 +291,11 @@ fn a_tampered_standard_file_decrypts_to_the_wrong_bytes_because_the_format_canno
     }
     let tampered = cursor.into_inner();
 
-    let (wrong, outcome) =
-        crate::decrypt_ooxml_with_policy(&tampered, PASSWORD, crate::IntegrityPolicy::default())
-            .expect("standard encryption has no tag to fail");
+    let crate::Decrypted {
+        package: wrong,
+        integrity: outcome,
+    } = crate::decrypt_ooxml_with_policy(&tampered, PASSWORD, crate::IntegrityPolicy::default())
+        .expect("standard encryption has no tag to fail");
     assert_eq!(outcome, crate::IntegrityOutcome::NotApplicable);
     assert_eq!(wrong.len(), plain.len());
     assert_ne!(wrong, plain, "the flipped byte must change the plaintext");
@@ -335,9 +339,11 @@ fn encrypt_ooxml_standard_output_classifies_as_office_2007_aes_128() {
 fn an_empty_package_round_trips() {
     let container = crate::encrypt_ooxml_standard(&[], PASSWORD).unwrap();
     assert_eq!(stream_of(&container, "/EncryptedPackage").len(), 8);
-    let (back, outcome) =
-        crate::decrypt_ooxml_with_policy(&container, PASSWORD, crate::IntegrityPolicy::default())
-            .unwrap();
+    let crate::Decrypted {
+        package: back,
+        integrity: outcome,
+    } = crate::decrypt_ooxml_with_policy(&container, PASSWORD, crate::IntegrityPolicy::default())
+        .unwrap();
     assert_eq!(outcome, crate::IntegrityOutcome::NotApplicable);
     assert!(back.is_empty());
 }

@@ -61,6 +61,50 @@ a consumer has no ref to check out and re-run the suite against.
 The rule lives in `.claude/skills/changelog-protocol/SKILL.md`, adapted from a sibling
 project's protocol.
 
+### API shape, settled by the first consumer
+
+`decrypt_ooxml_with_policy` returns a `#[non_exhaustive] struct Decrypted { package,
+integrity }` rather than the `(Vec<u8>, IntegrityOutcome)` tuple it returned while nothing
+had wired against it. Changed on a consumer's evidence rather than on taste: the first crate
+to integrate prototyped the call on a branch and reported back what the tuple did at a real
+call site.
+
+Two reasons, in the order that decided it.
+
+**Arity.** A tuple freezes the number of facts at publication. There are two here and a
+plausible third — which cipher a file actually used, which spec branch it parsed as — and
+adding one to a tuple breaks every caller, while adding a field to a `#[non_exhaustive]`
+struct does not. `#[non_exhaustive]` is free before the first publish and unavailable
+afterwards without that same break, so the window for this was exactly now.
+
+**Prominence.** `IntegrityOutcome` is not a detail attached to the bytes; for a consumer
+that stores what it decrypts it is the predicate deciding whether the bytes may be kept.
+The reported shape was:
+
+```rust
+let (package, outcome) = decrypt_ooxml_with_policy(data, password, IntegrityPolicy::Require)
+    .map_err(|e| ProtocolError::Generic(format!("Office decryption failed: {e}")))?;
+```
+
+Destructuring and mapping the error in one expression puts the security-relevant binding on
+the left of a line whose right-hand side is about error handling, where it is the least
+prominent thing in the statement. As a field it reads as `decrypted.integrity` — named at
+every call site and in every review diff. This crate's own `decrypt_ooxml` was the
+demonstration of the hazard: it is the one place that consumed the tuple, and it discards
+the outcome with `|(package, _)|`. Correct *there*, because that wrapper is the "I do not
+need to ask" path — which is what made it the wrong default shape for everyone else.
+
+There is deliberately **no** `require_verified()` helper, though one was floated.
+`IntegrityPolicy::Require` already refuses unauthenticated plaintext before any work is
+done, and a second gate after the fact would have to invent an error variant for "the policy
+allowed this but I changed my mind", which is not a fact about the file.
+
+The same consumer reported that a missing `crypto-ops` feature fails as `cannot find type
+Error`, on a line that reads as a plumbing mistake rather than a missing feature — `Error`
+is gated with the functions that return it. The crate docs now name that error text. A
+`compile_error!` was considered and rejected: the condition would be "no cryptography
+features", which is the detection-only build — supported, and the default.
+
 ### Evidence
 
 Every figure below was measured, not asserted. The commands that produce them are in

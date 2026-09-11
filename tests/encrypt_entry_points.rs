@@ -70,24 +70,23 @@ fn both_entry_points_round_trip_and_only_the_agile_one_authenticates() {
     );
 
     // The default policy opens both, and says which one it could authenticate.
-    let (back, outcome) =
-        decrypt_ooxml_with_policy(&standard, PASSWORD, IntegrityPolicy::default())
-            .expect("the standard file opens under the default policy");
+    let opened = decrypt_ooxml_with_policy(&standard, PASSWORD, IntegrityPolicy::default())
+        .expect("the standard file opens under the default policy");
     assert_eq!(
-        back, plain,
+        opened.package, plain,
         "standard: the package must survive the round trip"
     );
-    assert_eq!(outcome, IntegrityOutcome::NotApplicable);
-    assert!(!outcome.is_authenticated());
+    assert_eq!(opened.integrity, IntegrityOutcome::NotApplicable);
+    assert!(!opened.integrity.is_authenticated());
 
-    let (back, outcome) = decrypt_ooxml_with_policy(&agile, PASSWORD, IntegrityPolicy::default())
+    let opened = decrypt_ooxml_with_policy(&agile, PASSWORD, IntegrityPolicy::default())
         .expect("the agile file opens under the default policy");
     assert_eq!(
-        back, plain,
+        opened.package, plain,
         "agile: the package must survive the round trip"
     );
-    assert_eq!(outcome, IntegrityOutcome::Verified);
-    assert!(outcome.is_authenticated());
+    assert_eq!(opened.integrity, IntegrityOutcome::Verified);
+    assert!(opened.integrity.is_authenticated());
 
     // `Require` refuses the format that cannot deliver, by name, and accepts the one
     // that can — the control without which the refusal proves nothing.
@@ -98,10 +97,10 @@ fn both_entry_points_round_trip_and_only_the_agile_one_authenticates() {
         ),
         "Require must refuse a standard file as IntegrityUnavailable"
     );
-    let (back, outcome) = decrypt_ooxml_with_policy(&agile, PASSWORD, IntegrityPolicy::Require)
+    let opened = decrypt_ooxml_with_policy(&agile, PASSWORD, IntegrityPolicy::Require)
         .expect("Require must accept an agile file this crate wrote");
-    assert_eq!(back, plain);
-    assert_eq!(outcome, IntegrityOutcome::Verified);
+    assert_eq!(opened.package, plain);
+    assert_eq!(opened.integrity, IntegrityOutcome::Verified);
 
     // The one-argument API, and the wrong password on both.
     assert_eq!(decrypt_ooxml(&standard, PASSWORD).unwrap(), plain);

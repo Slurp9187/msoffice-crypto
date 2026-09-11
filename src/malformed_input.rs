@@ -949,7 +949,10 @@ fn agile_key_data_may_name_a_different_hash_from_the_password_encryptor() {
         &agile_encryption_info_mixed("SHA1", 20, SPIN, &m),
         &package_under(&plaintext, crate::hash::HashAlgorithm::Sha1, &m),
     );
-    let (plain, outcome) = crate::decrypt_ooxml_with_policy(
+    let crate::Decrypted {
+        package: plain,
+        integrity: outcome,
+    } = crate::decrypt_ooxml_with_policy(
         &honest,
         PASSWORD,
         crate::IntegrityPolicy::VerifyIfPresent,
@@ -967,7 +970,7 @@ fn agile_key_data_may_name_a_different_hash_from_the_password_encryptor() {
         &agile_encryption_info_mixed("SHA512", 64, SPIN, &m),
         &package_under(&plaintext, crate::hash::HashAlgorithm::Sha1, &m),
     );
-    let (wrong, _) =
+    let crate::Decrypted { package: wrong, .. } =
         crate::decrypt_ooxml_with_policy(&lying, PASSWORD, crate::IntegrityPolicy::VerifyIfPresent)
             .expect("nothing in a tagless file refuses a wrong keyData hash");
     assert_ne!(

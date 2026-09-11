@@ -93,12 +93,12 @@ const AES_BLOCK_LEN: usize = 16;
 ///     decrypt_ooxml_with_policy, IntegrityOutcome, IntegrityPolicy,
 /// };
 ///
-/// let (_, outcome) = decrypt_ooxml_with_policy(
+/// let decrypted = decrypt_ooxml_with_policy(
 ///     include_bytes!("../tests/fixtures/agile_encrypted.docx"),
 ///     "testpass",
 ///     IntegrityPolicy::Require,
 /// )?;
-/// assert_eq!(outcome, IntegrityOutcome::Verified);
+/// assert_eq!(decrypted.integrity, IntegrityOutcome::Verified);
 /// # Ok::<(), msoffice_crypto::Error>(())
 /// ```
 ///
@@ -175,13 +175,13 @@ pub enum IntegrityPolicy {
 ///     decrypt_ooxml_with_policy, IntegrityOutcome, IntegrityPolicy,
 /// };
 ///
-/// let (_, outcome) = decrypt_ooxml_with_policy(
+/// let decrypted = decrypt_ooxml_with_policy(
 ///     include_bytes!("../tests/fixtures/agile_encrypted.docx"),
 ///     "testpass",
 ///     IntegrityPolicy::RequireWhereDefined,
 /// )?;
-/// assert_eq!(outcome, IntegrityOutcome::Verified);
-/// assert!(outcome.is_authenticated());
+/// assert_eq!(decrypted.integrity, IntegrityOutcome::Verified);
+/// assert!(decrypted.integrity.is_authenticated());
 /// # Ok::<(), msoffice_crypto::Error>(())
 /// ```
 ///

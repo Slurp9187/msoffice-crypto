@@ -405,9 +405,11 @@ fn encrypt_ooxml_round_trips_under_the_fail_closed_default() {
     let container = crate::encrypt_ooxml(&plain, PASSWORD).expect("encrypt");
     assert!(crate::is_cfb_office(&container));
 
-    let (back, outcome) =
-        crate::decrypt_ooxml_with_policy(&container, PASSWORD, crate::IntegrityPolicy::default())
-            .expect("what this crate wrote, it must read");
+    let crate::Decrypted {
+        package: back,
+        integrity: outcome,
+    } = crate::decrypt_ooxml_with_policy(&container, PASSWORD, crate::IntegrityPolicy::default())
+        .expect("what this crate wrote, it must read");
     assert_eq!(outcome, crate::IntegrityOutcome::Verified);
     assert_eq!(
         back, plain,
@@ -431,9 +433,11 @@ fn a_tampered_encrypt_ooxml_output_is_refused_by_the_hmac_it_wrote() {
         crate::decrypt_ooxml(&bad, PASSWORD),
         Err(Error::IntegrityCheckFailed)
     ));
-    let (wrong, outcome) =
-        crate::decrypt_ooxml_with_policy(&bad, PASSWORD, crate::IntegrityPolicy::Skip)
-            .expect("Skip returns unauthenticated bytes");
+    let crate::Decrypted {
+        package: wrong,
+        integrity: outcome,
+    } = crate::decrypt_ooxml_with_policy(&bad, PASSWORD, crate::IntegrityPolicy::Skip)
+        .expect("Skip returns unauthenticated bytes");
     assert_eq!(outcome, crate::IntegrityOutcome::Skipped);
     assert_ne!(wrong, plain, "the flipped byte must change the plaintext");
 }
@@ -461,9 +465,11 @@ fn encrypt_ooxml_output_classifies_as_the_tuple_office_writes() {
 #[test]
 fn an_empty_package_round_trips() {
     let container = crate::encrypt_ooxml(&[], PASSWORD).unwrap();
-    let (back, outcome) =
-        crate::decrypt_ooxml_with_policy(&container, PASSWORD, crate::IntegrityPolicy::default())
-            .unwrap();
+    let crate::Decrypted {
+        package: back,
+        integrity: outcome,
+    } = crate::decrypt_ooxml_with_policy(&container, PASSWORD, crate::IntegrityPolicy::default())
+        .unwrap();
     assert_eq!(outcome, crate::IntegrityOutcome::Verified);
     assert!(back.is_empty());
 }
