@@ -296,18 +296,57 @@ jobs:
     # `bans` for wildcard requirements, and `sources` to assert everything comes from
     # crates.io -- which a crate about to be published needs anyway, because `cargo publish`
     # refuses a git dependency outright.
+    #
+    # The tool is fetched as a binary rather than run through
+    # `EmbarkStudios/cargo-deny-action`, which is a *Docker* action: it builds an image on
+    # the runner, so it needs a Docker daemon the runner's own user may talk to. On the
+    # self-hosted host that user is not in the `docker` group, and this job was the only
+    # thing in the workflow that wanted one -- every other action here is JavaScript. The
+    # alternative was to add `gha-runner` to `docker`, which is root on that host, for the
+    # sake of one job. Downloading the tool instead also drops an image build from the
+    # critical path, and pins CI to the same version `docs/RELEASING.md` step 1 runs by hand.
+    #
+    # The version is pinned and the tarball checked against a SHA-256 recorded here rather
+    # than against the `.sha256` the same release serves: a sidecar fetched from the host
+    # that serves the artifact detects corruption, not substitution. Bump the two together,
+    # from a download verified off this machine.
     name: licences and advisories
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    env:
+      CARGO_DENY_VERSION: '0.20.2'
+      CARGO_DENY_SHA256: '9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f'
     steps:
       - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          # `--all-features`: optional dependencies are the point. `rc4`, `md-5` and
-          # `secure-gate` are all behind features and all reach a consumer who turns one
-          # on, so a default-features check would be blind to exactly the crates that
-          # carry key material.
-          arguments: --all-features
-          command: check licenses advisories bans sources
+      # cargo-deny shells out to `cargo metadata` to build the crate graph, so a toolchain
+      # is needed even though nothing here is compiled.
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          # The pinned hash covers one tarball. On another architecture it would fail as a
+          # checksum mismatch, which reads as tampering; say what actually happened.
+          if [ "$arch" != "x86_64" ]; then
+            echo "::error::the pinned cargo-deny build is x86_64; this runner is $arch"
+            exit 1
+          fi
+          name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          base="https://github.com/EmbarkStudios/cargo-deny/releases/download"
+          url="$base/${CARGO_DENY_VERSION}/${name}.tar.gz"
+          curl -sSfL --retry 3 -o cargo-deny.tar.gz "$url"
+          echo "${CARGO_DENY_SHA256}  cargo-deny.tar.gz" | sha256sum --check --strict -
+          tar -xzf cargo-deny.tar.gz "${name}/cargo-deny"
+          # $RUNNER_TEMP, not /usr/local/bin: on a self-hosted host the runner user has no
+          # business writing outside its own tree, and may not be able to.
+          mkdir -p "$RUNNER_TEMP/bin"
+          install -m 0755 "${name}/cargo-deny" "$RUNNER_TEMP/bin/cargo-deny"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/cargo-deny" --version
+      # `--all-features`: optional dependencies are the point. `rc4`, `md-5` and
+      # `secure-gate` are all behind features and all reach a consumer who turns one on, so
+      # a default-features check would be blind to exactly the crates that carry key
+      # material.
+      - run: cargo-deny --all-features check licenses advisories bans sources
 
   packaging-invariants:
     # Two properties that no test can see, both found untested by the 2026-09-10
