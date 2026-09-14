@@ -16,9 +16,9 @@ use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command};
 #[cfg(feature = "legacy-binary")]
 use msoffice_crypto::decrypt_binary_office;
 use msoffice_crypto::{
-    classify, decrypt_ooxml_with_policy, AlgorithmParams, CipherAlgorithm, Classification,
-    Container, Decrypted, Document, Error, Family, HashAlgorithm, IntegrityDeclaration,
-    IntegrityOutcome, IntegrityPolicy,
+    classify, decrypt_ooxml_with_policy, encrypt_ooxml, encrypt_ooxml_standard, AlgorithmParams,
+    CipherAlgorithm, Classification, Container, Decrypted, Document, Error, Family, HashAlgorithm,
+    IntegrityDeclaration, IntegrityOutcome, IntegrityPolicy,
 };
 use serde_json::{json, Map, Value};
 
@@ -85,6 +85,12 @@ const FORMAT_NAMES: [&str; 2] = ["agile", "standard"];
 /// (`route_for`, every build) or the library's `Error::NotEncrypted` (`describe`,
 /// `legacy-binary`) established it: two identical situations, one wording (CONTRACT § 3).
 const NOT_ENCRYPTED: &str = "not encrypted; there is nothing to decrypt";
+
+/// The one sentence for "this crate does not recognise the container at all". Shared by
+/// `route_for` (`decrypt`) and `encrypt_guard` (`encrypt`): the same eight — or sixteen —
+/// bytes of junk get the same answer from either subcommand, and a hand-duplicated copy
+/// that drifted between the two would be a lie one of them told.
+const NOT_OFFICE: &str = "not a Microsoft Office file (container: unknown)";
 
 fn password_args() -> [Arg; 4] {
     [
@@ -208,9 +214,16 @@ fn cli() -> Command {
                     .long("format")
                     .value_name("FORMAT")
                     .value_parser(FORMAT_NAMES)
-                    .default_value(FORMAT_NAMES[0])
+                    .default_value(format_name(Format::Agile))
                     .help(
-                        "agile (Office 2010+, has a dataIntegrity HMAC) or standard (Office 2007)",
+                        "Which encryption to write. agile is what Office 2010 and later \
+                         write and the only one of the two carrying a dataIntegrity HMAC, \
+                         so a file modified after it was encrypted is refused rather than \
+                         silently opened. standard is ECMA-376 standard encryption, Office \
+                         2007's: choose it when the result must open in a reader that \
+                         predates agile, and accept that it defines no integrity element \
+                         at all. The format's answer is printed on stderr as `integrity: \
+                         ...` after every successful encrypt",
                     ),
             ),
         )
@@ -240,29 +253,6 @@ fn dispatch(m: &ArgMatches) -> u8 {
         Some(("encrypt", sub)) => cmd_crypt(sub, Direction::Encrypt),
         _ => EX_USAGE,
     }
-}
-
-/// The remaining scaffold: `encrypt`'s grammar and its password wiring are real, the
-/// writer is not here yet.
-///
-/// Exit 9 rather than 0 or 1: nothing was encrypted and nothing was written, and 9 is
-/// the table's "this build cannot do it". Deleted by the slice named in the message.
-///
-/// **The message may not claim nothing was read.** Until this slice the `encrypt` arm
-/// really was a no-op, and the wording said so. It is now reached only after `cmd_crypt`
-/// has read the whole input file (`std::fs::read`) and resolved the password through
-/// `read_password` -- opening a `--password-file`, reading a `--password-env` variable,
-/// draining stdin or prompting on the terminal. Telling the user their password source
-/// was never touched would be false, and a script or a person reading it would conclude
-/// a `--password-file` on disk had not been opened when it had. Guarded by
-/// `the_not_implemented_notice_does_not_claim_nothing_was_read` in tests/cli.rs.
-fn not_implemented_yet(name: &str, slice: &str) -> u8 {
-    eprintln!(
-        "msoffice-crypto: `{name}` is not implemented in this build yet (plan slice \
-         {slice}); your input file and password were read, but nothing was encrypted \
-         and nothing was written."
-    );
-    EX_UNSUPPORTED
 }
 
 // --- classify -------------------------------------------------------------
@@ -378,6 +368,45 @@ fn parse_policy(name: &str) -> Option<IntegrityPolicy> {
         n if n == POLICY_NAMES[2] => Some(IntegrityPolicy::VerifyIfPresent),
         n if n == POLICY_NAMES[3] => Some(IntegrityPolicy::Skip),
         _ => None,
+    }
+}
+
+/// Which writer `encrypt` calls. A CLI-local enum, deliberately NOT `#[non_exhaustive]`
+/// and deliberately matched without a `_` arm: T2's wildcard rule is about the
+/// library's types crossing a crate boundary, and here exhaustiveness is the feature --
+/// a third format must not compile until every arm below has been written.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Format {
+    Agile,
+    Standard,
+}
+
+fn format_name(f: Format) -> &'static str {
+    match f {
+        Format::Agile => FORMAT_NAMES[0],
+        Format::Standard => FORMAT_NAMES[1],
+    }
+}
+
+/// The inverse of [`format_name`], over the same table. `None` is unreachable from
+/// `main` (clap validated against `FORMAT_NAMES`) and pinned by the round-trip test.
+fn parse_format(name: &str) -> Option<Format> {
+    match name {
+        n if n == FORMAT_NAMES[0] => Some(Format::Agile),
+        n if n == FORMAT_NAMES[1] => Some(Format::Standard),
+        _ => None,
+    }
+}
+
+/// What the artifact will carry, as the LIBRARY's own word -- the same word `classify`
+/// prints for that artifact afterwards. Agile always writes `<dataIntegrity>`;
+/// [MS-OFFCRYPTO] §2.3.4.5 defines none for Office 2007, which is the whole reason
+/// `encrypt` has no `--integrity` flag: this is a property of the format, reported, not
+/// a policy, chosen.
+fn declared_integrity(f: Format) -> IntegrityDeclaration {
+    match f {
+        Format::Agile => IntegrityDeclaration::Declared,
+        Format::Standard => IntegrityDeclaration::NotApplicable,
     }
 }
 
@@ -615,12 +644,7 @@ fn cmd_crypt(m: &ArgMatches, dir: Direction) -> u8 {
 
     match dir {
         Direction::Decrypt => cmd_decrypt(m, file, &bytes, source),
-        // S5 replaces this arm. The password is still read before the notice, and the
-        // notice still says so: see `not_implemented_yet`.
-        Direction::Encrypt => match read_password(source, dir) {
-            Ok(_password) => not_implemented_yet("encrypt", "S5"),
-            Err(code) => code,
-        },
+        Direction::Encrypt => cmd_encrypt(m, file, &bytes, source),
     }
 }
 
@@ -648,10 +672,7 @@ fn cmd_decrypt(m: &ArgMatches, file: &str, bytes: &[u8], source: PasswordSource)
 
     let route = match route_for(&classify(bytes), policy) {
         Ok(r) => r,
-        Err(Refusal { code, why }) => {
-            eprintln!("msoffice-crypto: {file}: {why}; nothing was written.");
-            return code;
-        }
+        Err(r) => return refused(file, &r),
     };
 
     let password = match read_password(source, Direction::Decrypt) {
@@ -690,7 +711,57 @@ fn cmd_decrypt(m: &ArgMatches, file: &str, bytes: &[u8], source: PasswordSource)
     EX_OK
 }
 
-// --- decrypt dispatch ---------------------------------------------------
+/// `encrypt`: choose the writer, refuse what cannot be encrypted, read the password,
+/// encrypt, write, and say what the artifact carries.
+///
+/// The classification comes BEFORE the password for the same reason it does in
+/// `cmd_decrypt`, and the guard is the CLI's alone: the library encrypts whatever
+/// bytes it is handed and has no `AlreadyEncrypted` error to raise.
+fn cmd_encrypt(m: &ArgMatches, file: &str, bytes: &[u8], source: PasswordSource) -> u8 {
+    let name = m.get_one::<String>("format").expect("clap default");
+    let Some(format) = parse_format(name) else {
+        eprintln!(
+            "msoffice-crypto: internal error: --format {name} is in the accepted list \
+             but names no writer"
+        );
+        return EX_INTERNAL;
+    };
+
+    if let Err(r) = encrypt_guard(&classify(bytes)) {
+        return refused(file, &r);
+    }
+
+    let password = match read_password(source, Direction::Encrypt) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+
+    let produced = match format {
+        Format::Agile => encrypt_ooxml(bytes, &password),
+        Format::Standard => encrypt_ooxml_standard(bytes, &password),
+    };
+    let produced = match produced {
+        Ok(v) => v,
+        Err(e) => return report(file, &e),
+    };
+
+    if let Err(code) = write_output(m, file, Direction::Encrypt, &produced) {
+        return code;
+    }
+    // On every success, so the artifact's one security-relevant property is stated in
+    // the run that produced it. Stderr, so `-o -` is unaffected.
+    eprintln!("integrity: {}", integrity_name(declared_integrity(format)));
+    if format == Format::Standard {
+        eprintln!(
+            "msoffice-crypto: Office 2007 standard encryption defines no dataIntegrity \
+             element: a file modified after it was encrypted decrypts without \
+             complaint. `--format agile` writes one."
+        );
+    }
+    EX_OK
+}
+
+// --- dispatch: what each direction will and will not touch ---------------
 
 /// Where `decrypt` sends a file, decided from its classification and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -727,10 +798,7 @@ fn refuse(code: u8, why: impl Into<String>) -> Result<Route, Refusal> {
 /// them apart and the error cannot.
 fn route_for(class: &Classification, policy: IntegrityPolicy) -> Result<Route, Refusal> {
     if class.container == Container::Unknown {
-        return refuse(
-            EX_NOT_OFFICE,
-            "not a Microsoft Office file (container: unknown)",
-        );
+        return refuse(EX_NOT_OFFICE, NOT_OFFICE);
     }
     // Either container: a plain `.docx` (zip) and a plain `.doc` (a CFB whose encryption
     // bit is clear) are the same fact, and neither needs a password to establish.
@@ -815,6 +883,74 @@ fn route_for(class: &Classification, policy: IntegrityPolicy) -> Result<Route, R
                 document_name(class.document)
             ),
         ),
+    }
+}
+
+/// The clause the "already encrypted" refusal ends on. A remedy is only a remedy if the
+/// same binary can carry it out, and "decrypt it first" cannot be carried out for a
+/// 97-2003 binary document in **either** `cli` column: with `legacy-binary` the decrypt
+/// succeeds and hands back a rewritten CFB (T5) that the next `encrypt` refuses, because
+/// this tool writes encryption around an OOXML package and nothing else; without it
+/// `route_for`'s `#[cfg(not(feature = "legacy-binary"))]` arm refuses the decrypt itself
+/// at exit 9. Either way the advice sends the user to a second refusal, so it is not
+/// given. One sentence, true in both builds.
+fn reencrypt_remedy(document: Document) -> &'static str {
+    match document {
+        Document::WordBinary | Document::ExcelBinary | Document::PowerPointBinary => {
+            "there is no writer for the 97-2003 binary formats, so this tool cannot \
+             re-encrypt it in any build"
+        }
+        // `Document` is `#[non_exhaustive]` (T2), and an encrypted CFB this build cannot
+        // name is far likelier to be a package kind added later than a binary one: the
+        // three binary documents above are the closed set [MS-OFFCRYPTO] defines.
+        _ => "decrypt it first if you meant to re-encrypt it",
+    }
+}
+
+/// `route_for`'s counterpart for `encrypt`. Every branch is a fact the classification
+/// alone establishes, which is why this runs before the password is read: prompting
+/// for a NEW password for a file that is about to be refused would be wrong.
+///
+/// `encrypt` accepts exactly one thing -- a plain OOXML package, which `classify`
+/// reports as `Container::Zip` for every `PK` signature it knows (classify.rs:527).
+fn encrypt_guard(class: &Classification) -> Result<(), Refusal> {
+    match class.container {
+        Container::Zip => Ok(()),
+        // Plan §7 / CONTRACT §5. The library has no `AlreadyEncrypted` variant, so
+        // this guard is the CLI's; without it a double-encrypted container is a
+        // plausible accident. `decrypt` answers 3 for a CFB it does not recognise and
+        // this answers 5 for the same bytes, on purpose: decrypt asks "can I decrypt
+        // this", encrypt asks "is this a plain package", and 5 is "nothing to do".
+        Container::Cfb if class.is_encrypted() => Err(Refusal {
+            code: EX_REFUSED,
+            why: format!(
+                "already encrypted ({} encryption in a CFB container); {}",
+                family_name(class.family),
+                reencrypt_remedy(class.document)
+            ),
+        }),
+        // Deliberately does NOT name `class.document`: eight bytes of CFB magic are
+        // `Document::Unknown`, and calling that a 97-2003 document would be false.
+        Container::Cfb => Err(Refusal {
+            code: EX_REFUSED,
+            why: "a CFB container, not a plain OOXML package; this tool writes \
+                  encryption around a package (.docx/.xlsx/.pptx), and there is no \
+                  writer for the 97-2003 binary formats"
+                .to_string(),
+        }),
+        // The same sentence `decrypt` gives these bytes, so one fact has one code.
+        Container::Unknown => Err(Refusal {
+            code: EX_NOT_OFFICE,
+            why: NOT_OFFICE.to_string(),
+        }),
+        // T2: `Container` is `#[non_exhaustive]` and this is a separate crate.
+        _ => Err(Refusal {
+            code: EX_UNSUPPORTED,
+            why: format!(
+                "a container kind this build does not know how to encrypt ({})",
+                container_name(class.container)
+            ),
+        }),
     }
 }
 
@@ -1008,6 +1144,13 @@ fn first_line(s: &str) -> String {
 }
 
 // --- error -> exit code ---------------------------------------------------
+
+/// A refusal made from the classification alone: the same sentence shape [`report`]
+/// gives an [`Error`], minus the error. Shared by `decrypt`'s and `encrypt`'s guards.
+fn refused(file: &str, r: &Refusal) -> u8 {
+    eprintln!("msoffice-crypto: {file}: {}; nothing was written.", r.why);
+    r.code
+}
 
 /// Print an [`Error`] in the CLI's words and return its exit code.
 fn report(file: &str, e: &Error) -> u8 {
