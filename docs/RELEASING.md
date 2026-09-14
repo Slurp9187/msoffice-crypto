@@ -17,16 +17,20 @@ The order below is not arbitrary. Two steps constrain everything around them:
 
 ## 1. Preconditions
 
-All three feature configurations, because a change can be clean in one and broken in
+All five feature configurations, because a change can be clean in one and broken in
 another:
 
 ```bash
 cargo test   --locked --no-default-features
 cargo test   --locked --no-default-features --features crypto-ops
 cargo test   --locked --no-default-features --features legacy-binary
+cargo test   --locked --no-default-features --features cli
+cargo test   --locked --no-default-features --features cli,legacy-binary
 cargo clippy --locked --all-targets --no-default-features -- -D warnings
 cargo clippy --locked --all-targets --no-default-features --features crypto-ops -- -D warnings
 cargo clippy --locked --all-targets --no-default-features --features legacy-binary -- -D warnings
+cargo clippy --locked --all-targets --no-default-features --features cli -- -D warnings
+cargo clippy --locked --all-targets --no-default-features --features cli,legacy-binary -- -D warnings
 cargo fmt --all --check
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --no-default-features

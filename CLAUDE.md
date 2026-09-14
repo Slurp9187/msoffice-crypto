@@ -296,9 +296,13 @@ authority on what is wrapped; it agrees.
 cargo test   --locked --no-default-features
 cargo test   --locked --no-default-features --features crypto-ops
 cargo test   --locked --no-default-features --features legacy-binary
+cargo test   --locked --no-default-features --features cli
+cargo test   --locked --no-default-features --features cli,legacy-binary
 cargo clippy --locked --all-targets --no-default-features -- -D warnings
 cargo clippy --locked --all-targets --no-default-features --features crypto-ops -- -D warnings
 cargo clippy --locked --all-targets --no-default-features --features legacy-binary -- -D warnings
+cargo clippy --locked --all-targets --no-default-features --features cli -- -D warnings
+cargo clippy --locked --all-targets --no-default-features --features cli,legacy-binary -- -D warnings
 cargo fmt --all --check
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --no-default-features
@@ -312,16 +316,19 @@ foreground `cargo package` collided and reported `could not compile msoffice-cry
 (example "office_crypto_check")`, and the identical command alone was green. A failure
 seen while something else was building is not evidence of anything.
 
-**Always run all three feature configurations.** A change can be clean in one and broken
+**Always run all five feature configurations.** A change can be clean in one and broken
 in another, and the detection build is the one people forget. `.github/workflows/ci.yml`
 runs this matrix plus an MSRV 1.85 build, the docs.rs nightly build, `cargo package
 --locked`, a `cargo deny` job over licences, advisories, bans and sources, a `prose` job
 running `tools/audit_claims.py`, a `packaging-invariants` job (build.rs stays in the
-`include` allowlist; `rc4` keeps `zeroize` -- both silent failures otherwise), and a job
-asserting three graph properties — the detection graph contains no cipher, hash, MAC, RNG
-or key-wrapping crate; the `crypto-ops` graph contains neither `rc4` nor `md-5`; and the
-`legacy-binary` graph contains both, without which the first two would be vacuous — the
-properties, not crate counts. Every module that parses a file
+`include` allowlist; `rc4` keeps `zeroize`; `src/bin/msoffice-crypto.rs` stays in the
+packaged files -- all three silent failures otherwise), and a job asserting four graph
+properties -- the detection graph contains no cipher, hash, MAC, RNG, key-wrapping or
+CLI-only crate, checked over the `--no-default-features` graph *and* over the default one,
+because the flag alone made the step blind to a change to `default`; the `crypto-ops`
+graph contains neither `rc4` nor `md-5`; the `legacy-binary` graph contains both; and the
+`cli` graph contains `clap`, `rpassword`, `rtoolbox` and `serde_json`, without which the
+first property would be vacuous -- the properties, not crate counts. Every module that parses a file
 denies `clippy::unwrap_used`, `expect_used` and `panic` on itself — `classify.rs`,
 `binary_office.rs`, and under `legacy-binary` the eight `rc4*`/`xor_obfuscation`/
 `legacy_container`/`word97`/`excel97`/`powerpoint97` modules; clippy under `-D warnings` is

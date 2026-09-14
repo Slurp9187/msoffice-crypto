@@ -98,6 +98,27 @@ if classify(&data).document == Document::WordBinary {
 }
 ```
 
+The whole feature surface, and what each one costs:
+
+| Feature | Adds crypto? | What it enables | Dependencies |
+| --- | --- | --- | --- |
+| *(none — the default)* | no | `classify`, `is_cfb_office` | `cfb`, `quick-xml`, `thiserror` |
+| `crypto-ops` | yes | `decrypt_ooxml`, `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_standard`, and the `IntegrityPolicy` / `IntegrityOutcome` enums | + `aes`, `cbc`, `ecb`, `sha1`, `sha2`, `hmac`, `base64`, `rand`, `secure-gate` |
+| `legacy-binary` | yes, a superset of `crypto-ops` | `decrypt_binary_office` — 97-2003 `.doc`, `.xls`, `.ppt` | + `rc4`, `md-5` |
+| `cli` | yes (via `crypto-ops`) | the `msoffice-crypto` binary — see [Command line](#command-line) | + `clap`, `serde_json`, `rpassword`/`rtoolbox` (**Apache-2.0-only**) |
+
+`rpassword` and its `rtoolbox` are the only **Apache-2.0-only** crates this crate can put
+in a consumer's graph; everything else in it is dual MIT/Apache-2.0 or more permissive.
+They arrive with the CLI's non-echoing password prompt, under `cli`, which is opt-in and
+which no library consumer enables — `--features crypto-ops` pulls neither, and CI fails if
+either reaches the default graph. It is called out because this crate is offered as
+`MIT OR Apache-2.0` and the point of a dual offer is that you may take *either*: a consumer
+who took the MIT half and then builds the binary still has to satisfy Apache-2.0 for those
+two. `deny.toml` records the same finding beside the allow-list. (`zopfli` is
+Apache-2.0-only too, but it is dev-only — it reaches `Cargo.lock` through the `zip`
+dev-dependency and appears in no `cargo tree -e normal` output — so nothing a consumer
+builds contains it.)
+
 ## Why this crate exists
 
 There are good implementations of these formats already, and this crate is not claiming to
@@ -171,6 +192,145 @@ which are not OOXML — so `ooxml-crypto`, which this crate was briefly called, 
 been wrong for roughly half its eventual surface.
 
 **Out of scope, permanently:** password recovery and cracking.
+
+## Command line
+
+The same three operations from a shell. The binary is behind the opt-in `cli` feature, so
+no library consumer builds an argument parser to ask whether a file is encrypted:
+
+```text
+cargo install msoffice-crypto --features cli
+cargo install msoffice-crypto --features cli,legacy-binary   # also opens 97-2003 .doc/.xls/.ppt
+```
+
+### `classify` — what is this file?
+
+It cannot fail. An unencrypted package, sixteen bytes of junk and a container this crate has
+never seen all exit 0, because all three are answers; only a file that cannot be *read*
+exits 2.
+
+```text
+$ msoffice-crypto classify protected.docx
+container:    cfb
+document:     ooxml-package
+version:      4.4
+family:       agile
+encrypted:    yes
+supported:    yes
+integrity:    declared
+key-cipher:   AES
+key-hash:     SHA-512
+key-bits:     256
+key-block:    16
+key-salt:     16
+pw-cipher:    AES
+pw-hash:      SHA-512
+pw-bits:      256
+pw-block:     16
+pw-salt:      16
+pw-spin:      100000
+```
+
+`--json` prints one object instead, with the same key set for every input — an unencrypted
+file carries `key_data` and `password_key` as `null` rather than dropping them, so a script
+can index the result without first checking whether the key is there:
+
+```text
+$ msoffice-crypto classify protected.docx --json
+{"container":"cfb","data_integrity":"declared","document":"ooxml-package","encrypted":true,"family":"agile","key_data":{"block_size":16,"cipher":"AES","hash":"SHA-512","key_bits":256,"salt_size":16,"spin_count":null},"password_key":{"block_size":16,"cipher":"AES","hash":"SHA-512","key_bits":256,"salt_size":16,"spin_count":100000},"supported":true,"version":"4.4"}
+```
+
+### `decrypt` — and it says what it verified
+
+The output path is derived from the input unless `-o` gives one, an existing file is never
+overwritten without `--force`, and the write is a temporary file renamed over the target so
+an interrupted run cannot leave a half-written `.docx` that looks complete. The `integrity:`
+line goes to stderr after every successful decrypt, including after `--integrity skip`, so
+`-o -` into a pipe is unaffected and nobody holds unauthenticated bytes without being told:
+
+```text
+$ msoffice-crypto decrypt protected.docx --password-env MSOFFICE_CRYPTO_PASSWORD
+msoffice-crypto: wrote protected.decrypted.docx
+integrity: verified
+```
+
+`--integrity` takes `require`, `require-where-defined`, `verify-if-present` or `skip`. The
+default is not typed into the help text: it is rendered from the library's own
+`IntegrityPolicy::default()`, which has already moved once.
+
+A file with nothing to decrypt is refused rather than copied:
+
+```text
+$ msoffice-crypto decrypt plain.docx --password-env MSOFFICE_CRYPTO_PASSWORD
+msoffice-crypto: plain.docx: not encrypted; there is nothing to decrypt; nothing was written.
+$ echo $?
+5
+```
+
+### `encrypt`
+
+`--format agile` is the default and writes what Office 2010 and later write, `dataIntegrity`
+HMAC included. `--format standard` writes the Office 2007 format, which defines no integrity
+element at all — and says so rather than leaving it to folklore:
+
+```text
+$ msoffice-crypto encrypt report.docx --password-env MSOFFICE_CRYPTO_PASSWORD
+msoffice-crypto: wrote report.encrypted.docx
+integrity: declared
+
+$ msoffice-crypto encrypt report.docx --format standard -o report-2007.docx --password-env MSOFFICE_CRYPTO_PASSWORD
+msoffice-crypto: wrote report-2007.docx
+integrity: not-applicable
+msoffice-crypto: Office 2007 standard encryption defines no dataIntegrity element: a file modified after it was encrypted decrypts without complaint. `--format agile` writes one.
+```
+
+What the binary writes is held to the same
+[four-reader acceptance gate](#the-four-reader-acceptance-gate) as the library's output.
+
+### Passwords never come from `argv`
+
+`argv` is world-readable in a process listing for the lifetime of the run — `ps aux` on
+Linux, the command-line column in Task Manager on Windows. **There is deliberately no
+`--password VALUE` flag, and adding one later would be a regression rather than a feature.**
+`--password` is registered hidden, so reaching for it is answered with that reason instead
+of clap's generic "unexpected argument". Exactly one source may be given; two is a usage
+error rather than a silent precedence win:
+
+| Flag | Source | For |
+| --- | --- | --- |
+| `--password-env NAME` | that environment variable | scripts, CI |
+| `--password-file PATH` | first line of the file, one trailing CR-LF or LF stripped | secret managers, `--password-file /dev/stdin` |
+| `--password-stdin` | one line from stdin | pipelines |
+| *(none)* | a non-echoing terminal prompt | interactive use |
+
+`--password-env` takes the variable's **name**, so `MSOFFICE_CRYPTO_PASSWORD` is the obvious
+argument — and naming it is the only way this tool reads it. A password that applies without
+being asked for is how the wrong file gets decrypted in a loop. With no source and no
+terminal, the command fails naming the flags that exist rather than blocking on a prompt
+nobody can see.
+
+### Exit codes
+
+A CLI that returns 1 for everything cannot be scripted.
+
+| Code | Meaning | Maps from |
+| --- | --- | --- |
+| 0 | success | — |
+| 1 | usage error | bad flags, missing operand, two password sources, output exists without `--force` |
+| 2 | I/O error | unreadable input, unwritable output, `Error::Io` |
+| 3 | not a Microsoft Office file | `Error::NotACfbFile` on an input `classify` also calls `Container::Unknown` |
+| 4 | wrong password | `Error::WrongPassword` |
+| 5 | refused: nothing to do | decrypt of an unencrypted file, encrypt of an already-encrypted one, `Error::NotEncrypted` |
+| 6 | malformed or hostile file | `MissingStream`, `XmlParse`, `BadParameters`, `CipherError` |
+| 7 | internal invariant violated | `RandomSource` |
+| 8 | **integrity** | `IntegrityCheckFailed`, `IntegrityElementMissing`, `IntegrityUnavailable` |
+| 9 | **unsupported encryption** | `UnsupportedEncryptionVersion`, `UnsupportedAlgorithm`, `Family::Unsupported`, and a legacy family in a build without `legacy-binary` |
+
+8 is not folded into 4 or 6, and 9 is not folded into 5, for the same reason the library
+keeps `WrongPassword` and `IntegrityCheckFailed` apart: at a process boundary the number is
+all a script gets, and "try again", "this file was changed after it was encrypted" and "this
+build cannot do that — rebuild with `--features cli,legacy-binary`" are three different next
+steps. One is a retry, one is a support ticket, one is an incident.
 
 ## The four-reader acceptance gate
 

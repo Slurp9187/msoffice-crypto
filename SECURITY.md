@@ -68,7 +68,7 @@ another crate:
 
 | | |
 | --- | --- |
-| In scope | `src/**` in every one of the three feature configurations — the default detection build, `crypto-ops`, and `legacy-binary`. |
+| In scope | `src/**` in every one of the five feature configurations — the default detection build, `crypto-ops`, `legacy-binary`, `cli`, and `cli,legacy-binary`. `src/bin/msoffice-crypto.rs` is `src/**`: the CLI reads files nothing has validated, so a panic there on a crafted input is a vulnerability on the same terms as a panic in the library. |
 | In scope | The published crate on crates.io, at the latest version. |
 | Out of scope | `tools/**` — fixture generators and the acceptance-gate drivers. They run on a maintainer's machine against files the maintainer chose, and are not shipped in the crate. |
 | Out of scope | The test fixtures, which are deliberately hostile inputs. |
@@ -93,5 +93,13 @@ release rather than a backport.
   same rule by review and by the malformed-input suite, but not by the compiler. Treat a
   panic reachable in those as in scope exactly as if the lint were on; the missing header is
   a gap in enforcement, not a relaxation of the standard.
+- **`src/bin/msoffice-crypto.rs` does not carry that header either**, and the scope row above
+  puts it in scope regardless. It parses no bytes of its own: every one goes to `classify`,
+  `decrypt_ooxml_with_policy`, `decrypt_binary_office` or an encrypt entry point, so what
+  reaches the binary from a hostile file is the bounded attacker-chosen text inside
+  `XmlParse`, `BadParameters` and `UnsupportedAlgorithm { name }`, written to stderr as-is and
+  never re-interpolated into a `--json` field, a filename or a shell-quoted string. Its four
+  `expect` calls are on `clap` values a `required(true)` or a `default_value` guarantees.
+  Report a panic there as you would one in a parser.
 
 None of these are guarantees against a logic flaw, which is what the list above is about.

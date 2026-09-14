@@ -116,6 +116,15 @@ jobs:
             flags: --no-default-features --features crypto-ops
           - name: legacy-binary
             flags: --no-default-features --features legacy-binary
+          # The binary. Until now CI has never built it: every `cli` number in the CLI arc
+          # was measured by hand on a workstation. `cli` does NOT enable `legacy-binary`,
+          # so `Error::NotEncrypted` does not exist in this column and the arm mapping it
+          # to EX_REFUSED is cfg'd on `legacy-binary` rather than `crypto-ops` -- a break
+          # that is invisible in the other column, which is why both are here.
+          - name: cli
+            flags: --no-default-features --features cli
+          - name: cli,legacy-binary
+            flags: --no-default-features --features cli,legacy-binary
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # branch `stable`, resolved 2026-09-11
@@ -156,6 +165,15 @@ jobs:
           # here a third time; that is cheaper than a configuration nobody runs.
           - name: legacy-binary
             flags: --no-default-features --features legacy-binary
+          # tests/cli.rs drives the built binary as a subprocess and reads all nineteen
+          # fixtures. It carries no `fixture_corpus` gate on purpose -- tests/*.rs is
+          # outside the `include` allowlist and never reaches the tarball, so a missing
+          # fixture must fail by name rather than be ignored.
+          - name: cli
+            flags: --no-default-features --features cli
+          # The only configuration in which `decrypt` of a .doc/.xls/.ppt is compiled at all.
+          - name: cli,legacy-binary
+            flags: --no-default-features --features cli,legacy-binary
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # branch `stable`, resolved 2026-09-11
@@ -246,8 +264,8 @@ jobs:
   no-cipher-in-detection:
     # The claim `cargo add msoffice-crypto` makes with default features: detecting
     # encryption costs a CFB reader and an XML parser and no cryptography at all. This
-    # checks the PROPERTY -- no cipher, hash, MAC, RNG or key-wrapping crate in the
-    # graph -- rather than a crate count, because the count differs by platform (libc
+    # checks the PROPERTY -- no cipher, hash, MAC, RNG, key-wrapping or CLI-only crate in
+    # the graph -- rather than a crate count, because the count differs by platform (libc
     # arrives via getrandom on unix) and a number is not what a consumer is promised.
     name: detection build links no cipher
     runs-on: ubuntu-latest
@@ -255,12 +273,38 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # branch `stable`, resolved 2026-09-11
       - run: |
+          # TWO graphs, and the difference is the whole point. `--no-default-features` says
+          # what the detection *code* needs; the bare invocation says what `cargo add
+          # msoffice-crypto` actually installs. They are the same output only while
+          # `default = []` -- and it was the second that this step did not check. Measured
+          # 2026-09-14 in a throwaway worktree: with `default = ["cli"]`, this step passed
+          # unchanged, because the flag it already carried made it blind to the one edit it
+          # claims to catch. Adding names to the pattern would not have fixed that.
           cargo tree --locked -e normal --prefix none --no-default-features > graph.txt
+          cargo tree --locked -e normal --prefix none > graph-default.txt
           echo "detection-build graph:"; cat graph.txt
-          if grep -E '^(aes|cbc|ecb|sha1|sha2|hmac|subtle|rand|rand_core|getrandom|chacha20|secure-gate|zeroize|base64|rc4|md-5) ' graph.txt; then
-            echo "::error::a cipher, hash, MAC, RNG or key-wrapping crate is in the detection build"
-            exit 1
-          fi
+          echo "default-feature graph:"; cat graph-default.txt
+          for g in graph.txt graph-default.txt; do
+            if grep -E '^(aes|cbc|ecb|sha1|sha2|hmac|subtle|rand|rand_core|getrandom|chacha20|secure-gate|zeroize|base64|rc4|md-5|clap|rpassword|rtoolbox|serde_json) ' "$g"; then
+              echo "::error::$g: a cipher, hash, MAC, RNG, key-wrapping or CLI-only crate is in the detection build"
+              exit 1
+            fi
+          done
+      # The `cli` half of the same property, and the reason the four names added to the
+      # pattern above are falsifiable: they must be ABSENT from the detection graph and
+      # PRESENT the moment the feature is on. Without this, the grep would still pass if
+      # `cli` quietly stopped pulling one of them, and the absence above would mean
+      # nothing. Exactly the shape of the legacy-binary vacuity guard immediately above.
+      - run: |
+          cargo tree --locked -e normal --prefix none --no-default-features --features cli > graph-cli.txt
+          for c in clap rpassword rtoolbox serde_json; do
+            if ! grep -qE "^$c " graph-cli.txt; then
+              echo "::error::the cli build must link $c; without it the absence check on the detection graph is vacuous"
+              echo "If rpassword genuinely no longer pulls rtoolbox, drop rtoolbox from the pattern above"
+              echo "and from the Apache-2.0 sentences in README.md and deny.toml in the SAME commit."
+              exit 1
+            fi
+          done
       # The second property, from GH #4: the RC4 stream cipher and MD5 exist for the
       # 97-2003 binary formats alone, and a consumer of `crypto-ops` -- modern Office --
       # never links them. `legacy-binary` is the only feature that may.
@@ -372,9 +416,10 @@ jobs:
       - run: cargo-deny --all-features check licenses advisories bans sources
 
   packaging-invariants:
-    # Two properties that no test can see, both found untested by the 2026-09-10
-    # pre-publish audit. Each is asserted here because the failure is SILENT everywhere
-    # else -- which is precisely what makes them worth a job.
+    # Three properties that no test can see, all found untested by the 2026-09-10
+    # pre-publish audit or by the S6 slice that added the third. Each is asserted here
+    # because the failure is SILENT everywhere else -- which is precisely what makes them
+    # worth a job.
     #
     # 1. `build.rs` must be in the `include` allowlist. Drop that one line and
     #    `cargo package` does NOT fail: it emits a *warning*, rewrites the packaged
@@ -388,6 +433,16 @@ jobs:
     #    and the schedule is a function of the block key -- so losing it leaves key material
     #    behind. Deleting the feature leaves the entire suite green: the property has no
     #    test, and cannot easily have one, since it is about memory after a drop.
+    #
+    # 3. `src/bin/msoffice-crypto.rs` must be in the packaged files. Same silent shape as
+    #    (1): with the binary excluded, `cargo package --locked` still EXITS 0. It adds one
+    #    more `warning: ignoring binary ... is not included in the published package` to
+    #    the SEVEN `ignoring example/test` warnings a correct package already prints, and
+    #    ships a tarball whose only symptom is that `cargo install msoffice-crypto
+    #    --features cli` installs nothing. The verify build cannot see it either: the bin
+    #    is `required-features = ["cli"]` and verify uses default features, so it is never
+    #    compiled. Verified by mutation, 2026-09-14: include "src/**/*.rs" -> "src/*.rs"
+    #    packaged 44 files instead of 46, exit 0.
     name: packaging invariants
     runs-on: ubuntu-latest
     steps:
@@ -413,6 +468,19 @@ jobs:
             exit 1
           fi
           echo "rc4/zeroize enabled"
+      - name: the CLI ships in the package
+        run: |
+          cargo package --locked --list > files.txt
+          # Separator-tolerant on purpose. This runner prints src/bin/...; a maintainer
+          # re-running the same command on Windows gets src\bin\..., and a plain
+          # forward-slash anchor reports a missing binary there that is not missing.
+          if ! grep -qE '^src[/\\]bin[/\\]msoffice-crypto\.rs$' files.txt; then
+            echo "::error::src/bin/msoffice-crypto.rs is missing from the packaged files."
+            echo "cargo package exits 0 without it. The published crate would carry no CLI"
+            echo "at all, and cargo install --features cli would install nothing."
+            exit 1
+          fi
+          echo "src/bin/ ships"
 
   msrv:
     # Keep in step with `rust-version` in Cargo.toml; bump both together.
