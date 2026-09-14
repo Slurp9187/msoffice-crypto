@@ -275,6 +275,12 @@ secure-gate = { version = "0.9.0-rc.7", optional = true, default-features = fals
 ] }
 
 [dev-dependencies]
+# Already a normal dependency, optional under "cli" (dep:serde_json). Repeated here for the
+# same reason as `cfb` below: tests/cli.rs's own need for a real JSON parser must not depend
+# on the "cli" feature continuing to spell dep:serde_json exactly this way. (Not actually
+# required by Cargo -- features resolve once per invocation for the whole package, so
+# `#![cfg(feature = "cli")]` in tests/cli.rs already activates `dep:serde_json` for every
+# target -- this entry is house style, on the `cfb` precedent below, not a workaround.)
 serde_json = "1"
 
 # Already a normal dependency; repeated here so the integration tests can build the

@@ -18,6 +18,7 @@ use msoffice_crypto::{
     classify, AlgorithmParams, CipherAlgorithm, Classification, Container, Document, Error, Family,
     HashAlgorithm, IntegrityDeclaration, IntegrityPolicy,
 };
+use serde_json::{json, Map, Value};
 
 // Plan §3. A CLI that returns 1 for everything cannot be scripted. 4 against 5 is "try
 // again" against "wrong file"; 8 against 4 and 6 is the crate's own rule that "wrong
@@ -161,10 +162,19 @@ fn cli() -> Command {
                         .required(true)
                         .help("The file to inspect"),
                 )
+                .arg(
+                    Arg::new("json")
+                        .long("json")
+                        .action(ArgAction::SetTrue)
+                        .help("Print one JSON object instead of the human-readable form"),
+                )
                 .after_help(
                     "classify cannot fail. An unencrypted package prints `encrypted: no` \
                      and sixteen bytes of junk print `container: unknown`; both exit 0, \
-                     because both are answers. Only a file that cannot be read exits 2.",
+                     because both are answers. Only a file that cannot be read exits 2. \
+                     The `--json` key set is the same for every input -- an unencrypted \
+                     file carries key_data and password_key as null rather than dropping \
+                     them.",
                 ),
         )
         .subcommand(
@@ -252,7 +262,12 @@ fn cmd_classify(m: &ArgMatches) -> u8 {
     };
     // No `?`, no Result, no arm mapping "unknown" to a failure: `classify` answers
     // every input by contract (CLAUDE.md Design Value 1), so this always exits 0.
-    print!("{}", classification_human(&classify(&bytes)));
+    let class = classify(&bytes);
+    if m.get_flag("json") {
+        println!("{}", classification_json(&class));
+    } else {
+        print!("{}", classification_human(&class));
+    }
     EX_OK
 }
 
@@ -369,6 +384,27 @@ fn params_lines(prefix: &str, p: &AlgorithmParams) -> String {
     out
 }
 
+/// The same six `AlgorithmParams` fields as [`params_lines`], as one JSON object with
+/// **all six keys always present** — `null` where the field is `None`.
+///
+/// This is the deliberate asymmetry with the human form: a line the human renderer
+/// omits for an absent field still gets a key here, because a script reading `--json`
+/// should not have to distinguish "this key is missing" from "this key is null" for a
+/// schema that is otherwise fixed. Built as a `serde_json::Value` rather than by string
+/// concatenation for the same reason as the sibling's `classification_json`: a field
+/// added later without remembering to escape it can no longer emit broken JSON, because
+/// escaping is no longer something this function does.
+fn params_json(p: &AlgorithmParams) -> Value {
+    json!({
+        "cipher": p.cipher.map(cipher_name),
+        "hash": p.hash.map(hash_name),
+        "key_bits": p.key_bits,
+        "block_size": p.block_size,
+        "salt_size": p.salt_size,
+        "spin_count": p.spin_count,
+    })
+}
+
 /// One field per line, `{key:<14}{value}`, absent fields omitted.
 ///
 /// `encrypted:` and `supported:` are methods on `Classification`, not fields: nothing
@@ -398,6 +434,48 @@ fn classification_human(c: &Classification) -> String {
         out.push_str(&params_lines("pw", p));
     }
     out
+}
+
+/// One JSON object, hand-built as a `serde_json::Value` rather than by string
+/// concatenation — the same reasoning as [`params_json`]: nothing here escapes a string,
+/// so nothing here can forget to.
+///
+/// Nested, never prefix-flattened: `key_data` and `password_key` are each either `null`
+/// (the whole block, when the `Option` is `None`) or a complete six-key object from
+/// [`params_json`] — never six individually-nulled top-level keys. `data_integrity`, not
+/// `integrity`: JSON keys are `Classification`'s own field names, while the human form's
+/// `integrity:` is a column heading and free to read shorter.
+///
+/// `version` is the string `"{major}.{minor}"`, matching the human form, not a two-
+/// element array or an object — chosen because nothing here needs to do arithmetic on
+/// the pair, only display it, and a string is unambiguous either way.
+///
+/// `serde_json::Map` is a `BTreeMap`, so keys serialise in alphabetical order; nothing
+/// here or in `tests/cli.rs` may assume a particular order.
+fn classification_json(c: &Classification) -> String {
+    let mut o = Map::new();
+    o.insert("container".into(), json!(container_name(c.container)));
+    o.insert("document".into(), json!(document_name(c.document)));
+    o.insert(
+        "version".into(),
+        json!(c.version.map(|(major, minor)| format!("{major}.{minor}"))),
+    );
+    o.insert("family".into(), json!(family_name(c.family)));
+    o.insert("encrypted".into(), json!(c.is_encrypted()));
+    o.insert("supported".into(), json!(c.is_supported()));
+    o.insert(
+        "data_integrity".into(),
+        json!(integrity_name(c.data_integrity)),
+    );
+    o.insert(
+        "key_data".into(),
+        c.key_data.as_ref().map_or(Value::Null, params_json),
+    );
+    o.insert(
+        "password_key".into(),
+        c.password_key.as_ref().map_or(Value::Null, params_json),
+    );
+    Value::Object(o).to_string()
 }
 
 // --- output paths ---------------------------------------------------------

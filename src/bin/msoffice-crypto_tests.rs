@@ -410,3 +410,107 @@ fn the_parameter_block_prints_six_fields_and_omits_the_absent_ones() {
     // An all-absent block prints nothing at all rather than six empty lines.
     assert_eq!(params_lines("key", &params(|_| {})), "");
 }
+
+#[test]
+fn the_json_object_carries_the_full_key_set_for_an_input_that_classifies_as_nothing() {
+    // No fixture: sixteen bytes of junk is a legal `Classification` (T4).
+    let text = classification_json(&classify(b"not an office file"));
+    let v: Value = serde_json::from_str(&text).expect("valid JSON");
+    let o = v.as_object().expect("top level is an object");
+    let mut keys: Vec<&str> = o.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "container",
+            "data_integrity",
+            "document",
+            "encrypted",
+            "family",
+            "key_data",
+            "password_key",
+            "supported",
+            "version",
+        ]
+    );
+    assert!(o["version"].is_null());
+    assert!(o["key_data"].is_null());
+    assert!(o["password_key"].is_null());
+}
+
+#[test]
+fn a_parameter_block_keeps_all_six_json_keys_when_the_fields_are_absent() {
+    // The direct JSON mirror of `the_parameter_block_prints_six_fields_and_omits_the_absent_ones`
+    // above: the pair is what pins the human/JSON asymmetry as deliberate rather than an
+    // oversight in one renderer.
+    let v = params_json(&params(|_| {}));
+    let o = v.as_object().expect("object");
+    let mut keys: Vec<&str> = o.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "block_size",
+            "cipher",
+            "hash",
+            "key_bits",
+            "salt_size",
+            "spin_count"
+        ]
+    );
+    for k in keys {
+        assert!(o[k].is_null(), "{k} must be null, not absent");
+    }
+}
+
+#[test]
+fn a_parameter_block_renders_the_fields_it_has_and_nulls_the_rest() {
+    let p = params(|p| {
+        p.cipher = Some(CipherAlgorithm::Aes);
+        p.hash = Some(HashAlgorithm::Sha512);
+        p.key_bits = Some(256);
+        // block_size and salt_size left None on purpose: they must render `null`.
+    });
+    let v = params_json(&p);
+    assert_eq!(v["cipher"], "AES");
+    assert_eq!(v["hash"], "SHA-512");
+    // A JSON number, not a quoted string -- `assert_eq!` against an integer literal
+    // fails if `key_bits` were serialised as `"256"`.
+    assert_eq!(v["key_bits"], 256);
+    assert!(v["block_size"].is_null());
+    assert!(v["salt_size"].is_null());
+    assert!(v["spin_count"].is_null());
+}
+
+#[test]
+fn the_json_flag_is_off_by_default_and_exists_only_on_classify() {
+    let default = cli()
+        .try_get_matches_from(["msoffice-crypto", "classify", "f.docx"])
+        .expect("classify must parse with no --json");
+    assert!(
+        !default
+            .subcommand_matches("classify")
+            .expect("classify")
+            .get_flag("json"),
+        "--json must default to off"
+    );
+
+    let on = cli()
+        .try_get_matches_from(["msoffice-crypto", "classify", "f.docx", "--json"])
+        .expect("--json must parse on classify");
+    assert!(on
+        .subcommand_matches("classify")
+        .expect("classify")
+        .get_flag("json"));
+
+    // `decrypt` and `encrypt` do not define the flag at all -- clap rejects it as an
+    // unknown argument, not merely leaves it false.
+    for sub in ["decrypt", "encrypt"] {
+        assert!(
+            cli()
+                .try_get_matches_from(["msoffice-crypto", sub, "f.docx", "--json"])
+                .is_err(),
+            "{sub} must not accept --json"
+        );
+    }
+}
