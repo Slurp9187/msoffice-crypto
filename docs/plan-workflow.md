@@ -177,12 +177,27 @@ closers survive; squash-merge composes one body from them, and an author who
 edits that body can drop a closer without noticing. On a non-default branch,
 neither fires.
 
-**Where to put the closer.** A slice is closed by hand, with a comment carrying
-the evidence that closed it — not by a keyword in a commit nobody reads
-afterwards. Keep `Closes #<parent>` in the PR body so the
-arc handle closes on merge, and let commits *mention* issues without keywords —
-`Implement password decrypt against classify (#11-#15)` is a mention and closes
-nothing, which is what it should do.
+**Where to put the closer.** GitHub does the closing. A slice PR carries
+`Closes #<slice>` in its body — one keyword for the one issue it finishes — and
+the evidence that justifies the close goes in that same body, so the proof
+travels with the commit that closes it rather than sitting in a comment beside
+it.
+
+**Never put `Closes #<parent>` on a slice PR.** The parent is the arc handle and
+outlives every slice; a keyword on it closes the whole arc at the first merge.
+The parent closes on the PR that lands the *last* slice, or by hand at close-out
+with the plan file stamped.
+
+**The keyword must be in the body before the merge, not added to it after.** A
+PR-body closer fires at the moment of merge and is never re-evaluated. #8 was
+opened without one, the keyword was edited in while the merge was already
+landing, and #2 stayed open — the edit was not wrong, it was late. Write the
+keyword when you write the body, and check it with `closingIssuesReferences`
+below *before* the merge rather than after.
+
+A commit message may still *mention* an issue without a keyword —
+`Implement password decrypt against classify (#11)` closes nothing, which is
+what a commit that advances an issue without finishing it should do.
 
 **Verify, do not assume.** `gh pr view <n> --json closingIssuesReferences` is
 GitHub's own parse, not a guess from the body text. It also catches a keyword
