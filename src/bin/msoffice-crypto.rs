@@ -8,15 +8,17 @@
 //! the run. `--password` is registered anyway, hidden, purely so that reaching for it
 //! produces an explanation rather than "unexpected argument".
 
+use std::io::{IsTerminal, Read};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[cfg(test)]
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command};
 use msoffice_crypto::{
-    classify, AlgorithmParams, CipherAlgorithm, Classification, Container, Document, Error, Family,
-    HashAlgorithm, IntegrityDeclaration, IntegrityPolicy,
+    classify, decrypt_ooxml, AlgorithmParams, CipherAlgorithm, Classification, Container, Document,
+    Error, Family, HashAlgorithm, IntegrityDeclaration, IntegrityPolicy,
 };
 use serde_json::{json, Map, Value};
 
@@ -65,6 +67,10 @@ const PASSWORD_AFTER_HELP: &str = "\
 PASSWORDS:
   argv is world-readable in a process listing, so there is no `--password
   VALUE` argument. Give exactly one source, or none to be prompted without echo.
+  --password-env takes the variable's NAME, so MSOFFICE_CRYPTO_PASSWORD is the
+  obvious one to name -- and naming it is the only way this tool reads it. A
+  password that applies without being asked for is how the wrong file gets
+  decrypted in a loop.
 
 EXIT CODES:
   0 ok        1 usage      2 io          3 not-office
@@ -229,20 +235,31 @@ fn main() -> ExitCode {
 fn dispatch(m: &ArgMatches) -> u8 {
     match m.subcommand() {
         Some(("classify", sub)) => cmd_classify(sub),
-        Some(("decrypt", _)) => not_implemented_yet("decrypt", "S4"),
-        Some(("encrypt", _)) => not_implemented_yet("encrypt", "S5"),
+        Some(("decrypt", sub)) => cmd_crypt(sub, Direction::Decrypt),
+        Some(("encrypt", sub)) => cmd_crypt(sub, Direction::Encrypt),
         _ => EX_USAGE,
     }
 }
 
-/// The S1 scaffold: the grammar is real, the work is not here yet.
+/// The remaining scaffold: `encrypt`'s grammar and its password wiring are real, the
+/// writer is not here yet.
 ///
-/// Exit 9 rather than 0 or 1: nothing was decrypted and nothing was written, and 9 is
+/// Exit 9 rather than 0 or 1: nothing was encrypted and nothing was written, and 9 is
 /// the table's "this build cannot do it". Deleted by the slice named in the message.
+///
+/// **The message may not claim nothing was read.** Until this slice the `encrypt` arm
+/// really was a no-op, and the wording said so. It is now reached only after `cmd_crypt`
+/// has read the whole input file (`std::fs::read`) and resolved the password through
+/// `read_password` -- opening a `--password-file`, reading a `--password-env` variable,
+/// draining stdin or prompting on the terminal. Telling the user their password source
+/// was never touched would be false, and a script or a person reading it would conclude
+/// a `--password-file` on disk had not been opened when it had. Guarded by
+/// `the_not_implemented_notice_does_not_claim_nothing_was_read` in tests/cli.rs.
 fn not_implemented_yet(name: &str, slice: &str) -> u8 {
     eprintln!(
         "msoffice-crypto: `{name}` is not implemented in this build yet (plan slice \
-         {slice}); nothing was read and nothing was written."
+         {slice}); your input file and password were read, but nothing was encrypted \
+         and nothing was written."
     );
     EX_UNSUPPORTED
 }
@@ -478,6 +495,126 @@ fn classification_json(c: &Classification) -> String {
     Value::Object(o).to_string()
 }
 
+// --- decrypt / encrypt ------------------------------------------------------
+
+/// Which subcommand [`cmd_crypt`] is serving.
+///
+/// Only the prompt verb differs at this slice. `suffix()` -- the derived output name --
+/// is S4's, deliberately not added here: with `derived_output` still `#[cfg(test)]` it
+/// would be dead code in the one column that ships.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    Decrypt,
+    Encrypt,
+}
+
+impl Direction {
+    /// "Password" when reading one, "New password" when choosing one, so an `encrypt`
+    /// prompt does not read as though the file already had a password.
+    fn prompt_verb(self) -> &'static str {
+        match self {
+            Direction::Decrypt => "Password",
+            Direction::Encrypt => "New password",
+        }
+    }
+}
+
+/// The one password source this run may use.
+///
+/// The [`ArgGroup`] in [`crypt_command`] guarantees at most one flag was given, so this
+/// is a selection and not a precedence order; `Prompt` is what *no* flag means, which is
+/// why that group is `multiple(false)` and deliberately not `required`.
+enum PasswordSource {
+    Env(String),
+    File(PathBuf),
+    Stdin,
+    Prompt,
+}
+
+impl PasswordSource {
+    /// How to name this source to a user whose password turned out to be empty. Never
+    /// includes the value — only where it came from.
+    fn origin(&self) -> String {
+        match self {
+            PasswordSource::Env(name) => format!("environment variable `{name}`"),
+            PasswordSource::File(path) => format!("password file {}", path.display()),
+            PasswordSource::Stdin => "stdin".to_string(),
+            PasswordSource::Prompt => "the prompt".to_string(),
+        }
+    }
+}
+
+fn cmd_crypt(m: &ArgMatches, dir: Direction) -> u8 {
+    // The hidden trap arg, checked before anything reads a file, a variable or stdin, so
+    // reaching for `--password` is answered with the reason it does not exist rather than
+    // clap's generic "unexpected argument". The value is never echoed: it is a password.
+    if m.get_one::<String>(PASSWORD_TRAP).is_some() {
+        eprintln!(
+            "msoffice-crypto: there is no `--password` argument: argv is world-readable in a \
+             process listing.\nUse --password-env NAME, --password-file PATH or --password-stdin."
+        );
+        return EX_USAGE;
+    }
+
+    // At most one is present -- the ArgGroup rejected two before we got here, so this is
+    // not a precedence chain and must never become one.
+    let source = if let Some(name) = m.get_one::<String>("password-env") {
+        PasswordSource::Env(name.clone())
+    } else if let Some(path) = m.get_one::<String>("password-file") {
+        PasswordSource::File(PathBuf::from(path))
+    } else if m.get_flag("password-stdin") {
+        PasswordSource::Stdin
+    } else {
+        PasswordSource::Prompt
+    };
+
+    let file = m.get_one::<String>("file").expect("required by clap");
+    let bytes = match std::fs::read(file) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("msoffice-crypto: cannot read {file}: {e}");
+            return exit_code(&Error::Io(e));
+        }
+    };
+
+    // A plain `String`, not a secure-gate wrapper, and that is the documented boundary:
+    // the secure-gate skill puts the password argument of the public decrypt API outside
+    // what is wrapped, and nothing here may print it.
+    let password = match read_password(source, dir) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+
+    match dir {
+        Direction::Decrypt => {
+            // S3's seam, deliberately the narrowest decrypt that can prove the password
+            // arrived: no `classify` dispatch, no `legacy-binary` arm, no `--integrity`
+            // and no output handling -- all four are S4's (issue #5). `decrypt_ooxml` is
+            // `decrypt_ooxml_with_policy` under the library's own fail-closed default,
+            // which is exactly what `--integrity` will make selectable, so S4 substitutes
+            // one call rather than rewriting this arm. Until it lands, a plain or non-CFB
+            // input is reported in the library's words and exits 3; the CLI's own "not
+            // encrypted, nothing to decrypt" (exit 5) arrives with the classification.
+            match decrypt_ooxml(&bytes, &password) {
+                Ok(package) => {
+                    eprintln!(
+                        "msoffice-crypto: decrypted {file} ({} bytes); this build does not \
+                         write output yet (plan slice S4), so -o was ignored and nothing \
+                         was written.",
+                        package.len()
+                    );
+                    EX_OK
+                }
+                Err(e) => {
+                    eprintln!("msoffice-crypto: {e}");
+                    exit_code(&e)
+                }
+            }
+        }
+        Direction::Encrypt => not_implemented_yet("encrypt", "S5"),
+    }
+}
+
 // --- output paths ---------------------------------------------------------
 
 /// `report.docx` -> `report.decrypted.docx`. A file with no extension gets the suffix
@@ -496,12 +633,92 @@ fn derived_output(input: &Path, suffix: &str) -> PathBuf {
     input.with_file_name(name)
 }
 
+// --- passwords --------------------------------------------------------------
+
+/// The one place a password enters this process.
+///
+/// Never returns the value in an error: every failure path here names the flag, the
+/// path or the variable, and nothing else. That is not stylistic -- see the `Env` arm.
+fn read_password(source: PasswordSource, dir: Direction) -> Result<String, u8> {
+    let origin = source.origin();
+    let password = read_password_from(source, dir)?;
+
+    // An empty password is a usage error, not a wrong password. Before this check, an empty
+    // `--password-file` -- a secret manager that returned nothing, a truncated write -- reached
+    // the library as `""` and came back `Error::WrongPassword`, exit 4. That is the failure-mode
+    // conflation CLAUDE.md § *Cryptographic Rules* forbids: it sends the user to re-check the
+    // one thing that is not broken. No Office format encrypts under an empty password, so there
+    // is no legitimate case to preserve.
+    //
+    // The message names the SOURCE and never the value.
+    if password.is_empty() {
+        eprintln!("msoffice-crypto: {origin} supplied an empty password.");
+        return Err(EX_USAGE);
+    }
+    Ok(password)
+}
+
+fn read_password_from(source: PasswordSource, dir: Direction) -> Result<String, u8> {
+    match source {
+        // The value is used RAW: no `first_line`. A trailing newline in a variable the
+        // caller set is the caller's, and an environment variable is not a file an editor
+        // appended to. The asymmetry with `File` and `Stdin` below is deliberate.
+        //
+        // `map_err(|_| ..)`, discarding the error, is load-bearing. `VarError`'s `Display`
+        // is "environment variable was not valid unicode: {:?}" -- it embeds the OsString,
+        // which is the password. A `{e}` here would print it, and CLAUDE.md's cryptographic
+        // rules forbid exactly that. Guarded by
+        // `a_non_unicode_password_variable_never_reaches_stderr` in tests/cli.rs.
+        PasswordSource::Env(name) => std::env::var(&name).map_err(|_| {
+            eprintln!(
+                "msoffice-crypto: environment variable `{name}` is not set, or does not \
+                 hold text this platform can read as a password."
+            );
+            EX_USAGE
+        }),
+        PasswordSource::File(path) => match std::fs::read_to_string(&path) {
+            Ok(s) => Ok(first_line(&s)),
+            Err(e) => {
+                eprintln!("msoffice-crypto: cannot read {}: {e}", path.display());
+                Err(EX_IO)
+            }
+        },
+        PasswordSource::Stdin => {
+            let mut s = String::new();
+            match std::io::stdin().read_to_string(&mut s) {
+                Ok(_) => Ok(first_line(&s)),
+                Err(e) => {
+                    eprintln!("msoffice-crypto: cannot read stdin: {e}");
+                    Err(EX_IO)
+                }
+            }
+        }
+        PasswordSource::Prompt => {
+            // Refuse rather than block on a prompt nobody can see: with stdin redirected
+            // from NUL or /dev/null there is no one to type into it, and a hang is a
+            // failure no exit code can report. `std::io::IsTerminal`, stable since 1.70
+            // and well under this crate's 1.85 MSRV -- no `atty`, no `is-terminal`.
+            if !std::io::stdin().is_terminal() {
+                eprintln!(
+                    "msoffice-crypto: no password source and stdin is not a terminal.\n\
+                     Use --password-env NAME, --password-file PATH or --password-stdin."
+                );
+                return Err(EX_USAGE);
+            }
+            rpassword::prompt_password(format!("{}: ", dir.prompt_verb())).map_err(|e| {
+                eprintln!("msoffice-crypto: cannot read password: {e}");
+                EX_IO
+            })
+        }
+    }
+}
+
 /// A password file written by an editor ends with a newline that is not part of the
 /// password. Strips one trailing CR-LF or LF, and nothing else — trailing spaces are
 /// kept, because they can be deliberate.
 ///
-/// `#[cfg(test)]` until S3 wires `--password-file` and `--password-stdin`.
-#[cfg(test)]
+/// Applies to `--password-file` and `--password-stdin`. NOT to `--password-env`: see
+/// [`read_password`].
 fn first_line(s: &str) -> String {
     let line = s.split('\n').next().unwrap_or("");
     line.strip_suffix('\r').unwrap_or(line).to_string()
