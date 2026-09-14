@@ -302,3 +302,63 @@ pub enum Error {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
+
+/// The coverage half of the CLI's exit-code proof.
+///
+/// `src/bin/msoffice-crypto.rs` maps every [`Error`] to an exit code, and its `match`
+/// needs a `_` arm: the enum is `#[non_exhaustive]` and the binary is a separate crate.
+/// A `_` arm produces no diagnostic when a variant is added, so a fifteenth variant
+/// would silently become exit 7 with nothing red anywhere.
+///
+/// This table duplicates that one **without** a `_` arm, inside the defining crate,
+/// where `#[non_exhaustive]` does not apply. Adding a variant to [`Error`] and not
+/// deciding its exit code is then `E0004` here, naming the variant. It is deliberately
+/// a duplicate: the alternative — a public `Error::exit_code()` — would make an API
+/// promise at publish for a binary's benefit.
+///
+/// The values are checked against the binary's own table by
+/// `exit_codes_map_every_error_class` in `src/bin/msoffice-crypto_tests.rs`. This test
+/// is the coverage evidence; that one is the value evidence. Both are required.
+#[cfg(test)]
+mod exit_code_canary {
+    use super::Error;
+
+    fn exit_code(e: &Error) -> u8 {
+        match e {
+            Error::NotACfbFile => 3,
+            Error::MissingStream(_) => 6,
+            Error::BadParameters(_) => 6,
+            Error::Io(_) => 2,
+            #[cfg(feature = "legacy-binary")]
+            Error::NotEncrypted => 5,
+            #[cfg(feature = "crypto-ops")]
+            Error::UnsupportedEncryptionVersion(_, _) => 9,
+            #[cfg(feature = "crypto-ops")]
+            Error::XmlParse(_) => 6,
+            #[cfg(feature = "crypto-ops")]
+            Error::WrongPassword => 4,
+            #[cfg(feature = "crypto-ops")]
+            Error::CipherError => 6,
+            #[cfg(feature = "crypto-ops")]
+            Error::UnsupportedAlgorithm { .. } => 9,
+            #[cfg(feature = "crypto-ops")]
+            Error::IntegrityCheckFailed => 8,
+            #[cfg(feature = "crypto-ops")]
+            Error::IntegrityElementMissing => 8,
+            #[cfg(feature = "crypto-ops")]
+            Error::IntegrityUnavailable(_) => 8,
+            #[cfg(feature = "crypto-ops")]
+            Error::RandomSource(_) => 7,
+        }
+    }
+
+    #[test]
+    fn every_error_variant_is_named_in_the_exit_code_table() {
+        assert_eq!(exit_code(&Error::NotACfbFile), 3);
+        assert_eq!(exit_code(&Error::Io(std::io::Error::other("x"))), 2);
+        #[cfg(feature = "crypto-ops")]
+        assert_eq!(exit_code(&Error::IntegrityElementMissing), 8);
+        #[cfg(feature = "legacy-binary")]
+        assert_eq!(exit_code(&Error::NotEncrypted), 5);
+    }
+}
