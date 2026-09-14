@@ -659,6 +659,111 @@ fn direction_suffixes_are_the_plans() {
 }
 
 #[test]
+fn the_format_table_round_trips_over_both_names() {
+    // Not tautological: `format_name` maps a variant to a slot of `FORMAT_NAMES` and
+    // `parse_format` maps the slots back independently, so swapping either one's arms
+    // breaks the round trip here. It says nothing about clap's default -- that claim
+    // belongs to `the_encrypt_default_parses_back_to_agile`, which reads `cli()`.
+    for f in [Format::Agile, Format::Standard] {
+        assert_eq!(parse_format(format_name(f)), Some(f));
+    }
+    assert_eq!(parse_format("unrecognised"), None);
+}
+
+#[test]
+fn the_encrypt_default_parses_back_to_agile() {
+    let mut cmd = cli();
+    let sub = cmd.find_subcommand_mut("encrypt").expect("encrypt");
+    // Read what clap actually stored, then push it back through the table. Computing
+    // the expectation from the same `format_name(Format::Agile)` call the source passes
+    // to `.default_value(..)` would be tautological -- swapped arms in `format_name`
+    // would wire `[default: standard]` and the assertion would move with the bug.
+    let arg = sub
+        .get_arguments()
+        .find(|a| a.get_id() == "format")
+        .expect("--format");
+    let defaults = arg.get_default_values();
+    assert_eq!(defaults.len(), 1, "one default, got {defaults:?}");
+    let rendered = defaults[0].to_str().expect("utf-8 default").to_string();
+    assert_eq!(
+        parse_format(&rendered),
+        Some(Format::Agile),
+        "encrypt --format defaults to {rendered:?}, which is not agile"
+    );
+
+    // And it reaches the help, where the user reads it.
+    let text = sub.render_long_help().to_string();
+    let want = format!("[default: {rendered}]");
+    assert!(
+        text.contains(&want),
+        "encrypt --help must show {want:?}, got:\n{text}"
+    );
+    for n in FORMAT_NAMES {
+        assert!(text.contains(n), "help must list {n}");
+    }
+}
+
+#[test]
+fn the_encrypt_help_says_why_standard_exists_rather_than_leaving_it_to_folklore() {
+    let mut cmd = cli();
+    let text = cmd
+        .find_subcommand_mut("encrypt")
+        .expect("encrypt")
+        .render_long_help()
+        .to_string();
+    // Whitespace-flattened because clap rewraps help to its own width, so a phrase can
+    // cross a line break in the rendering without crossing one in the source string.
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Phrases, not the bare words "dataIntegrity"/"Office 2007"/"Office 2010": all three
+    // of those appear in the one-line help this slice replaced
+    // ("agile (Office 2010+, has a dataIntegrity HMAC) or standard (Office 2007)"), so a
+    // test built on them passes against the text it is supposed to have superseded and
+    // guards nothing (CLAUDE.md, Evidence over intent).
+    for token in [
+        "refused rather than silently opened",
+        "predates agile",
+        "defines no integrity element at all",
+    ] {
+        assert!(
+            flat.contains(token),
+            "encrypt help must explain the cost of standard ({token:?} missing), got: {flat}"
+        );
+    }
+    // `decrypt` offers `--integrity`; `encrypt` must not -- agile always writes the
+    // element and standard cannot, so the flag would be a lie in one direction and a
+    // no-op in the other.
+    assert!(
+        !text.contains("--integrity"),
+        "encrypt must not offer --integrity: agile always writes the element and \
+         standard cannot, so the flag would be a lie in one direction and a no-op in \
+         the other"
+    );
+}
+
+#[test]
+fn the_integrity_word_for_each_format_is_the_librarys_declaration() {
+    assert_eq!(
+        integrity_name(declared_integrity(Format::Agile)),
+        "declared"
+    );
+    assert_eq!(
+        integrity_name(declared_integrity(Format::Standard)),
+        "not-applicable"
+    );
+    // The claim is about the library's own enum, not about two strings.
+    assert_eq!(
+        declared_integrity(Format::Agile),
+        IntegrityDeclaration::Declared
+    );
+}
+
+#[test]
+fn a_plain_zip_is_the_one_thing_encrypt_accepts() {
+    // Four bytes, no fixture: `is_zip` (classify.rs) needs exactly that.
+    assert_eq!(encrypt_guard(&classify(b"PK\x03\x04")), Ok(()));
+}
+
+#[test]
 fn junk_routes_to_not_office_with_the_unknown_container_wording() {
     // Fixture-free: sixteen bytes of junk is a legal Classification (T4).
     let r = route_for(&classify(b"sixteen bytes!!!"), IntegrityPolicy::default());
@@ -698,6 +803,61 @@ fn a_cfb_that_is_not_office_routes_to_not_office() {
     };
     assert_eq!(code, EX_NOT_OFFICE);
     assert!(why.contains("CFB container"), "{why}");
+}
+
+#[test]
+fn a_cfb_input_is_refused_at_five_without_naming_a_document_kind() {
+    // The same eight CFB magic bytes as `a_cfb_that_is_not_office_routes_to_not_office`:
+    // Cfb / Document::Unknown / not encrypted.
+    let magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    let r = encrypt_guard(&classify(&magic));
+    let Err(Refusal { code, why }) = r else {
+        panic!("a bare CFB must be refused, got {r:?}")
+    };
+    assert_eq!(code, EX_REFUSED);
+    assert!(why.contains("CFB container"), "{why}");
+    assert!(why.contains("OOXML package"), "{why}");
+    // The load-bearing negative: `Document::Unknown` for these bytes must not be
+    // interpolated into a claim about "a 97-2003 document" or "unknown".
+    assert!(
+        !why.contains("97-2003 document") && !why.contains("unknown"),
+        "the message named a document kind classify refused to name: {why}"
+    );
+}
+
+#[test]
+fn encrypt_and_decrypt_answer_a_bare_cfb_with_different_codes() {
+    // decrypt asks "can I decrypt this" (3, not a document it knows); encrypt asks "is
+    // this a plain package" (5, nothing to do). Aligning them loses one of the two
+    // facts -- CONTRACT §5 / plan §7 call this deliberate.
+    let magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    let class = classify(&magic);
+    let decrypt_code = route_for(&class, IntegrityPolicy::default())
+        .expect_err("a bare CFB is not decryptable")
+        .code;
+    let encrypt_code = encrypt_guard(&class)
+        .expect_err("a bare CFB is not a package")
+        .code;
+    assert_eq!(decrypt_code, EX_NOT_OFFICE);
+    assert_eq!(encrypt_code, EX_REFUSED);
+    assert_ne!(
+        decrypt_code, encrypt_code,
+        "encrypt refuses a CFB because it is not a package (5, nothing to do); decrypt \
+         refuses it because it is not a document it knows (3). Aligning them loses one \
+         of the two facts"
+    );
+}
+
+#[test]
+fn junk_is_refused_by_encrypt_with_the_same_sentence_decrypt_uses() {
+    let why_encrypt = encrypt_guard(&classify(b"sixteen bytes!!!"))
+        .expect_err("junk is not a package")
+        .why;
+    let why_decrypt = route_for(&classify(b"sixteen bytes!!!"), IntegrityPolicy::default())
+        .expect_err("junk is not decryptable")
+        .why;
+    assert_eq!(why_encrypt, NOT_OFFICE);
+    assert_eq!(why_decrypt, why_encrypt, "one fact must have one sentence");
 }
 
 #[cfg(feature = "legacy-binary")]

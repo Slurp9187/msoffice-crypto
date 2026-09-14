@@ -22,6 +22,72 @@ What survives that move is in two places, deliberately:
 
 ---
 
+## v0.1.0-rc.2 — unreleased
+
+### The four-reader acceptance gate, over a CLI-written artifact
+
+`msoffice-crypto encrypt` writes the container the library writes, so the gate below ran
+over a file the *binary* produced rather than one a library test did — the first time
+that has been true. The artifact came from a private directory, never the shared system
+temp directory, because a run there once measured another build's file.
+
+The blocks below are the gate's own output, with one edit and no others: the two
+`libreoffice` lines carry the artifact's absolute path inside the `Unsupported URL`
+message, and that path is a temporary directory under a workstation account name, so it
+is elided here. Nothing else is paraphrased.
+
+Agile, from `encrypt tests/fixtures/plain.docx --format agile`: 41984 bytes, SHA-256
+`e4c9ed2929322c923c572c916125a73449754277cf7cdd509545d44aed935198`. Measured
+2026-09-14 against Word 16.0 build 16.0.19127, LibreOffice 26.2.1.2, msoffcrypto-tool
+6.0.0 and office-crypto 0.3:
+
+```
+office         PASS     Word 16.0 build 16.0.19127: RIGHT PASSWORD : OPENED in Word, content matches plain_content.txt | WRONG PASSWORD : REFUSED 0x800A1520 (password incorrect -- container, header, XML and KDF all accepted)
+libreoffice    PASS     LibreOffice 26.2.1.2: RIGHT PASSWORD : OPENED, content matches plain_content.txt | WRONG PASSWORD : REFUSED -- verifier rejected it and LibreOffice asked for another (a password request with an XInteractionPassword2 continuation, aborted); load then threw com.sun.star.lang.IllegalArgumentException: Unsupported URL: "type detection aborted"
+msoffcrypto    PASS     msoffcrypto-tool 6.0.0: byte-identical to plain.docx (36678 bytes) | dataIntegrity HMAC verifies (verify_integrity=True) | wrong password refused (exit 1): msoffcrypto.exceptions.InvalidKeyError: The file could not be decrypted with this password
+office-crypto  PASS     office-crypto 0.3: byte-identical to plain.docx (36678 bytes) | wrong password: 36678 bytes, NOT plain.docx (36678 bytes) (office-crypto verifies neither the verifier nor dataIntegrity; the byte comparison is the check)
+
+GATE: PASS (4 of 4 readers ran; 0 not selected)
+```
+
+Both mutation runs fail as they must, over that same artifact. `--tamper --expect-fail`
+(one ciphertext bit flipped in `EncryptedPackage`) →
+`GATE: FAIL (4 of 4 selected readers failed: office, libreoffice, msoffcrypto,
+office-crypto)` / `EXPECTED FAIL: the gate failed, which is what this run required`.
+`--corrupt-integrity --expect-fail` (the `dataIntegrity` HMAC blobs blanked, every
+length unchanged) →
+`GATE: FAIL (3 of 4 selected readers failed: office, libreoffice, msoffcrypto)` —
+`office-crypto` PASSes this one on purpose, because it is the one reader here that
+never checks `dataIntegrity` at all, and its byte comparison alone cannot see the
+corruption — / `EXPECTED FAIL: the gate failed, which is what this run required`.
+Without both of these the PASS above would be vacuous.
+
+Standard, from the same input with `--format standard`: 40960 bytes, SHA-256
+`d6d6d4c9c80419b299683fa62dc716f158bc018d5f9ff367b6605cb8528577d8`, same date and
+same reader versions:
+
+```
+office         PASS     Word 16.0 build 16.0.19127: RIGHT PASSWORD : OPENED in Word, content matches plain_content.txt | WRONG PASSWORD : REFUSED 0x800A1520 (password incorrect -- container, header, XML and KDF all accepted)
+libreoffice    PASS     LibreOffice 26.2.1.2: RIGHT PASSWORD : OPENED, content matches plain_content.txt | WRONG PASSWORD : REFUSED -- verifier rejected it and LibreOffice asked for another (a password request with an XInteractionPassword2 continuation, aborted); load then threw com.sun.star.lang.IllegalArgumentException: Unsupported URL: "type detection aborted"
+msoffcrypto    PASS     msoffcrypto-tool 6.0.0: byte-identical to plain.docx (36678 bytes) | dataIntegrity HMAC verifies (verify_integrity=True) | wrong password refused (exit 1): msoffcrypto.exceptions.InvalidKeyError: The file could not be decrypted with this password
+office-crypto  PASS     office-crypto 0.3: byte-identical to plain.docx (36678 bytes) | wrong password: 36678 bytes, NOT plain.docx (36678 bytes) (office-crypto verifies neither the verifier nor dataIntegrity; the byte comparison is the check)
+
+GATE: PASS (4 of 4 readers ran; 0 not selected)
+```
+
+`--corrupt-integrity` does not apply to it: Office 2007 standard encryption defines no
+`dataIntegrity` element, which is why `encrypt` prints `integrity: not-applicable` for
+it and why there is no `--integrity` flag on `encrypt` at all.
+
+**Read the `msoffcrypto` line in that second block with this in mind.**
+`dataIntegrity HMAC verifies (verify_integrity=True)` is the single string
+`msoffcrypto_integrity` returns on success (`tools/acceptance_gate.py:197`), and for a
+file carrying no `dataIntegrity` at all `msoffcrypto-tool` ignores the keyword — as the
+function's own docstring says. On the standard artifact that line therefore means *it
+decrypted*, not that anything was authenticated, and the gate's wording does not
+distinguish the two. The only HMAC claim in this entry is the agile block's, and
+`--corrupt-integrity` above is what makes that one non-vacuous.
+
 ## v0.1.0-rc.1 — 2026-09-11
 
 First public version. Detection, decryption and encryption of the formats [MS-OFFCRYPTO]

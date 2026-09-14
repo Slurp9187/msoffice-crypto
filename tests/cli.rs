@@ -19,7 +19,12 @@
 //! without `-o`**: the derived output name lands beside the input, which would be the
 //! corpus, and `every_office_fixture_is_present_by_name` enumerates that directory and
 //! fails on the leak. The derived-name tests copy their fixture into a `Scratch` first.
-//! `encrypt` still reports itself unimplemented after reading its password (S5).
+//! S5 makes `encrypt` real: `--format agile|standard` over the two writers, the
+//! `Container::Cfb` refusal at exit 5, and the same output tail S4 built. **The rule
+//! above applies to `encrypt` too**: no test here runs `encrypt` on a path under
+//! `tests/fixtures/` without `-o`, because the derived name would land
+//! `plain.encrypted.docx` in the corpus and `every_office_fixture_is_present_by_name`
+//! fails on the leak. The derived-name test copies its fixture into a `Scratch` first.
 #![cfg(feature = "cli")]
 
 use std::ffi::OsString;
@@ -43,6 +48,11 @@ const EX_REFUSED: i32 = 5;
 #[cfg(feature = "legacy-binary")]
 const EX_MALFORMED: i32 = 6;
 const EX_INTEGRITY: i32 = 8;
+/// Gated because after S5 every use is in the build WITHOUT a legacy walker: 9 is what
+/// a `.doc` gets when this build cannot open it at all, and `encrypt`'s own refusals
+/// are 5 and 3, never 9. The `cli,legacy-binary` column reaches the library's verdict
+/// instead, so the constant is genuinely unused there.
+#[cfg(not(feature = "legacy-binary"))]
 const EX_UNSUPPORTED: i32 = 9;
 
 /// Every fixture in `tests/fixtures/` is sealed with this (CLAUDE.md § Testing Rules).
@@ -186,7 +196,8 @@ const LEGACY_GOLDENS: [(&str, &str, usize); 4] = [
         25_600,
     ),
 ];
-#[cfg(feature = "legacy-binary")]
+// Ungated by S5: `encrypt` writes a CFB container (either format) in every `cli`
+// column, so this is no longer legacy-binary-only.
 const CFB_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 /// `CARGO_BIN_EXE_<name>` is set by Cargo for every binary target when building an
@@ -444,6 +455,24 @@ fn decrypt_to(s: &Scratch, input: &Path, out_name: &str, extra: &[&str]) -> Outp
     let out_path = s.join(out_name);
     let mut args = vec![
         "decrypt",
+        input.to_str().expect("utf-8"),
+        "-o",
+        out_path.to_str().expect("utf-8"),
+        "--password-file",
+        pw.to_str().expect("utf-8"),
+    ];
+    args.extend_from_slice(extra);
+    run(&args)
+}
+
+/// `encrypt INPUT -o <scratch>/OUT --password-file <scratch>/pw.txt EXTRA...`. A mirror
+/// of `decrypt_to`, and it always passes `-o`: without one the derived name lands beside
+/// the input, which for a fixture path is the corpus.
+fn encrypt_to(s: &Scratch, input: &Path, out_name: &str, extra: &[&str]) -> Output {
+    let pw = pw_file(s, "pw.txt", "testpass\n");
+    let out_path = s.join(out_name);
+    let mut args = vec![
+        "encrypt",
         input.to_str().expect("utf-8"),
         "-o",
         out_path.to_str().expect("utf-8"),
@@ -1376,78 +1405,413 @@ fn a_near_miss_password_flag_is_given_a_suggestion() {
     assert!(stderr(&out).contains("--password-env"), "{}", stderr(&out));
 }
 
-#[test]
-fn encrypt_reads_the_password_before_it_reports_not_implemented() {
-    let plain = fixture("plain.docx");
-    let plain = plain.to_str().expect("utf-8 path");
-    let s = Scratch::new("encrypt-password");
+// --- S5: encrypt -----------------------------------------------------------
 
-    // A password source that fails to read must surface as EX_IO, not the S1 stub's
-    // EX_UNSUPPORTED -- which is the only way to tell "encrypt shares the password
-    // wiring" from "encrypt is still the untouched stub".
+#[test]
+fn encrypt_then_decrypt_is_byte_identical_in_both_formats() {
+    let s = Scratch::new("enc-roundtrip");
+    let plain = fixture("plain.docx");
+    let want = std::fs::read(&plain).expect("read plain fixture");
+    let mut sealed_bytes = Vec::new();
+
+    for f in ["agile", "standard"] {
+        let sealed_name = format!("sealed-{f}.docx");
+        let out = encrypt_to(&s, &plain, &sealed_name, &["--format", f]);
+        assert_eq!(code(&out), EX_OK, "{f}: stderr: {}", stderr(&out));
+        let bytes = std::fs::read(s.join(&sealed_name)).expect("read sealed");
+        assert!(bytes.starts_with(&CFB_MAGIC), "{f}: not a CFB container");
+
+        let back_name = format!("back-{f}.docx");
+        let out = decrypt_to(&s, &s.join(&sealed_name), &back_name, &[]);
+        assert_eq!(code(&out), EX_OK, "{f}: decrypt stderr: {}", stderr(&out));
+        assert_eq!(
+            std::fs::read(s.join(&back_name)).expect("read decrypted"),
+            want,
+            "{f}: round trip changed bytes"
+        );
+        sealed_bytes.push(bytes);
+    }
+    // Proof the format flag reached a writer at all: two different writers over the
+    // same plaintext produce different containers.
+    assert_ne!(
+        sealed_bytes[0], sealed_bytes[1],
+        "the two --format values produced the same container"
+    );
+}
+
+#[test]
+fn each_format_produces_the_family_it_names() {
+    let s = Scratch::new("enc-family");
+    let plain = fixture("plain.docx");
+    for (f, want_family) in [("agile", "agile"), ("standard", "standard")] {
+        let out_name = format!("sealed-{f}.docx");
+        let out = encrypt_to(&s, &plain, &out_name, &["--format", f]);
+        assert_eq!(code(&out), EX_OK, "{f}: stderr: {}", stderr(&out));
+        let human = classify_human(&s.join(&out_name));
+        assert_eq!(
+            code(&human),
+            EX_OK,
+            "{f}: classify stderr: {}",
+            stderr(&human)
+        );
+        let text = stdout(&human);
+        assert_eq!(human_field(&text, "family:").as_deref(), Some(want_family));
+        assert_eq!(human_field(&text, "container:").as_deref(), Some("cfb"));
+        assert_eq!(
+            human_field(&text, "document:").as_deref(),
+            Some("ooxml-package")
+        );
+        assert_eq!(human_field(&text, "encrypted:").as_deref(), Some("yes"));
+        assert_eq!(human_field(&text, "supported:").as_deref(), Some("yes"));
+    }
+}
+
+#[test]
+fn each_format_reports_the_integrity_it_actually_carries() {
+    let s = Scratch::new("enc-integrity-word");
+    let plain = fixture("plain.docx");
+    for (f, want) in [("agile", "declared"), ("standard", "not-applicable")] {
+        let out_name = format!("sealed-{f}.docx");
+        let out = encrypt_to(&s, &plain, &out_name, &["--format", f]);
+        assert_eq!(code(&out), EX_OK, "{f}: stderr: {}", stderr(&out));
+        assert_eq!(
+            integrity_line(&out).as_deref(),
+            Some(want),
+            "{f}: encrypt's own integrity line"
+        );
+        let human = classify_human(&s.join(&out_name));
+        let text = stdout(&human);
+        assert_eq!(
+            human_field(&text, "integrity:").as_deref(),
+            Some(want),
+            "{f}: encrypt's notice and classify must agree -- that equality is the \
+             exact lie the absent --integrity flag would otherwise have told"
+        );
+    }
+}
+
+#[test]
+fn the_standard_format_says_out_loud_that_it_has_no_integrity_element() {
+    let s = Scratch::new("enc-standard-warn");
+    let plain = fixture("plain.docx");
+
+    let out = encrypt_to(&s, &plain, "standard.docx", &["--format", "standard"]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("defines no dataIntegrity element"),
+        "--format standard must say what it costs: {err}"
+    );
+    assert!(err.contains("`--format agile` writes one"), "{err}");
+
+    let out = encrypt_to(&s, &plain, "agile.docx", &["--format", "agile"]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("defines no dataIntegrity element"),
+        "the agile run warned about an element it wrote: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn encrypting_an_already_encrypted_file_exits_five_and_writes_nothing() {
+    let s = Scratch::new("enc-already");
+
+    let out = encrypt_to(&s, &fixture("agile_encrypted.docx"), "nope.docx", &[]);
+    assert_eq!(code(&out), EX_REFUSED, "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("already encrypted"), "{err}");
+    assert!(err.contains("agile"), "{err}");
+    // The positive half of the pair whose negative half is
+    // `an_encrypted_97_2003_document_is_not_offered_a_remedy_this_tool_cannot_carry_out`:
+    // here the remedy is real, because `decrypt` of this file works in every cli build
+    // and yields a package `encrypt` accepts. Without this the other test could not
+    // tell "the clause is chosen per document kind" from "the clause was deleted".
+    assert!(err.contains("decrypt it first"), "{err}");
+    assert!(!s.join("nope.docx").exists());
+    assert_eq!(entries(&s), vec!["pw.txt".to_string()], "no output leaked");
+
+    let out = encrypt_to(&s, &fixture("standard_encrypted.docx"), "nope2.docx", &[]);
+    assert_eq!(code(&out), EX_REFUSED, "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains("standard"), "{}", stderr(&out));
+    assert!(!s.join("nope2.docx").exists());
+}
+
+#[test]
+fn an_encrypted_97_2003_document_is_not_offered_a_remedy_this_tool_cannot_carry_out() {
+    // Ungated, and the gap this closes ran along the feature boundary: "decrypt it
+    // first" was the remedy for every encrypted CFB, and for a 97-2003 binary document
+    // it is carriable in neither cli column. Without `legacy-binary`, `decrypt` of this
+    // same file exits 9 ("rebuild with --features cli,legacy-binary"); with it, the
+    // decrypt succeeds and yields a rewritten CFB that the very next `encrypt` refuses,
+    // because there is no writer for these formats. Either way the advice was a second
+    // refusal, so the refusal now says the durable thing instead.
+    let s = Scratch::new("enc-already-legacy");
+    let out = encrypt_to(&s, &fixture("word97_password.doc"), "nope.doc", &[]);
+    assert_eq!(code(&out), EX_REFUSED, "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("already encrypted"), "{err}");
+    assert!(err.contains("rc4-cryptoapi"), "{err}");
+    assert!(
+        err.contains("no writer for the 97-2003 binary formats"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("decrypt it first"),
+        "a remedy no cli build can carry out: {err}"
+    );
+    assert!(!s.join("nope.doc").exists());
+}
+
+#[test]
+fn encrypting_a_97_2003_document_exits_five_and_says_there_is_no_writer() {
+    // Ungated on purpose: the guard fires before any walker, so the answer is
+    // identical in both cli columns and a #[cfg] here would hide a regression in one.
+    let s = Scratch::new("enc-cfb-plain");
+    let out = encrypt_to(&s, &fixture("word97_plain.doc"), "nope.doc", &[]);
+    assert_eq!(code(&out), EX_REFUSED, "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("CFB container"), "{err}");
+    assert!(err.contains("97-2003"), "{err}");
+    assert!(!err.contains("already encrypted"), "{err}");
+    assert!(!s.join("nope.doc").exists());
+}
+
+#[test]
+fn encrypt_refuses_junk_as_not_an_office_file() {
+    let s = Scratch::new("enc-junk");
+    let junk = s.join("junk.bin");
+    std::fs::write(&junk, b"sixteen bytes!!!").expect("write junk");
+
+    let out = encrypt_to(&s, &junk, "nope.docx", &[]);
+    assert_eq!(code(&out), EX_NOT_OFFICE, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("container: unknown"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!s.join("nope.docx").exists());
+
+    // The control that makes 3 mean something: decrypt of the same bytes is also 3,
+    // and encrypt of a real plain.docx succeeds.
+    let out = decrypt_to(&s, &junk, "nope2.docx", &[]);
+    assert_eq!(code(&out), EX_NOT_OFFICE, "stderr: {}", stderr(&out));
+    let out = encrypt_to(&s, &fixture("plain.docx"), "ok.docx", &[]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+}
+
+#[test]
+fn encrypt_classifies_before_it_reads_a_password() {
+    let s = Scratch::new("enc-order");
+    let missing_pw = s.join("missing.txt");
+
+    // (a) A refused file (a bare CFB) must be refused before its password source is
+    // touched -- exit 5, not the EX_IO a missing password file would give.
     let out = run(&[
         "encrypt",
-        plain,
+        fixture("word97_plain.doc").to_str().expect("utf-8 path"),
         "--password-file",
-        s.join("nope.txt").to_str().expect("utf-8 path"),
+        missing_pw.to_str().expect("utf-8 path"),
+        "-o",
+        s.join("a.doc").to_str().expect("utf-8 path"),
     ]);
     assert_eq!(
         code(&out),
-        EX_IO,
-        "encrypt must read its password before dispatching: {}",
+        EX_REFUSED,
+        "a refused file must be refused before its password source is touched: {}",
         stderr(&out)
     );
 
-    // Control: a VALID password file reaches the not-implemented notice, naming S5.
-    let path = pw_file(&s, "pw.txt", "anything\n");
+    // (b) A plain package with the SAME missing password file reaches the read: EX_IO.
     let out = run(&[
         "encrypt",
-        plain,
+        fixture("plain.docx").to_str().expect("utf-8 path"),
         "--password-file",
-        path.to_str().expect("utf-8 path"),
+        missing_pw.to_str().expect("utf-8 path"),
+        "-o",
+        s.join("b.docx").to_str().expect("utf-8 path"),
     ]);
-    assert_eq!(code(&out), EX_UNSUPPORTED, "stderr: {}", stderr(&out));
-    assert!(stderr(&out).contains("S5"), "{}", stderr(&out));
+    assert_eq!(code(&out), EX_IO, "stderr: {}", stderr(&out));
+
+    // (c) Control: a plain package with a VALID password file succeeds.
+    let out = encrypt_to(&s, &fixture("plain.docx"), "c.docx", &[]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
 }
 
-/// The other half of the test above: it proves the ordering, this proves the notice
-/// printed at the end of that ordering is still true.
-///
-/// This slice is what made the question live. Before it, `encrypt` reached
-/// `not_implemented_yet` having done nothing, and "nothing was read and nothing was
-/// written" was accurate. Wiring the password read ahead of the stub made the first half
-/// of that sentence false without touching the string, and no assertion anywhere would
-/// have caught it: the test above asserts only the exit code and `S5`.
-///
-/// The password file below is opened and read by this process before the notice prints,
-/// so a notice claiming nothing was read is a lie to a user deciding whether their
-/// secret ever left the disk.
 #[test]
-fn the_not_implemented_notice_does_not_claim_nothing_was_read() {
-    let plain = fixture("plain.docx");
-    let plain = plain.to_str().expect("utf-8 path");
-    let s = Scratch::new("encrypt-notice");
-    let path = pw_file(&s, "pw.txt", "anything\n");
-
+fn the_derived_output_name_for_encrypt_is_beside_the_input() {
+    let s = Scratch::new("enc-derived");
+    // Never a path under tests/fixtures/: the derived name would land in the corpus.
+    let report = fixture_copy(&s, "plain.docx", "report.docx");
+    let pw = pw_file(&s, "pw.txt", "testpass\n");
     let out = run(&[
         "encrypt",
-        plain,
+        report.to_str().expect("utf-8 path"),
         "--password-file",
-        path.to_str().expect("utf-8 path"),
+        pw.to_str().expect("utf-8 path"),
     ]);
-    assert_eq!(code(&out), EX_UNSUPPORTED, "stderr: {}", stderr(&out));
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    let derived = s.join("report.encrypted.docx");
+    assert!(derived.exists(), "expected {} to exist", derived.display());
+    assert!(std::fs::read(&derived)
+        .expect("read")
+        .starts_with(&CFB_MAGIC));
     let err = stderr(&out);
-    assert!(
-        !err.contains("nothing was read"),
-        "the password file and the input file were both read before this printed, so the \
-         notice must not claim otherwise: {err}"
+    assert!(err.contains("wrote "), "{err}");
+    assert!(err.contains("report.encrypted.docx"), "{err}");
+    assert_eq!(
+        entries(&s),
+        vec![
+            "pw.txt".to_string(),
+            "report.docx".to_string(),
+            "report.encrypted.docx".to_string(),
+        ],
+        "no temp file survived"
     );
-    // The half that is still true stays asserted, so the fix cannot be "delete the
-    // sentence": the user must still be told no file was produced.
+}
+
+#[test]
+fn encrypt_to_stdout_carries_only_the_container() {
+    let s = Scratch::new("enc-dash");
+    let pw = pw_file(&s, "pw.txt", "testpass\n");
+    let out = run(&[
+        "encrypt",
+        fixture("plain.docx").to_str().expect("utf-8 path"),
+        "--password-file",
+        pw.to_str().expect("utf-8 path"),
+        "-o",
+        "-",
+    ]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
     assert!(
-        err.contains("nothing was written"),
-        "the notice must still say no output was produced: {err}"
+        out.stdout.starts_with(&CFB_MAGIC),
+        "stdout must carry the container and nothing else"
     );
+    let err = stderr(&out);
+    assert!(err.contains("integrity: declared"), "{err}");
+    assert!(!err.contains("wrote "), "{err}");
+
+    // Two encrypt runs are not byte-identical (fresh salts each time), so the proof
+    // that the piped bytes are a real container is a round trip, not a byte compare.
+    let piped = s.join("piped.docx");
+    std::fs::write(&piped, &out.stdout).expect("write piped bytes");
+    let back = decrypt_to(&s, &piped, "back.docx", &[]);
+    assert_eq!(code(&back), EX_OK, "stderr: {}", stderr(&back));
+    assert_eq!(
+        std::fs::read(s.join("back.docx")).expect("read"),
+        std::fs::read(fixture("plain.docx")).expect("read fixture")
+    );
+}
+
+#[test]
+fn an_existing_encrypt_output_is_never_overwritten_without_force() {
+    let s = Scratch::new("enc-force");
+    let taken = s.join("taken.docx");
+    std::fs::write(&taken, b"PRECIOUS").expect("seed");
+
+    let out = encrypt_to(&s, &fixture("plain.docx"), "taken.docx", &[]);
+    assert_eq!(code(&out), EX_USAGE, "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains("already exists"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--force"), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read(&taken).expect("read"),
+        b"PRECIOUS",
+        "the existing file was overwritten"
+    );
+
+    // The negative control: without it, "refuses correctly" cannot be told apart from
+    // "always refuses".
+    let out = encrypt_to(&s, &fixture("plain.docx"), "taken.docx", &["--force"]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert!(std::fs::read(&taken).expect("read").starts_with(&CFB_MAGIC));
+}
+
+#[test]
+fn a_successful_encrypt_prints_exactly_one_integrity_line() {
+    let s = Scratch::new("enc-integrity-line");
+    for f in ["agile", "standard"] {
+        let out = encrypt_to(
+            &s,
+            &fixture("plain.docx"),
+            &format!("{f}.docx"),
+            &["--format", f],
+        );
+        assert_eq!(code(&out), EX_OK, "{f}: stderr: {}", stderr(&out));
+        // `integrity_line` already asserts internally that there is never more than
+        // one such line; this half checks there is not zero either.
+        assert!(
+            integrity_line(&out).is_some(),
+            "{f}: must print an integrity line"
+        );
+    }
+}
+
+#[test]
+fn encrypt_accepts_every_password_source_the_way_decrypt_does() {
+    let s = Scratch::new("enc-pwsources");
+    let plain = fixture("plain.docx");
+
+    let sealed_env = s.join("env.docx");
+    let out = run_with_env(
+        &[
+            "encrypt",
+            plain.to_str().expect("utf-8 path"),
+            "--password-env",
+            ENV_NAME,
+            "-o",
+            sealed_env.to_str().expect("utf-8 path"),
+        ],
+        ENV_NAME,
+        PASSWORD,
+    );
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert_never_echoed(&out, PASSWORD, "encrypt --password-env");
+
+    let pw = pw_file(&s, "pw.txt", "testpass\n");
+    let sealed_file = s.join("file.docx");
+    let out = run(&[
+        "encrypt",
+        plain.to_str().expect("utf-8 path"),
+        "--password-file",
+        pw.to_str().expect("utf-8 path"),
+        "-o",
+        sealed_file.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert_never_echoed(&out, PASSWORD, "encrypt --password-file");
+
+    let sealed_stdin = s.join("stdin.docx");
+    let out = run_with_stdin(
+        &[
+            "encrypt",
+            plain.to_str().expect("utf-8 path"),
+            "--password-stdin",
+            "-o",
+            sealed_stdin.to_str().expect("utf-8 path"),
+        ],
+        "testpass\n",
+    );
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert_never_echoed(&out, PASSWORD, "encrypt --password-stdin");
+
+    // Every artifact round-trips back to plain.docx byte for byte -- the trailing-
+    // newline rule (`first_line`) must have applied to the file and stdin sources the
+    // same way it does for decrypt, or the password would be "testpass\n".
+    let want = std::fs::read(&plain).expect("read plain fixture");
+    for (name, sealed) in [
+        ("env", &sealed_env),
+        ("file", &sealed_file),
+        ("stdin", &sealed_stdin),
+    ] {
+        let back_name = format!("{name}-back.docx");
+        let out = decrypt_to(&s, sealed, &back_name, &[]);
+        assert_eq!(code(&out), EX_OK, "{name}: stderr: {}", stderr(&out));
+        assert_eq!(
+            std::fs::read(s.join(&back_name)).expect("read"),
+            want,
+            "{name}: round trip changed bytes"
+        );
+    }
 }
 
 // --- S4: decrypt ---------------------------------------------------------
