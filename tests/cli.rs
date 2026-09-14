@@ -12,12 +12,14 @@
 //! `#[cfg_attr(not(fixture_corpus), ignore)]` count of 30 stays untouched by anything
 //! below.
 //!
-//! S3 wires password sourcing into `decrypt` over a deliberately minimal `decrypt_ooxml`
-//! call: this file proves the password ARRIVED (exit 0, wrong password exit 4) and
-//! nothing about output handling, the classification dispatch, the legacy-binary arm or
-//! `--integrity`, which are S4's. `encrypt` still reports itself unimplemented after
-//! reading its password, which is what `encrypt_reads_the_password_before_it_reports_not_implemented`
-//! pins.
+//! S4 makes `decrypt` real: dispatch on the classification, the `legacy-binary` arm
+//! (present in the `cli,legacy-binary` build, exit 9 naming the feature in the plain
+//! `cli` build -- both are tested, each behind its own `cfg`), `--integrity`, and the
+//! output tail. **No test here ever runs `decrypt` on a path under tests/fixtures/
+//! without `-o`**: the derived output name lands beside the input, which would be the
+//! corpus, and `every_office_fixture_is_present_by_name` enumerates that directory and
+//! fails on the leak. The derived-name tests copy their fixture into a `Scratch` first.
+//! `encrypt` still reports itself unimplemented after reading its password (S5).
 #![cfg(feature = "cli")]
 
 use std::ffi::OsString;
@@ -33,7 +35,14 @@ use serde_json::Value;
 const EX_OK: i32 = 0;
 const EX_USAGE: i32 = 1;
 const EX_IO: i32 = 2;
+const EX_NOT_OFFICE: i32 = 3;
 const EX_WRONG_PASSWORD: i32 = 4;
+const EX_REFUSED: i32 = 5;
+/// Gated because its one use is: the build with a legacy walker reaches the library's
+/// own verdict on an undecided `.xls`, and the build without one stops at exit 9 first.
+#[cfg(feature = "legacy-binary")]
+const EX_MALFORMED: i32 = 6;
+const EX_INTEGRITY: i32 = 8;
 const EX_UNSUPPORTED: i32 = 9;
 
 /// Every fixture in `tests/fixtures/` is sealed with this (CLAUDE.md § Testing Rules).
@@ -126,6 +135,59 @@ const PARAM_KEYS: [&str; 6] = [
     "salt_size",
     "spin_count",
 ];
+
+/// The ten encrypted OOXML fixtures and the `integrity:` word each must print under
+/// the default policy. Named, not globbed, so a missing one fails by name.
+const ENCRYPTED_OOXML: [(&str, &str); 10] = [
+    ("agile_aes128_sha1.docx", "verified"),
+    ("agile_aes128_sha384.docx", "verified"),
+    ("agile_aes192_sha384.docx", "verified"),
+    ("agile_aes256_sha256.docx", "verified"),
+    ("agile_aes256_sha384.docx", "verified"),
+    ("agile_encrypted.docx", "verified"),
+    ("excel16_agile.xlsx", "verified"),
+    ("powerpoint16_agile.pptx", "verified"),
+    ("standard_encrypted.docx", "not-applicable"),
+    ("word16_agile.docx", "verified"),
+];
+
+/// `(fixture, SHA-256 of the decrypted container, its length)`, copied from the
+/// `GOLDENS` table in tests/legacy_binary_fixtures.rs and pinned to it by
+/// `the_legacy_digests_here_are_the_ones_legacy_binary_fixtures_pins`.
+///
+/// PROVENANCE, and it is not uniform: the `.doc`, the two `.xls` are **msoffcrypto-tool
+/// 6.0.0's** digests (`py -3 -m msoffcrypto -p testpass <fixture> out; sha256sum out`)
+/// -- the CLI checked against the independent oracle. The `.ppt` digest is **this
+/// crate's own** (`PPT_THIS_CRATE_SHA` there): msoffcrypto's rewrite leaves a
+/// `cPersist = 0` PowerPoint 16 refuses, so the two outputs differ by one word, and
+/// `powerpoint_output_is_msoffcryptos_but_for_the_persist_count` in that file is what
+/// ties this crate's digest to the oracle's. Do not describe the .ppt as byte-identical
+/// to msoffcrypto-tool anywhere; it is not.
+#[cfg(feature = "legacy-binary")]
+const LEGACY_GOLDENS: [(&str, &str, usize); 4] = [
+    (
+        "word97_password.doc",
+        "ec66234a7d716b0d0d048f0e736910d884e8dab768f9d1a771b27b14da9d1499",
+        29_696,
+    ),
+    (
+        "excel97_password.xls",
+        "922ed3e95fd29a3613b42b84861a37b2b2790f2c7386c5abd7ab10ea192e1e99",
+        31_744,
+    ),
+    (
+        "powerpoint97_password.ppt",
+        "b6cb44712585f0a537afee42bbca050d72bc80058786ba808cc55214a6b1d32d",
+        39_936,
+    ),
+    (
+        "excel97_xor.xls",
+        "2c97ecdbd8759eb75efd76513ae72498cc5a638b2c9a954537993a5ca8ac7c75",
+        25_600,
+    ),
+];
+#[cfg(feature = "legacy-binary")]
+const CFB_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 /// `CARGO_BIN_EXE_<name>` is set by Cargo for every binary target when building an
 /// integration test, so this needs no path guessing and no `cargo run`.
@@ -374,6 +436,149 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// `decrypt INPUT -o <scratch>/OUT --password-file <scratch>/pw.txt EXTRA...`.
+fn decrypt_to(s: &Scratch, input: &Path, out_name: &str, extra: &[&str]) -> Output {
+    let pw = pw_file(s, "pw.txt", "testpass\n");
+    let out_path = s.join(out_name);
+    let mut args = vec![
+        "decrypt",
+        input.to_str().expect("utf-8"),
+        "-o",
+        out_path.to_str().expect("utf-8"),
+        "--password-file",
+        pw.to_str().expect("utf-8"),
+    ];
+    args.extend_from_slice(extra);
+    run(&args)
+}
+
+/// The one `integrity: ...` line on stderr, or None. Asserts there is never more than one.
+fn integrity_line(out: &Output) -> Option<String> {
+    let text = stderr(out);
+    let lines: Vec<String> = text
+        .lines()
+        .filter(|l| l.starts_with("integrity: "))
+        .map(str::to_string)
+        .collect();
+    assert!(lines.len() <= 1, "more than one integrity line: {lines:?}");
+    lines.first().map(|l| l["integrity: ".len()..].to_string())
+}
+
+/// Files in the scratch directory, sorted, so a temp file or an unexpected output is named.
+fn entries(s: &Scratch) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(&s.0)
+        .expect("read_dir")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+/// A fixture, copied into the scratch dir under a new name -- so a decrypt with no
+/// `-o` derives its output beside the copy, never beside tests/fixtures/.
+fn fixture_copy(s: &Scratch, name: &str, as_name: &str) -> PathBuf {
+    let dest = s.join(as_name);
+    std::fs::copy(fixture(name), &dest).expect("copy fixture into scratch");
+    dest
+}
+
+#[cfg(feature = "legacy-binary")]
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `agile_encrypted.docx` with its `<dataIntegrity .../>` element deleted from the
+/// EncryptionInfo XML, written to `s.join("no-tag.docx")`. Port of
+/// `agile_fixture_without_data_integrity` in src/lib.rs, over the `cfb` dev-dependency.
+///
+/// WHERE THE TAMPER IS, AND WHY IT IS NOT THE HEADER OR THE CONTAINER. The two blobs
+/// live only on that element, so blanking them is necessarily an edit inside the
+/// EncryptionInfo stream. What stays untouched: the 8-byte version/reserved header at
+/// the front of that stream (so the file still parses as agile 4.4), the CFB directory
+/// and sector chain (the `cfb` crate rewrites the stream in place), and every byte of
+/// EncryptedPackage. The negative control is the proof that this is not a parse
+/// failure wearing a hat: the same bytes under `--integrity verify-if-present` exit 0
+/// with `integrity: not-declared` and a PK package -- a damaged header or container
+/// would exit 6 under both policies.
+fn agile_without_data_integrity(s: &Scratch) -> PathBuf {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let target = s.join("no-tag.docx");
+    std::fs::copy(fixture("agile_encrypted.docx"), &target).expect("copy fixture");
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&target)
+            .expect("open scratch copy");
+        let mut container = cfb::CompoundFile::open(&mut f).expect("fixture is a CFB container");
+
+        let mut info = Vec::new();
+        container
+            .open_stream("/EncryptionInfo")
+            .expect("EncryptionInfo stream")
+            .read_to_end(&mut info)
+            .expect("read EncryptionInfo");
+
+        let start = info
+            .windows(14)
+            .position(|w| w == b"<dataIntegrity")
+            .expect("the fixture declares a dataIntegrity tag");
+        let end = start
+            + info[start..]
+                .windows(2)
+                .position(|w| w == b"/>")
+                .expect("the element is self-closing")
+            + 2;
+        info.drain(start..end);
+
+        let mut stream = container
+            .open_stream("/EncryptionInfo")
+            .expect("EncryptionInfo stream");
+        stream.set_len(0).expect("truncate");
+        stream.seek(SeekFrom::Start(0)).expect("seek");
+        stream.write_all(&info).expect("write shortened XML");
+        stream.flush().expect("flush");
+    }
+    target
+}
+
+/// `agile_encrypted.docx` with one byte of `/EncryptedPackage` XORed with `0x01` at
+/// `offset`, written to `s.join("flipped.docx")`. Port of `tamper_agile_fixture` in
+/// src/lib.rs. The offset used by callers is `8 + 20_000`: past the 8-byte StreamSize
+/// prefix and ~20 KB into the ciphertext body, so the zip local-file header at the
+/// front of the plaintext still decrypts cleanly -- which is exactly why a structural
+/// sniff is not an integrity check.
+fn agile_with_a_flipped_package_byte(s: &Scratch, offset: u64) -> PathBuf {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let target = s.join("flipped.docx");
+    std::fs::copy(fixture("agile_encrypted.docx"), &target).expect("copy fixture");
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&target)
+            .expect("open scratch copy");
+        let mut container = cfb::CompoundFile::open(&mut f).expect("fixture is a CFB container");
+        let mut stream = container
+            .open_stream("/EncryptedPackage")
+            .expect("fixture has an EncryptedPackage stream");
+
+        stream.seek(SeekFrom::Start(offset)).expect("seek");
+        let mut byte = [0u8; 1];
+        stream.read_exact(&mut byte).expect("read one byte");
+        byte[0] ^= 0x01;
+        stream.seek(SeekFrom::Start(offset)).expect("seek back");
+        stream.write_all(&byte).expect("write flipped byte");
+        stream.flush().expect("flush");
+    }
+    target
 }
 
 // --- C1: the corpus itself --------------------------------------------------
@@ -683,21 +888,27 @@ fn json_is_a_classify_only_flag() {
 
 #[test]
 fn password_env_decrypts_the_agile_fixture() {
+    let s = Scratch::new("env-ok");
     let path = agile();
+    let out_path = s.join("out.docx");
     let out = run_with_env(
-        &["decrypt", &path, "--password-env", ENV_NAME],
+        &[
+            "decrypt",
+            &path,
+            "--password-env",
+            ENV_NAME,
+            "-o",
+            out_path.to_str().expect("utf-8 path"),
+        ],
         ENV_NAME,
         PASSWORD,
     );
     assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
-    assert!(
-        stderr(&out).contains("nothing was written"),
-        "{}",
-        stderr(&out)
-    );
+    assert_eq!(integrity_line(&out).as_deref(), Some("verified"));
+    assert!(stderr(&out).contains("wrote "), "{}", stderr(&out));
     assert!(
         stdout(&out).is_empty(),
-        "S3 writes no output yet: {}",
+        "the package goes to the file, not stdout: {}",
         stdout(&out)
     );
     assert_never_echoed(&out, PASSWORD, "password_env_decrypts_the_agile_fixture");
@@ -713,6 +924,8 @@ fn password_file_decrypts_the_agile_fixture() {
         &agile_path,
         "--password-file",
         path.to_str().expect("utf-8 path"),
+        "-o",
+        s.join("out.docx").to_str().expect("utf-8 path"),
     ]);
     assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
     assert_never_echoed(&out, PASSWORD, "password_file_decrypts_the_agile_fixture");
@@ -720,17 +933,33 @@ fn password_file_decrypts_the_agile_fixture() {
 
 #[test]
 fn password_stdin_decrypts_the_agile_fixture() {
+    let s = Scratch::new("stdin-ok");
     let agile_path = agile();
     // The newline is stripped AND only the first line is used.
     let out = run_with_stdin(
-        &["decrypt", &agile_path, "--password-stdin"],
+        &[
+            "decrypt",
+            &agile_path,
+            "--password-stdin",
+            "-o",
+            s.join("out1.docx").to_str().expect("utf-8 path"),
+        ],
         "testpass\nignored-second-line\n",
     );
     assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
     assert_never_echoed(&out, PASSWORD, "password_stdin_decrypts_the_agile_fixture");
 
     // Sanity variant: no trailing newline at all is still a legal password.
-    let out = run_with_stdin(&["decrypt", &agile_path, "--password-stdin"], "testpass");
+    let out = run_with_stdin(
+        &[
+            "decrypt",
+            &agile_path,
+            "--password-stdin",
+            "-o",
+            s.join("out2.docx").to_str().expect("utf-8 path"),
+        ],
+        "testpass",
+    );
     assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
 }
 
@@ -764,6 +993,8 @@ fn the_env_value_is_raw_but_the_file_is_first_line() {
         &agile_path,
         "--password-file",
         path.to_str().expect("utf-8 path"),
+        "-o",
+        s.join("out.docx").to_str().expect("utf-8 path"),
     ]);
     assert_eq!(
         code(&out),
@@ -800,6 +1031,8 @@ fn a_trailing_space_in_a_password_file_survives_but_a_newline_does_not() {
         &agile_path,
         "--password-file",
         path.to_str().expect("utf-8 path"),
+        "-o",
+        s.join("out.docx").to_str().expect("utf-8 path"),
     ]);
     assert_eq!(
         code(&out),
@@ -906,8 +1139,16 @@ fn the_named_environment_variable_is_never_read_unless_it_is_named() {
 
     // Positive control: the SAME variable, WITH --password-env naming it, must decrypt.
     // This is what proves the first half measures "not implicit" rather than "broken".
+    let s = Scratch::new("named-control");
     let out = run_with_env(
-        &["decrypt", &agile_path, "--password-env", ENV_NAME],
+        &[
+            "decrypt",
+            &agile_path,
+            "--password-env",
+            ENV_NAME,
+            "-o",
+            s.join("out.docx").to_str().expect("utf-8 path"),
+        ],
         ENV_NAME,
         PASSWORD,
     );
@@ -1006,7 +1247,14 @@ fn no_failure_path_echoes_the_password() {
 
     // Success control: even the real password never appears on stderr.
     let out = run_with_env(
-        &["decrypt", &agile_path, "--password-env", ENV_NAME],
+        &[
+            "decrypt",
+            &agile_path,
+            "--password-env",
+            ENV_NAME,
+            "-o",
+            s.join("out.docx").to_str().expect("utf-8 path"),
+        ],
         ENV_NAME,
         PASSWORD,
     );
@@ -1088,6 +1336,8 @@ fn an_empty_password_source_is_a_usage_error_not_a_wrong_password() {
         &agile_path,
         "--password-file",
         good.to_str().expect("utf-8 path"),
+        "-o",
+        s.join("out.docx").to_str().expect("utf-8 path"),
     ]);
     assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
 }
@@ -1112,6 +1362,8 @@ fn the_equals_form_carries_a_password_file_end_to_end() {
         "decrypt",
         &agile_path,
         &format!("--password-file={}", path.display()),
+        "-o",
+        s.join("out.docx").to_str().expect("utf-8 path"),
     ]);
     assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
 }
@@ -1196,4 +1448,595 @@ fn the_not_implemented_notice_does_not_claim_nothing_was_read() {
         err.contains("nothing was written"),
         "the notice must still say no output was produced: {err}"
     );
+}
+
+// --- S4: decrypt ---------------------------------------------------------
+
+#[test]
+fn every_encrypted_ooxml_fixture_decrypts_to_a_plain_package() {
+    let s = Scratch::new("ooxml-all");
+    let mut ran = 0;
+    for (name, want) in ENCRYPTED_OOXML {
+        let out_name = format!("{name}.out");
+        let out = decrypt_to(&s, &fixture(name), &out_name, &[]);
+        assert_eq!(code(&out), EX_OK, "{name}: {}", stderr(&out));
+        let bytes = std::fs::read(s.join(&out_name)).expect("read output");
+        assert!(bytes.starts_with(b"PK\x03\x04"), "{name}: not a PK package");
+        let human = classify_human(&s.join(&out_name));
+        assert_eq!(code(&human), EX_OK, "{name}");
+        let text = stdout(&human);
+        assert_eq!(
+            human_field(&text, "encrypted:").as_deref(),
+            Some("no"),
+            "{name}"
+        );
+        assert_eq!(
+            human_field(&text, "container:").as_deref(),
+            Some("zip"),
+            "{name}"
+        );
+        assert_eq!(integrity_line(&out).as_deref(), Some(want), "{name}");
+        ran += 1;
+    }
+    assert_eq!(ran, 10);
+}
+
+#[cfg(feature = "legacy-binary")]
+#[test]
+fn legacy_documents_decrypt_to_the_pinned_digests() {
+    let s = Scratch::new("legacy-all");
+    for (name, sha, len) in LEGACY_GOLDENS {
+        let out_name = format!("{name}.out");
+        let out = decrypt_to(&s, &fixture(name), &out_name, &[]);
+        assert_eq!(code(&out), EX_OK, "{name}: {}", stderr(&out));
+        let bytes = std::fs::read(s.join(&out_name)).expect("read output");
+        assert_eq!(bytes.len(), len, "{name}");
+        assert_eq!(sha256_hex(&bytes), sha, "{name}");
+        assert!(bytes.starts_with(&CFB_MAGIC), "{name}: not a CFB container");
+        let human = classify_human(&s.join(&out_name));
+        let text = stdout(&human);
+        assert_eq!(
+            human_field(&text, "encrypted:").as_deref(),
+            Some("no"),
+            "{name}"
+        );
+        assert_eq!(
+            human_field(&text, "container:").as_deref(),
+            Some("cfb"),
+            "{name}"
+        );
+        assert_eq!(
+            integrity_line(&out).as_deref(),
+            Some("not-applicable"),
+            "{name}"
+        );
+    }
+}
+
+/// Pins that this file's copy of the four legacy digests agrees with
+/// tests/legacy_binary_fixtures.rs's `GOLDENS` table without a shared `tests/common`
+/// module. Ungated: it must compile and pass in the plain `cli` build too, where
+/// `LEGACY_GOLDENS` above does not exist.
+#[test]
+fn the_legacy_digests_here_are_the_ones_legacy_binary_fixtures_pins() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/legacy_binary_fixtures.rs"
+    ))
+    .expect("read tests/legacy_binary_fixtures.rs");
+    const DIGESTS: [&str; 4] = [
+        "ec66234a7d716b0d0d048f0e736910d884e8dab768f9d1a771b27b14da9d1499",
+        "922ed3e95fd29a3613b42b84861a37b2b2790f2c7386c5abd7ab10ea192e1e99",
+        "b6cb44712585f0a537afee42bbca050d72bc80058786ba808cc55214a6b1d32d",
+        "2c97ecdbd8759eb75efd76513ae72498cc5a638b2c9a954537993a5ca8ac7c75",
+    ];
+    for d in DIGESTS {
+        assert!(
+            text.contains(d),
+            "digest {d} is not in tests/legacy_binary_fixtures.rs"
+        );
+    }
+    // `DIGESTS` exists only because this test is ungated and `LEGACY_GOLDENS` is not.
+    // Without the tie below, the chain would be `DIGESTS` -> the other file, leaving
+    // `LEGACY_GOLDENS` -- the array the CLI's output is actually asserted against --
+    // free to drift from both while this test stayed green.
+    #[cfg(feature = "legacy-binary")]
+    {
+        let pinned: Vec<&str> = LEGACY_GOLDENS.iter().map(|(_, sha, _)| *sha).collect();
+        assert_eq!(
+            pinned, DIGESTS,
+            "LEGACY_GOLDENS has drifted from the digests this test checks"
+        );
+    }
+}
+
+#[cfg(not(feature = "legacy-binary"))]
+#[test]
+fn a_binary_document_in_a_build_without_the_feature_exits_unsupported_naming_it() {
+    let s = Scratch::new("no-legacy-feature");
+    let out = decrypt_to(&s, &fixture("word97_password.doc"), "out.doc", &[]);
+    assert_eq!(code(&out), EX_UNSUPPORTED, "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains("legacy-binary"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--features cli,legacy-binary"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!s.join("out.doc").exists());
+}
+
+#[test]
+fn plain_junk_and_wrong_password_are_three_different_codes() {
+    let s = Scratch::new("three-codes");
+    let pw = pw_file(&s, "pw.txt", "testpass\n");
+
+    // (a) an unencrypted OOXML package: refused before any password is read.
+    let plain_copy = fixture_copy(&s, "plain.docx", "plain.docx");
+    let out_a = run(&[
+        "decrypt",
+        plain_copy.to_str().expect("utf-8 path"),
+        "--password-file",
+        pw.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code(&out_a), EX_REFUSED, "stderr: {}", stderr(&out_a));
+    assert!(
+        stderr(&out_a).contains("not encrypted"),
+        "{}",
+        stderr(&out_a)
+    );
+    // No password file was opened and no output was derived: the classification
+    // refused before either happened.
+    assert_eq!(
+        entries(&s),
+        vec!["plain.docx".to_string(), "pw.txt".to_string()]
+    );
+
+    // (b) sixteen bytes of junk.
+    let junk = s.join("junk.bin");
+    std::fs::write(&junk, b"sixteen bytes!!!").expect("write junk");
+    let out_b = run(&[
+        "decrypt",
+        junk.to_str().expect("utf-8 path"),
+        "--password-file",
+        pw.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code(&out_b), EX_NOT_OFFICE, "stderr: {}", stderr(&out_b));
+    assert!(
+        stderr(&out_b).contains("not a Microsoft Office file"),
+        "{}",
+        stderr(&out_b)
+    );
+
+    // (c) the wrong password on a real encrypted file. `-o` into the scratch dir, like
+    // every other run here: the input is a committed fixture, and a derived output name
+    // would land beside it. The run is expected to fail before the write stage -- so
+    // assert that too, rather than leaving "nothing was written" to the check ordering
+    // inside `cmd_decrypt` staying as it is today.
+    let bad_pw = pw_file(&s, "bad.txt", &format!("{NEVER_PRINT}\n"));
+    let out_c_path = s.join("c.docx");
+    let out_c = run(&[
+        "decrypt",
+        &agile(),
+        "-o",
+        out_c_path.to_str().expect("utf-8 path"),
+        "--password-file",
+        bad_pw.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(
+        code(&out_c),
+        EX_WRONG_PASSWORD,
+        "stderr: {}",
+        stderr(&out_c)
+    );
+    assert!(!out_c_path.exists());
+
+    // (d) an unencrypted 97-2003 document: the Unencrypted check precedes the
+    // feature-gate check, in BOTH builds. `-o` for the same reason as (c).
+    let out_d_path = s.join("d.doc");
+    let out_d = run(&[
+        "decrypt",
+        fixture("word97_plain.doc").to_str().expect("utf-8 path"),
+        "-o",
+        out_d_path.to_str().expect("utf-8 path"),
+        "--password-file",
+        pw.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code(&out_d), EX_REFUSED, "stderr: {}", stderr(&out_d));
+    assert!(!out_d_path.exists());
+
+    assert_ne!(code(&out_a), code(&out_b));
+    assert_ne!(code(&out_a), code(&out_c));
+    assert_ne!(code(&out_b), code(&out_c));
+}
+
+#[test]
+fn a_deleted_data_integrity_element_is_refused_by_default_and_reported_under_verify_if_present() {
+    let s = Scratch::new("no-tag");
+    let f = agile_without_data_integrity(&s);
+
+    // (i) the default policy refuses: this file's tamper-evidence was deleted.
+    let out = decrypt_to(&s, &f, "a.docx", &[]);
+    assert_eq!(code(&out), EX_INTEGRITY, "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains("tamper-evidence"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--integrity verify-if-present"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!s.join("a.docx").exists());
+
+    // (ii) the SAME bytes, under the opt-out, decrypt as unauthenticated plaintext.
+    let out = decrypt_to(&s, &f, "a.docx", &["--integrity", "verify-if-present"]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert_eq!(integrity_line(&out).as_deref(), Some("not-declared"));
+    let bytes = std::fs::read(s.join("a.docx")).expect("read");
+    assert!(bytes.starts_with(b"PK\x03\x04"));
+
+    // (iii) control: the unmodified fixture under the default policy still verifies --
+    // proof that (i) is not a parse failure wearing a hat.
+    let out = decrypt_to(&s, &fixture("agile_encrypted.docx"), "control.docx", &[]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert_eq!(integrity_line(&out).as_deref(), Some("verified"));
+}
+
+#[test]
+fn a_byte_flipped_in_the_ciphertext_body_is_refused_by_default_and_decrypts_under_skip() {
+    let s = Scratch::new("flipped");
+    let f = agile_with_a_flipped_package_byte(&s, 8 + 20_000);
+
+    let out = decrypt_to(&s, &f, "a.docx", &[]);
+    assert_eq!(code(&out), EX_INTEGRITY, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("modified after it was encrypted"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        !stderr(&out).contains("--integrity"),
+        "there is no opt-out for a failed MAC: {}",
+        stderr(&out)
+    );
+    assert!(!s.join("a.docx").exists());
+
+    let out = decrypt_to(&s, &f, "a.docx", &["--integrity", "skip"]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert_eq!(integrity_line(&out).as_deref(), Some("skipped"));
+    let bytes = std::fs::read(s.join("a.docx")).expect("read");
+    assert!(bytes.starts_with(b"PK\x03\x04"));
+}
+
+#[test]
+fn require_on_a_2007_standard_file_is_8_and_require_where_defined_opens_it() {
+    let s = Scratch::new("standard-require");
+    let out = decrypt_to(
+        &s,
+        &fixture("standard_encrypted.docx"),
+        "a.docx",
+        &["--integrity", "require"],
+    );
+    assert_eq!(code(&out), EX_INTEGRITY, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--integrity require-where-defined"),
+        "{}",
+        stderr(&out)
+    );
+
+    let out = decrypt_to(
+        &s,
+        &fixture("standard_encrypted.docx"),
+        "a.docx",
+        &["--integrity", "require-where-defined"],
+    );
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert_eq!(integrity_line(&out).as_deref(), Some("not-applicable"));
+}
+
+#[test]
+fn require_on_a_97_2003_document_is_a_refusal_not_a_silent_not_applicable() {
+    let s = Scratch::new("legacy-require");
+    let out = decrypt_to(
+        &s,
+        &fixture("word97_password.doc"),
+        "a.doc",
+        &["--integrity", "require"],
+    );
+    assert_eq!(code(&out), EX_INTEGRITY, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--integrity require-where-defined"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!s.join("a.doc").exists());
+
+    // Control, so 8 is proved to be the policy and not "always fails": the default
+    // policy on the SAME file opens it (where the feature exists at all).
+    let out = decrypt_to(&s, &fixture("word97_password.doc"), "a.doc", &[]);
+    #[cfg(feature = "legacy-binary")]
+    {
+        assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+        assert_eq!(integrity_line(&out).as_deref(), Some("not-applicable"));
+    }
+    #[cfg(not(feature = "legacy-binary"))]
+    {
+        assert_eq!(code(&out), EX_UNSUPPORTED, "stderr: {}", stderr(&out));
+    }
+}
+
+/// A CFB whose `/Workbook` does not open with BOF: `classify` names the document
+/// (`excel-binary`) and refuses to name the family (`Family::Unknown`) -- the case
+/// `src/classify_tests.rs`'s `a_workbook_that_does_not_open_with_bof_is_unknown` pins,
+/// built here as a file so the CLI can be driven over it.
+///
+/// Synthetic rather than a fixture: this shape is not in `tests/fixtures/`, and
+/// CLAUDE.md's "generate fixtures, don't copy them" applies to hostile inputs first.
+fn undecided_workbook(s: &Scratch, name: &str) -> PathBuf {
+    let mut stream = Vec::new();
+    // MMS then INTERFACEHDR -- neither is BOF, so the walk decides nothing.
+    for (id, body) in [(0x00C1u16, &[0u8, 0][..]), (0x00E1u16, &[0xB0, 0x04][..])] {
+        stream.extend_from_slice(&id.to_le_bytes());
+        stream.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        stream.extend_from_slice(body);
+    }
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut container = cfb::CompoundFile::create(&mut cursor).expect("create cfb");
+        let mut w = container
+            .create_stream("/Workbook")
+            .expect("create /Workbook");
+        w.write_all(&stream).expect("write /Workbook");
+        w.flush().expect("flush stream");
+        container.flush().expect("flush cfb");
+    }
+    let p = s.join(name);
+    std::fs::write(&p, cursor.into_inner()).expect("write synthetic .xls");
+    p
+}
+
+/// `--integrity require` refuses a 97-2003 document whose encryption status `classify`
+/// could not determine, and says so about the *request* rather than about the file.
+///
+/// The refusal is deliberate and fail-closed: `Family::Unknown` means the walk was
+/// undecided, not that the file is plain, and the library's own walk may still decrypt
+/// it -- so waiting for `is_encrypted()` here would be a way to get unauthenticated
+/// plaintext out of `--integrity require`. What the message must not do is assert what
+/// `classify` refused to assert, or promise that the opt-out will open the file: under
+/// `require-where-defined` these same bytes get the decrypter's own answer, which for
+/// this input is 6, not 0.
+#[test]
+fn require_on_an_undecided_97_2003_document_refuses_without_calling_it_encrypted() {
+    let s = Scratch::new("legacy-require-unknown");
+    let f = undecided_workbook(&s, "undecided.xls");
+
+    // `classify` itself: the document is named, the family is not.
+    let c = run(&["classify", f.to_str().expect("utf-8 path")]);
+    assert_eq!(code(&c), EX_OK, "stderr: {}", stderr(&c));
+    let text = stdout(&c);
+    assert_eq!(
+        human_field(&text, "document:").as_deref(),
+        Some("excel-binary")
+    );
+    assert_eq!(human_field(&text, "family:").as_deref(), Some("unknown"));
+    assert_eq!(human_field(&text, "encrypted:").as_deref(), Some("no"));
+
+    let out = decrypt_to(&s, &f, "a.xls", &["--integrity", "require"]);
+    assert_eq!(code(&out), EX_INTEGRITY, "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    // The sentence is about the request. It must not claim the file is encrypted, and
+    // it must not promise the opt-out opens it -- for these bytes, it does not.
+    assert!(err.contains("--integrity require"), "{err}");
+    assert!(err.contains("--integrity require-where-defined"), "{err}");
+    assert!(!err.contains("encrypted document"), "{err}");
+    assert!(!err.contains("opens it"), "{err}");
+    assert!(!s.join("a.xls").exists());
+
+    // The negative control, and the proof that 8 came from the policy rather than from
+    // the file: the SAME bytes under the opt-out reach the decrypter, which answers for
+    // itself -- 6 where it can walk the stream, 9 where this build has no walker at all.
+    // Either way it is not 8, and nothing is written.
+    let out = decrypt_to(&s, &f, "b.xls", &["--integrity", "require-where-defined"]);
+    #[cfg(feature = "legacy-binary")]
+    assert_eq!(code(&out), EX_MALFORMED, "stderr: {}", stderr(&out));
+    #[cfg(not(feature = "legacy-binary"))]
+    assert_eq!(code(&out), EX_UNSUPPORTED, "stderr: {}", stderr(&out));
+    assert_ne!(code(&out), EX_INTEGRITY, "stderr: {}", stderr(&out));
+    assert!(!s.join("b.xls").exists());
+}
+
+#[test]
+fn skip_still_prints_the_integrity_line() {
+    let s = Scratch::new("skip-prints");
+    let out = decrypt_to(
+        &s,
+        &fixture("agile_encrypted.docx"),
+        "a.docx",
+        &["--integrity", "skip"],
+    );
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert_eq!(integrity_line(&out).as_deref(), Some("skipped"));
+}
+
+#[test]
+fn output_dash_carries_only_the_package_on_stdout() {
+    let s = Scratch::new("dash-stdout");
+    let pw = pw_file(&s, "pw.txt", "testpass\n");
+    let agile_path = agile();
+    let out = run(&[
+        "decrypt",
+        &agile_path,
+        "-o",
+        "-",
+        "--password-file",
+        pw.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert!(out.stdout.starts_with(b"PK\x03\x04"));
+
+    // Byte for byte against the same fixture decrypted to a file.
+    let file_out = decrypt_to(&s, Path::new(&agile_path), "same.docx", &[]);
+    assert_eq!(code(&file_out), EX_OK, "stderr: {}", stderr(&file_out));
+    let file_bytes = std::fs::read(s.join("same.docx")).expect("read");
+    assert_eq!(out.stdout, file_bytes);
+
+    assert!(
+        stderr(&out).contains("integrity: verified"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!stderr(&out).contains("wrote "), "{}", stderr(&out));
+}
+
+#[test]
+fn an_existing_output_is_never_overwritten_without_force() {
+    let s = Scratch::new("no-clobber");
+    let target = s.join("taken.docx");
+    std::fs::write(&target, b"PRECIOUS").expect("seed");
+    let pw = pw_file(&s, "pw.txt", "testpass\n");
+    let agile_path = agile();
+
+    let out = run(&[
+        "decrypt",
+        &agile_path,
+        "-o",
+        target.to_str().expect("utf-8 path"),
+        "--password-file",
+        pw.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code(&out), EX_USAGE, "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains("--force"), "{}", stderr(&out));
+    assert_eq!(std::fs::read(&target).expect("read"), b"PRECIOUS");
+
+    let out = run(&[
+        "decrypt",
+        &agile_path,
+        "-o",
+        target.to_str().expect("utf-8 path"),
+        "--password-file",
+        pw.to_str().expect("utf-8 path"),
+        "--force",
+    ]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    let bytes = std::fs::read(&target).expect("read");
+    assert!(bytes.starts_with(b"PK"));
+    assert!(
+        !entries(&s)
+            .iter()
+            .any(|e| e.contains("msoffice-crypto.tmp")),
+        "temp file left behind: {:?}",
+        entries(&s)
+    );
+}
+
+#[test]
+fn the_default_output_name_is_beside_the_input_for_ooxml_and_for_97_2003() {
+    let s = Scratch::new("derived-name");
+    let pw = pw_file(&s, "pw.txt", "testpass\n");
+
+    let report = fixture_copy(&s, "agile_encrypted.docx", "report.docx");
+    let out = run(&[
+        "decrypt",
+        report.to_str().expect("utf-8 path"),
+        "--password-file",
+        pw.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    let derived = s.join("report.decrypted.docx");
+    assert!(derived.exists(), "expected {} to exist", derived.display());
+    assert!(std::fs::read(&derived)
+        .expect("read")
+        .starts_with(b"PK\x03\x04"));
+    assert!(stderr(&out).contains("wrote "), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("report.decrypted.docx"),
+        "{}",
+        stderr(&out)
+    );
+
+    let memo = fixture_copy(&s, "word97_password.doc", "memo.doc");
+    let out = run(&[
+        "decrypt",
+        memo.to_str().expect("utf-8 path"),
+        "--password-file",
+        pw.to_str().expect("utf-8 path"),
+    ]);
+    let memo_derived = s.join("memo.decrypted.doc");
+    #[cfg(feature = "legacy-binary")]
+    {
+        assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+        assert!(memo_derived.exists());
+        let bytes = std::fs::read(&memo_derived).expect("read");
+        assert!(bytes.starts_with(&CFB_MAGIC));
+        assert_eq!(
+            bytes.len(),
+            std::fs::metadata(&memo).expect("metadata").len() as usize
+        );
+    }
+    #[cfg(not(feature = "legacy-binary"))]
+    {
+        assert_eq!(code(&out), EX_UNSUPPORTED, "stderr: {}", stderr(&out));
+        assert!(!memo_derived.exists());
+    }
+
+    let mut expected = vec![
+        "memo.doc".to_string(),
+        "pw.txt".to_string(),
+        "report.decrypted.docx".to_string(),
+        "report.docx".to_string(),
+    ];
+    #[cfg(feature = "legacy-binary")]
+    expected.push("memo.decrypted.doc".to_string());
+    expected.sort();
+    assert_eq!(entries(&s), expected, "no temp file, and no other surprise");
+}
+
+#[cfg(feature = "legacy-binary")]
+#[test]
+fn a_wrong_password_on_a_97_2003_document_is_4() {
+    let s = Scratch::new("legacy-wrong-pw");
+    let pw = pw_file(&s, "pw.txt", &format!("{NEVER_PRINT}\n"));
+    let out = run(&[
+        "decrypt",
+        fixture("word97_password.doc").to_str().expect("utf-8 path"),
+        "-o",
+        s.join("out.doc").to_str().expect("utf-8 path"),
+        "--password-file",
+        pw.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code(&out), EX_WRONG_PASSWORD, "stderr: {}", stderr(&out));
+    assert!(!s.join("out.doc").exists());
+    assert_never_echoed(
+        &out,
+        NEVER_PRINT,
+        "a_wrong_password_on_a_97_2003_document_is_4",
+    );
+}
+
+#[test]
+fn a_successful_decrypt_prints_exactly_one_integrity_line() {
+    let s = Scratch::new("one-line");
+
+    let out = decrypt_to(&s, &fixture("agile_encrypted.docx"), "a.docx", &[]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert_eq!(integrity_line(&out).as_deref(), Some("verified"));
+    assert_eq!(stderr(&out).matches("integrity: ").count(), 1);
+
+    let out = decrypt_to(&s, &fixture("standard_encrypted.docx"), "b.docx", &[]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert!(integrity_line(&out).is_some());
+    assert_eq!(stderr(&out).matches("integrity: ").count(), 1);
+
+    let out = decrypt_to(
+        &s,
+        &fixture("agile_encrypted.docx"),
+        "c.docx",
+        &["--integrity", "skip"],
+    );
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert!(integrity_line(&out).is_some());
+    assert_eq!(stderr(&out).matches("integrity: ").count(), 1);
+
+    let f = agile_without_data_integrity(&s);
+    let out = decrypt_to(&s, &f, "d.docx", &["--integrity", "verify-if-present"]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    assert!(integrity_line(&out).is_some());
+    assert_eq!(stderr(&out).matches("integrity: ").count(), 1);
 }
