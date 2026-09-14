@@ -307,6 +307,63 @@ fn help_advertises_the_three_real_password_sources() {
 }
 
 #[test]
+fn help_names_the_environment_variable_it_will_not_read() {
+    // Plan §2 asks the help to name the obvious variable AND to say it is never read
+    // implicitly; the behavioural half of that promise is
+    // `the_named_environment_variable_is_never_read_unless_it_is_named` in tests/cli.rs,
+    // and the pair is what makes it checkable from both sides.
+    let mut cmd = cli();
+    for name in ["decrypt", "encrypt"] {
+        let text = cmd
+            .find_subcommand_mut(name)
+            .expect("subcommand")
+            .render_long_help()
+            .to_string();
+        assert!(
+            text.contains("MSOFFICE_CRYPTO_PASSWORD"),
+            "{name} help must name the variable `--password-env` is for"
+        );
+        assert!(
+            text.contains("naming it is the only way this tool reads it"),
+            "{name} help must say the variable is not read implicitly"
+        );
+    }
+}
+
+#[test]
+fn the_help_denies_the_password_flag_in_the_prose_which_is_why_the_check_is_line_based() {
+    // This is the assertion that makes `no_help_output_ever_offers_a_password_value_argument`'s
+    // line-definition predicate necessary rather than fussy. The prose names `--password`
+    // precisely in order to deny it, and `--password-env` contains it as a substring
+    // besides, so a naive `!text.contains("--password")` check would either fail always
+    // or force the denial out of the help. "Simplifying" that test this way finds it
+    // contradicting this one in the same file.
+    let mut cmd = cli();
+    for name in ["decrypt", "encrypt"] {
+        let text = cmd
+            .find_subcommand_mut(name)
+            .expect("subcommand")
+            .render_long_help()
+            .to_string();
+        assert!(
+            text.contains("`--password"),
+            "{name} help must deny `--password` by name in the PASSWORDS prose"
+        );
+        assert!(text.contains("world-readable"), "{name} help must say why");
+    }
+}
+
+#[test]
+fn the_password_prompt_verb_differs_by_direction() {
+    // The prompt is the one password path no subprocess test can drive -- it needs a
+    // terminal, and every test in tests/cli.rs redirects stdin -- so the verb is pinned
+    // directly here. Without it, `encrypt`'s prompt could say "Password:" for a file that
+    // has none and nothing would notice.
+    assert_eq!(Direction::Decrypt.prompt_verb(), "Password");
+    assert_eq!(Direction::Encrypt.prompt_verb(), "New password");
+}
+
+#[test]
 fn the_enum_spellings_are_lower_kebab_and_stable() {
     // The greppable contract. A rename here is a breaking change for every script
     // parsing this output, so it is pinned rather than left to the renderer.
