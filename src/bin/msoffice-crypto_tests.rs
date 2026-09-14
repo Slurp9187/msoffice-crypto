@@ -7,9 +7,10 @@
 //! deliberately does not ship. Nothing below reads a fixture — not even one of the two
 //! that do ship.
 //!
-//! End-to-end behaviour (exit codes as a process, argv handling, file side effects) is
-//! `tests/cli.rs`'s job from S2 onward; that file never reaches the tarball and may read
-//! all nineteen.
+//! End-to-end behaviour (exit codes as a process, argv handling, file side effects,
+//! every fixture-driven decrypt) is `tests/cli.rs`'s; that file never reaches the
+//! tarball and may read all nineteen. The two file-system tests below write only to a
+//! directory under `std::env::temp_dir()` that they create and remove themselves.
 
 use super::*;
 
@@ -570,4 +571,233 @@ fn the_json_flag_is_off_by_default_and_exists_only_on_classify() {
             "{sub} must not accept --json"
         );
     }
+}
+
+// --- S4: decrypt dispatch, --integrity, and the atomic write --------------
+
+/// A directory under the system temp dir, created here and removed on drop. Not a
+/// fixture read (T4): nothing in it comes from tests/fixtures/.
+struct UnitScratch(PathBuf);
+impl UnitScratch {
+    fn new(tag: &str) -> Self {
+        let d =
+            std::env::temp_dir().join(format!("msoffice-crypto-unit-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("scratch");
+        UnitScratch(d)
+    }
+    fn entries(&self) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(&self.0)
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+}
+impl Drop for UnitScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn the_policy_table_round_trips_and_the_default_is_in_it() {
+    for p in [
+        IntegrityPolicy::Require,
+        IntegrityPolicy::RequireWhereDefined,
+        IntegrityPolicy::VerifyIfPresent,
+        IntegrityPolicy::Skip,
+    ] {
+        assert_eq!(parse_policy(policy_name(p)), Some(p));
+    }
+    // The claim S4 exists to pin: the rendered default parses back to the library's.
+    assert_eq!(
+        parse_policy(policy_name(IntegrityPolicy::default())),
+        Some(IntegrityPolicy::default())
+    );
+    assert_eq!(parse_policy("unrecognised"), None);
+}
+
+#[test]
+fn the_help_renders_the_librarys_default_not_a_literal() {
+    // Computed from the library, never typed. If `.default_value(...)` were the literal
+    // that happens to be right today and the library default moved again (it did once,
+    // GH #12), the literal would stay and this assertion -- which follows the library --
+    // would fail naming both spellings.
+    let mut cmd = cli();
+    let text = cmd
+        .find_subcommand_mut("decrypt")
+        .expect("decrypt")
+        .render_long_help()
+        .to_string();
+    let want = format!("[default: {}]", policy_name(IntegrityPolicy::default()));
+    assert!(
+        text.contains(&want),
+        "decrypt --help must show {want:?}, got:\n{text}"
+    );
+    for n in POLICY_NAMES {
+        assert!(text.contains(n), "help must list {n}");
+    }
+}
+
+#[test]
+fn outcome_names_are_lower_kebab() {
+    assert_eq!(outcome_name(IntegrityOutcome::Verified), "verified");
+    assert_eq!(outcome_name(IntegrityOutcome::NotDeclared), "not-declared");
+    assert_eq!(
+        outcome_name(IntegrityOutcome::NotApplicable),
+        "not-applicable"
+    );
+    assert_eq!(outcome_name(IntegrityOutcome::Skipped), "skipped");
+}
+
+#[test]
+fn direction_suffixes_are_the_plans() {
+    assert_eq!(Direction::Decrypt.suffix(), "decrypted");
+    assert_eq!(Direction::Encrypt.suffix(), "encrypted");
+}
+
+#[test]
+fn junk_routes_to_not_office_with_the_unknown_container_wording() {
+    // Fixture-free: sixteen bytes of junk is a legal Classification (T4).
+    let r = route_for(&classify(b"sixteen bytes!!!"), IntegrityPolicy::default());
+    let Err(Refusal { code, why }) = r else {
+        panic!("junk must be refused, got {r:?}")
+    };
+    assert_eq!(code, EX_NOT_OFFICE);
+    // The wording distinguishes this check from the Document::Unknown one below: with
+    // the container check deleted, junk still exits 3 but says "CFB container".
+    assert!(why.contains("container: unknown"), "{why}");
+}
+
+#[test]
+fn a_plain_zip_routes_to_refused_with_the_shared_not_encrypted_sentence() {
+    // `is_zip` needs four bytes: `PK\x03\x04` classifies as Zip / OoxmlPackage /
+    // Unencrypted with no fixture at all.
+    assert_eq!(
+        route_for(&classify(b"PK\x03\x04"), IntegrityPolicy::default()),
+        Err(Refusal {
+            code: EX_REFUSED,
+            why: NOT_ENCRYPTED.to_string()
+        })
+    );
+}
+
+#[test]
+fn a_cfb_that_is_not_office_routes_to_not_office() {
+    // The eight magic bytes and nothing else: `is_cfb_office` is true, the container
+    // cannot be opened, the binary probe finds nothing -> Cfb / Document::Unknown.
+    let magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    let class = classify(&magic);
+    assert_eq!(class.container, Container::Cfb);
+    assert_eq!(class.document, Document::Unknown);
+    let r = route_for(&class, IntegrityPolicy::default());
+    let Err(Refusal { code, why }) = r else {
+        panic!("got {r:?}")
+    };
+    assert_eq!(code, EX_NOT_OFFICE);
+    assert!(why.contains("CFB container"), "{why}");
+}
+
+#[cfg(feature = "legacy-binary")]
+#[test]
+fn the_not_encrypted_sentence_is_shared_with_the_library_variant() {
+    assert_eq!(describe(&Error::NotEncrypted), NOT_ENCRYPTED);
+}
+
+#[test]
+fn integrity_failures_are_worded_by_the_cli_not_forwarded() {
+    let missing = describe(&Error::IntegrityElementMissing);
+    assert!(
+        missing.contains("--integrity verify-if-present"),
+        "{missing}"
+    );
+    assert!(
+        !missing.contains("IntegrityPolicy::"),
+        "a Rust path reached the user: {missing}"
+    );
+    let failed = describe(&Error::IntegrityCheckFailed);
+    assert!(failed.contains("modified after"), "{failed}");
+    assert!(
+        !failed.contains("--integrity"),
+        "there is no opt-out for a failed MAC: {failed}"
+    );
+    let unavailable = describe(&Error::IntegrityUnavailable("x"));
+    assert!(
+        unavailable.contains("--integrity require-where-defined"),
+        "{unavailable}"
+    );
+    // Forwarded variants keep the library's words.
+    assert_eq!(
+        describe(&Error::WrongPassword),
+        Error::WrongPassword.to_string()
+    );
+}
+
+#[test]
+fn temp_path_lives_beside_the_target() {
+    let t = Path::new("/a/b/report.docx");
+    let tmp = temp_path_for(t);
+    assert_eq!(tmp, PathBuf::from("/a/b/.report.docx.msoffice-crypto.tmp"));
+    assert_eq!(
+        tmp.parent(),
+        t.parent(),
+        "same directory, or the rename is not atomic"
+    );
+    assert_eq!(
+        temp_path_for(Path::new("out.docx")),
+        PathBuf::from(".out.docx.msoffice-crypto.tmp")
+    );
+}
+
+#[test]
+fn write_atomically_leaves_no_temp_and_the_target_holds_the_bytes() {
+    let s = UnitScratch::new("atomic-ok");
+    let target = s.0.join("out.docx");
+    write_atomically(&target, b"NEW BYTES").expect("write");
+    assert_eq!(std::fs::read(&target).expect("read"), b"NEW BYTES");
+    assert_eq!(
+        s.entries(),
+        vec!["out.docx".to_string()],
+        "a temp file survived a successful write"
+    );
+}
+
+#[test]
+fn write_atomically_never_opens_the_target_itself() {
+    // THE INTERRUPTED-RUN PROOF. The target holds ORIGINAL; the temp path is blocked by a
+    // directory so `File::create(tmp)` fails. A correct implementation returns Err and
+    // ORIGINAL is byte-identical: the target was never opened. An implementation that
+    // writes the target directly succeeds here, and that is the half-written-.docx bug --
+    // a kill between its first write and its last leaves a file that looks complete.
+    let s = UnitScratch::new("atomic-target-untouched");
+    let target = s.0.join("out.docx");
+    std::fs::write(&target, b"ORIGINAL").expect("seed");
+    std::fs::create_dir(temp_path_for(&target)).expect("block the temp path");
+    assert!(
+        write_atomically(&target, b"NEW").is_err(),
+        "the blocked temp must fail the write"
+    );
+    assert_eq!(
+        std::fs::read(&target).expect("read"),
+        b"ORIGINAL",
+        "the target was opened for writing"
+    );
+}
+
+#[test]
+fn write_atomically_cleans_the_temp_when_the_rename_fails() {
+    // The rename fails (the target is a directory) AFTER the temp was fully written.
+    let s = UnitScratch::new("atomic-rename-fails");
+    let target = s.0.join("taken");
+    std::fs::create_dir(&target).expect("dir");
+    std::fs::write(target.join("marker"), b"m").expect("marker");
+    assert!(write_atomically(&target, b"NEW").is_err());
+    assert_eq!(std::fs::read(target.join("marker")).expect("marker"), b"m");
+    assert_eq!(
+        s.entries(),
+        vec!["taken".to_string()],
+        "temp left behind after a failed rename"
+    );
 }

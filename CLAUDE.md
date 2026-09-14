@@ -212,7 +212,7 @@ src/cfb_reader.rs      capped stream reads
 src/limits.rs          every bound, each with cited provenance
 src/sensitive.rs       secure-gate aliases — the only place they are declared
 src/error.rs           Error -- the crate's single public error type
-src/bin/msoffice-crypto.rs  the CLI: exit codes, clap wiring, classify rendering   (+ msoffice-crypto_tests.rs)
+src/bin/msoffice-crypto.rs  the CLI: exit codes, clap wiring, classify rendering, the decrypt dispatch and the atomic write   (+ msoffice-crypto_tests.rs)
 src/malformed_input.rs hostile-input tests, containers built at runtime
 src/dataspaces.rs      the \x06DataSpaces writer and the CFB container, timestamps zeroed   (+ dataspaces_tests.rs)
 src/encryption_info.rs the EncryptionInfo serialiser, byte-identical to Office's   (+ encryption_info_tests.rs)
@@ -228,7 +228,7 @@ src/powerpoint97.rs    the PowerPoint 97 walk: persist directory, CryptSession10
 src/legacy_malformed.rs hostile-input tests for the three walks, on tampered fixtures and synthetic streams
 tests/real_office_fixtures.rs   the Office-written fixtures against an independent oracle
 tests/legacy_binary_fixtures.rs the binary fixtures, byte for byte against msoffcrypto-tool's output
-tests/cli.rs            the binary driven as a subprocess: --json over every fixture, exit codes, file side effects
+tests/cli.rs            the binary driven as a subprocess: --json over every fixture, decrypt of every encrypted fixture, exit codes, file side effects
 tests/fixtures/        every fixture, password `testpass`; only two ship in the tarball (see Cargo.toml)
 examples/office_crypto_check.rs the office-crypto leg of the acceptance gate: file in, plaintext out
 tools/                 the fixture generators (msoffcrypto-tool; Office over COM; gen_xor_fixture.py),

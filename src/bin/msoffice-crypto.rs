@@ -8,17 +8,17 @@
 //! the run. `--password` is registered anyway, hidden, purely so that reaching for it
 //! produces an explanation rather than "unexpected argument".
 
-use std::io::{IsTerminal, Read};
-use std::path::PathBuf;
+use std::io::{IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-#[cfg(test)]
-use std::path::Path;
-
 use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command};
+#[cfg(feature = "legacy-binary")]
+use msoffice_crypto::decrypt_binary_office;
 use msoffice_crypto::{
-    classify, decrypt_ooxml, AlgorithmParams, CipherAlgorithm, Classification, Container, Document,
-    Error, Family, HashAlgorithm, IntegrityDeclaration, IntegrityPolicy,
+    classify, decrypt_ooxml_with_policy, AlgorithmParams, CipherAlgorithm, Classification,
+    Container, Decrypted, Document, Error, Family, HashAlgorithm, IntegrityDeclaration,
+    IntegrityOutcome, IntegrityPolicy,
 };
 use serde_json::{json, Map, Value};
 
@@ -32,19 +32,8 @@ const EX_USAGE: u8 = 1;
 const EX_IO: u8 = 2;
 const EX_NOT_OFFICE: u8 = 3;
 const EX_WRONG_PASSWORD: u8 = 4;
-// Ungated by design: from S4 the CLI's own classification layer produces 5 in every
-// build (decrypt of an unencrypted file, encrypt of an already-encrypted one). Until
-// that lands the only arm naming it is the `legacy-binary` one below, so the
-// `cli`-without-`legacy-binary` column would warn. `expect`, not `allow`, so the
-// attribute itself fails once S4 gives it a caller; `cfg_attr`, because the lint does
-// not fire in the column where `Error::NotEncrypted` exists.
-#[cfg_attr(
-    all(not(test), not(feature = "legacy-binary")),
-    expect(
-        dead_code,
-        reason = "S4 adds the CLI's own exit-5 refusals; remove this then"
-    )
-)]
+// Ungated: the CLI's own classification layer produces 5 in every build (route_for),
+// and Error::NotEncrypted maps to it only where that variant exists (legacy-binary).
 const EX_REFUSED: u8 = 5;
 const EX_MALFORMED: u8 = 6;
 const EX_INTERNAL: u8 = 7;
@@ -91,6 +80,11 @@ const POLICY_NAMES: [&str; 4] = [
 ];
 
 const FORMAT_NAMES: [&str; 2] = ["agile", "standard"];
+
+/// The one sentence for "nothing to do". Printed whether the CLI's classification
+/// (`route_for`, every build) or the library's `Error::NotEncrypted` (`describe`,
+/// `legacy-binary`) established it: two identical situations, one wording (CONTRACT § 3).
+const NOT_ENCRYPTED: &str = "not encrypted; there is nothing to decrypt";
 
 fn password_args() -> [Arg; 4] {
     [
@@ -198,7 +192,14 @@ fn cli() -> Command {
                     // (GH #12), and a CLI with the old name typed into its help text
                     // would have survived that change looking correct.
                     .default_value(policy_name(IntegrityPolicy::default()))
-                    .help("How hard to insist on a dataIntegrity tag"),
+                    .help(
+                        "What to do about the dataIntegrity tag: require refuses any \
+                         format without one (Office 2007 and 97-2003 included); \
+                         require-where-defined verifies wherever the format defines one; \
+                         verify-if-present accepts a deleted tag; skip never checks. The \
+                         outcome is printed on stderr as `integrity: ...` after every \
+                         successful decrypt",
+                    ),
             ),
         )
         .subcommand(
@@ -367,6 +368,35 @@ fn policy_name(p: IntegrityPolicy) -> &'static str {
     }
 }
 
+/// The inverse of [`policy_name`], over the same table. `None` for a name the table
+/// lacks: unreachable from `main`, where clap has already validated against
+/// `POLICY_NAMES`, and pinned by `the_policy_table_round_trips_and_the_default_is_in_it`.
+fn parse_policy(name: &str) -> Option<IntegrityPolicy> {
+    match name {
+        n if n == POLICY_NAMES[0] => Some(IntegrityPolicy::Require),
+        n if n == POLICY_NAMES[1] => Some(IntegrityPolicy::RequireWhereDefined),
+        n if n == POLICY_NAMES[2] => Some(IntegrityPolicy::VerifyIfPresent),
+        n if n == POLICY_NAMES[3] => Some(IntegrityPolicy::Skip),
+        _ => None,
+    }
+}
+
+/// The `integrity:` line's spelling of an [`IntegrityOutcome`], lower-kebab like every
+/// other enum here. The `_` arm is resolved through `is_authenticated()` rather than a
+/// bare `unrecognised`: the enum is `#[non_exhaustive]`, and the one property of a
+/// future variant that matters to the person reading the line is which side of that
+/// predicate it falls on -- which the library maintains and this binary cannot know.
+fn outcome_name(o: IntegrityOutcome) -> &'static str {
+    match o {
+        IntegrityOutcome::Verified => "verified",
+        IntegrityOutcome::NotDeclared => "not-declared",
+        IntegrityOutcome::NotApplicable => "not-applicable",
+        IntegrityOutcome::Skipped => "skipped",
+        _ if o.is_authenticated() => "unrecognised (authenticated)",
+        _ => "unrecognised (unauthenticated)",
+    }
+}
+
 /// The six `AlgorithmParams` fields, in declaration order, under one prefix.
 ///
 /// Run twice — `key` over `key_data`, `pw` over `password_key` — because a
@@ -499,9 +529,7 @@ fn classification_json(c: &Classification) -> String {
 
 /// Which subcommand [`cmd_crypt`] is serving.
 ///
-/// Only the prompt verb differs at this slice. `suffix()` -- the derived output name --
-/// is S4's, deliberately not added here: with `derived_output` still `#[cfg(test)]` it
-/// would be dead code in the one column that ships.
+/// `prompt_verb` names the password prompt; `suffix` names the derived output file.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Direction {
     Decrypt,
@@ -515,6 +543,14 @@ impl Direction {
         match self {
             Direction::Decrypt => "Password",
             Direction::Encrypt => "New password",
+        }
+    }
+
+    /// `report.docx` -> `report.decrypted.docx` / `report.encrypted.docx` (plan § 8).
+    fn suffix(self) -> &'static str {
+        match self {
+            Direction::Decrypt => "decrypted",
+            Direction::Encrypt => "encrypted",
         }
     }
 }
@@ -577,41 +613,208 @@ fn cmd_crypt(m: &ArgMatches, dir: Direction) -> u8 {
         }
     };
 
-    // A plain `String`, not a secure-gate wrapper, and that is the documented boundary:
-    // the secure-gate skill puts the password argument of the public decrypt API outside
-    // what is wrapped, and nothing here may print it.
-    let password = match read_password(source, dir) {
+    match dir {
+        Direction::Decrypt => cmd_decrypt(m, file, &bytes, source),
+        // S5 replaces this arm. The password is still read before the notice, and the
+        // notice still says so: see `not_implemented_yet`.
+        Direction::Encrypt => match read_password(source, dir) {
+            Ok(_password) => not_implemented_yet("encrypt", "S5"),
+            Err(code) => code,
+        },
+    }
+}
+
+/// `decrypt`: classify, refuse what needs no password, read the password, decrypt, write.
+///
+/// The classification comes BEFORE the password on purpose. A plain `.docx`, sixteen
+/// bytes of junk, a `.doc` in a build without `legacy-binary`, and `--integrity require`
+/// on a 97-2003 document are all answered from the bytes alone; prompting for a password
+/// to a file that has none, or opening a `--password-file` for a file this build cannot
+/// act on, would be wrong and would make "nothing was read" untrue.
+///
+/// Dispatch is on the classification, never the extension (plan § 6): a `.doc` that is
+/// really an OOXML package, or the reverse, is exactly the file this crate exists for.
+fn cmd_decrypt(m: &ArgMatches, file: &str, bytes: &[u8], source: PasswordSource) -> u8 {
+    let name = m.get_one::<String>("integrity").expect("clap default");
+    let Some(policy) = parse_policy(name) else {
+        // clap validated `name` against POLICY_NAMES and `parse_policy` reads the same
+        // table, so this is a broken table, not a user error.
+        eprintln!(
+            "msoffice-crypto: internal error: --integrity {name} is in the accepted list \
+             but names no policy"
+        );
+        return EX_INTERNAL;
+    };
+
+    let route = match route_for(&classify(bytes), policy) {
+        Ok(r) => r,
+        Err(Refusal { code, why }) => {
+            eprintln!("msoffice-crypto: {file}: {why}; nothing was written.");
+            return code;
+        }
+    };
+
+    let password = match read_password(source, Direction::Decrypt) {
         Ok(p) => p,
         Err(code) => return code,
     };
 
-    match dir {
-        Direction::Decrypt => {
-            // S3's seam, deliberately the narrowest decrypt that can prove the password
-            // arrived: no `classify` dispatch, no `legacy-binary` arm, no `--integrity`
-            // and no output handling -- all four are S4's (issue #5). `decrypt_ooxml` is
-            // `decrypt_ooxml_with_policy` under the library's own fail-closed default,
-            // which is exactly what `--integrity` will make selectable, so S4 substitutes
-            // one call rather than rewriting this arm. Until it lands, a plain or non-CFB
-            // input is reported in the library's words and exits 3; the CLI's own "not
-            // encrypted, nothing to decrypt" (exit 5) arrives with the classification.
-            match decrypt_ooxml(&bytes, &password) {
-                Ok(package) => {
-                    eprintln!(
-                        "msoffice-crypto: decrypted {file} ({} bytes); this build does not \
-                         write output yet (plan slice S4), so -o was ignored and nothing \
-                         was written.",
-                        package.len()
-                    );
-                    EX_OK
-                }
-                Err(e) => {
-                    eprintln!("msoffice-crypto: {e}");
-                    exit_code(&e)
-                }
+    let (produced, outcome) = match route {
+        Route::Ooxml => match decrypt_ooxml_with_policy(bytes, &password, policy) {
+            // `..` is mandatory: `Decrypted` is `#[non_exhaustive]` and this is another
+            // crate (CONTRACT T2).
+            Ok(Decrypted {
+                package, integrity, ..
+            }) => (package, outcome_name(integrity)),
+            Err(e) => return report(file, &e),
+        },
+        // T5: this is the whole rewritten CFB container, the same length as the input,
+        // magic D0 CF 11 E0 -- not a PK package. Nothing below sniffs its shape.
+        #[cfg(feature = "legacy-binary")]
+        Route::Legacy => match decrypt_binary_office(bytes, &password) {
+            // The library returns bytes and no outcome: none of the 97-2003 formats
+            // defines an integrity tag, so `not-applicable` is the CLI's own word, and
+            // it is the same word under every policy that reaches here -- `skip`
+            // included, because nothing was skipped. `require` never reaches here.
+            Ok(container) => (container, outcome_name(IntegrityOutcome::NotApplicable)),
+            Err(e) => return report(file, &e),
+        },
+    };
+
+    if let Err(code) = write_output(m, file, Direction::Decrypt, &produced) {
+        return code;
+    }
+    // On EVERY success, `skip` included, so a user who opted out is told in the same run
+    // that the bytes they now hold are unauthenticated. Stderr, so `-o -` is unaffected.
+    eprintln!("integrity: {outcome}");
+    EX_OK
+}
+
+// --- decrypt dispatch ---------------------------------------------------
+
+/// Where `decrypt` sends a file, decided from its classification and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// `decrypt_ooxml_with_policy`.
+    Ooxml,
+    /// `decrypt_binary_office`. Exists only where that function does; in the other
+    /// build `route_for` answers exit 9 for these documents and never names this.
+    #[cfg(feature = "legacy-binary")]
+    Legacy,
+}
+
+/// A refusal `decrypt` makes before it has read a password: the exit code and the
+/// noun phrase, minus the file name and the `nothing was written` tail `cmd_decrypt` adds.
+#[derive(Debug, PartialEq, Eq)]
+struct Refusal {
+    code: u8,
+    why: String,
+}
+
+fn refuse(code: u8, why: impl Into<String>) -> Result<Route, Refusal> {
+    Err(Refusal {
+        code,
+        why: why.into(),
+    })
+}
+
+/// Plan § 6 / CONTRACT § 5. Every branch here is a fact the classification alone
+/// establishes, which is why this runs before the password is read.
+///
+/// The library cannot make these distinctions: handed `plain.docx` it says
+/// `NotACfbFile`, which is true and unhelpful, and handed sixteen bytes of junk it says
+/// the same thing. Two answers for one library error, because the classification tells
+/// them apart and the error cannot.
+fn route_for(class: &Classification, policy: IntegrityPolicy) -> Result<Route, Refusal> {
+    if class.container == Container::Unknown {
+        return refuse(
+            EX_NOT_OFFICE,
+            "not a Microsoft Office file (container: unknown)",
+        );
+    }
+    // Either container: a plain `.docx` (zip) and a plain `.doc` (a CFB whose encryption
+    // bit is clear) are the same fact, and neither needs a password to establish.
+    if class.family == Family::Unencrypted {
+        return refuse(EX_REFUSED, NOT_ENCRYPTED);
+    }
+    if class.document == Document::Unknown {
+        return refuse(
+            EX_NOT_OFFICE,
+            "a CFB container, but not a Microsoft Office document this tool recognises",
+        );
+    }
+    // `Family::Unsupported` (extensible encryption; a BIFF5 FILEPASS with no version)
+    // and the pairs the library refuses by design (XOR obfuscation in a `.doc`).
+    // `Family::Unknown` on a binary document is NOT caught here: `is_encrypted()` is
+    // false for it, and the library gets to say `NotEncrypted` or `MissingStream`.
+    if class.is_encrypted() && !class.is_supported() {
+        return refuse(
+            EX_UNSUPPORTED,
+            format!(
+                "a {} document under {} encryption, which this crate does not implement",
+                document_name(class.document),
+                family_name(class.family)
+            ),
+        );
+    }
+    match class.document {
+        Document::OoxmlPackage => Ok(Route::Ooxml),
+        Document::WordBinary | Document::ExcelBinary | Document::PowerPointBinary => {
+            // The request before the build: "you asked for a guarantee this format does
+            // not define" is true of the file in every build, so the answer must not
+            // change with the feature set. The same sentence the library gives for
+            // Office 2007 standard encryption (`IntegrityUnavailable`), which is also 8.
+            //
+            // It is also true before the encryption status is known, and deliberately
+            // fires there. `Family::Unknown` on a binary document means the walk was
+            // undecided (`classify.rs`: a `/Workbook` that runs out, or does not open
+            // with BOF), and the library's own walk may still decrypt it -- so gating
+            // this on `is_encrypted()` would hand back unauthenticated plaintext under
+            // `--integrity require`, which is the one thing the policy forbids. Refusing
+            // an undecided file is the fail-closed answer, and the sentence below is
+            // therefore written about the *request*, never about the file: it neither
+            // calls the file encrypted nor promises that the opt-out will open it. Under
+            // any other policy these bytes reach the decrypter and get its answer.
+            if policy == IntegrityPolicy::Require {
+                return refuse(
+                    EX_INTEGRITY,
+                    format!(
+                        "you asked for --integrity require, and this is a {} 97-2003 \
+                         document; those formats define no integrity tag, so nothing \
+                         could verify -- encrypted or not, which is why this refusal \
+                         does not wait to find out. `--integrity require-where-defined` \
+                         accepts that, and lets the decrypter answer for the file",
+                        document_name(class.document)
+                    ),
+                );
+            }
+            #[cfg(feature = "legacy-binary")]
+            {
+                Ok(Route::Legacy)
+            }
+            // Not an `Error`: in this build the library produced nothing at all, so the
+            // sentence -- and the remedy -- are the CLI's alone (CONTRACT § 3).
+            #[cfg(not(feature = "legacy-binary"))]
+            {
+                refuse(
+                    EX_UNSUPPORTED,
+                    format!(
+                        "a {} 97-2003 document, and this build was compiled without the \
+                         `legacy-binary` feature; rebuild with `cargo install \
+                         msoffice-crypto --features cli,legacy-binary`",
+                        document_name(class.document)
+                    ),
+                )
             }
         }
-        Direction::Encrypt => not_implemented_yet("encrypt", "S5"),
+        // `Document::Unknown` was answered above, so this is a variant added later.
+        _ => refuse(
+            EX_UNSUPPORTED,
+            format!(
+                "a document kind this build does not know how to decrypt ({})",
+                document_name(class.document)
+            ),
+        ),
     }
 }
 
@@ -620,10 +823,9 @@ fn cmd_crypt(m: &ArgMatches, dir: Direction) -> u8 {
 /// `report.docx` -> `report.decrypted.docx`. A file with no extension gets the suffix
 /// appended, so `report` -> `report.decrypted`.
 ///
-/// `#[cfg(test)]` until S4 wires the output tail that calls it — the gate is the
-/// reminder that the flip is due, the same way `dataspaces` and `encryption_info` were
-/// gated until `encrypt_ooxml` became their production caller.
-#[cfg(test)]
+/// The extension is whatever the input had -- `.doc` stays `.doc`, because
+/// `decrypt_binary_office` returns a rewritten CFB, not a package, and normalising it
+/// would mislabel the output.
 fn derived_output(input: &Path, suffix: &str) -> PathBuf {
     let stem = input.file_stem().unwrap_or_default().to_string_lossy();
     let name = match input.extension() {
@@ -631,6 +833,87 @@ fn derived_output(input: &Path, suffix: &str) -> PathBuf {
         None => format!("{stem}.{suffix}"),
     };
     input.with_file_name(name)
+}
+
+/// The output tail both directions share (plan § 8). `Ok(())` once the bytes are on
+/// disk or on stdout; `Err(code)` with the reason already printed.
+///
+/// Nothing here looks at `produced`: an OOXML decrypt yields a `PK` package and a
+/// 97-2003 decrypt yields a whole CFB container (T5), and this function must not care.
+fn write_output(m: &ArgMatches, input: &str, dir: Direction, produced: &[u8]) -> Result<(), u8> {
+    match m.get_one::<String>("output").map(String::as_str) {
+        Some("-") => {
+            // Stdout carries the bytes and nothing else; every notice is on stderr.
+            let mut stdout = std::io::stdout().lock();
+            stdout
+                .write_all(produced)
+                .and_then(|()| stdout.flush())
+                .map_err(|e| {
+                    eprintln!("msoffice-crypto: cannot write to stdout: {e}");
+                    EX_IO
+                })
+        }
+        other => {
+            let target = match other {
+                Some(o) => PathBuf::from(o),
+                None => derived_output(Path::new(input), dir.suffix()),
+            };
+            // Never silently: a decrypt that replaced the encrypted original, or an
+            // earlier decrypt, is unrecoverable. `exists()`, not `is_file()`: a
+            // directory at the target is also something this tool must not rename over.
+            if target.exists() && !m.get_flag("force") {
+                eprintln!(
+                    "msoffice-crypto: {} already exists; pass --force to overwrite. Nothing \
+                     was written.",
+                    target.display()
+                );
+                return Err(EX_USAGE);
+            }
+            match write_atomically(&target, produced) {
+                Ok(()) => {
+                    eprintln!("msoffice-crypto: wrote {}", target.display());
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("msoffice-crypto: cannot write {}: {e}", target.display());
+                    Err(EX_IO)
+                }
+            }
+        }
+    }
+}
+
+/// `/a/b/report.docx` -> `/a/b/.report.docx.msoffice-crypto.tmp`: the SAME directory as
+/// the target, never the system temp directory, because `rename` is atomic only within
+/// one filesystem and degrades to a copy across two.
+fn temp_path_for(target: &Path) -> PathBuf {
+    let dir = target.parent().unwrap_or(Path::new("."));
+    let file_name = target.file_name().unwrap_or_default().to_string_lossy();
+    dir.join(format!(".{file_name}.msoffice-crypto.tmp"))
+}
+
+/// Write to a temporary file beside the target, then rename over it.
+///
+/// The target path is touched by exactly one call in this function, `rename`, which is
+/// atomic on the same filesystem. So an interrupted run leaves either the untouched
+/// target or the finished one, plus at worst a `.X.msoffice-crypto.tmp` that no reader
+/// mistakes for a document -- never a half-written `.docx` that looks complete. Pinned
+/// by `write_atomically_never_opens_the_target_itself` in the unit module.
+fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = temp_path_for(target);
+    let result = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        // Closed before the rename: Windows will not move an open file.
+        drop(f);
+        std::fs::rename(&tmp, target)
+    })();
+    if result.is_err() {
+        // Best effort; the error being reported is the one above.
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 // --- passwords --------------------------------------------------------------
@@ -725,6 +1008,50 @@ fn first_line(s: &str) -> String {
 }
 
 // --- error -> exit code ---------------------------------------------------
+
+/// Print an [`Error`] in the CLI's words and return its exit code.
+fn report(file: &str, e: &Error) -> u8 {
+    eprintln!(
+        "msoffice-crypto: {file}: {}; nothing was written.",
+        describe(e)
+    );
+    exit_code(e)
+}
+
+/// The CLI's own copy for the variants whose `Display` is written for a programmer
+/// choosing a policy (`src/error.rs`, "Who the messages are written for"), and a
+/// forward -- with the remedy where one exists -- for the rest. Opt-outs are named in
+/// the CLI's spelling (`--integrity verify-if-present`), never as a Rust path, and
+/// always AFTER the cost. `IntegrityCheckFailed` gets no remedy: there is none.
+fn describe(e: &Error) -> String {
+    match e {
+        Error::NotACfbFile => "not a Microsoft Office file".to_string(),
+        #[cfg(feature = "legacy-binary")]
+        Error::NotEncrypted => NOT_ENCRYPTED.to_string(),
+        Error::IntegrityCheckFailed => "this file was modified after it was encrypted: \
+             your password was correct, but the package does not match its dataIntegrity \
+             tag"
+        .to_string(),
+        Error::IntegrityElementMissing => "this file's tamper-evidence was deleted: it \
+             declares agile encryption but carries no <dataIntegrity> element, which every \
+             known writer emits, and removing it needs no password. `--integrity \
+             verify-if-present` decrypts it anyway, as unauthenticated plaintext"
+            .to_string(),
+        Error::IntegrityUnavailable(what) => format!(
+            "you asked for `--integrity require`; this format defines no integrity tag \
+             ({what}). `--integrity require-where-defined` accepts it as unauthenticated \
+             plaintext"
+        ),
+        Error::UnsupportedEncryptionVersion(..) | Error::UnsupportedAlgorithm { .. } => {
+            format!("{e}; re-saving the document with a current Office writes agile encryption, which this tool reads")
+        }
+        // WrongPassword, MissingStream, BadParameters, XmlParse, CipherError,
+        // RandomSource, Io and any future variant: forwarded. XmlParse, BadParameters and
+        // UnsupportedAlgorithm carry bounded attacker-chosen text; it goes to stderr
+        // as-is and is never re-interpolated into a path or a JSON field.
+        _ => e.to_string(),
+    }
+}
 
 /// The one place an [`Error`] becomes a number.
 ///
