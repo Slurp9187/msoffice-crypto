@@ -1,4 +1,4 @@
-Status: Planned
+Status: **Shipped (2026-09-14)** — three subcommands behind an opt-in `cli` feature; batch mode and any password-recovery affordance stay permanently out of scope · Landed on `main` at `b23f21e` across six slices, [#8](https://github.com/Slurp9187/msoffice-crypto/pull/8) `classify` · [#10](https://github.com/Slurp9187/msoffice-crypto/pull/10) `--json` · [#11](https://github.com/Slurp9187/msoffice-crypto/pull/11) passwords · [#12](https://github.com/Slurp9187/msoffice-crypto/pull/12) `decrypt` · [#13](https://github.com/Slurp9187/msoffice-crypto/pull/13) `encrypt` and the gate · [#14](https://github.com/Slurp9187/msoffice-crypto/pull/14) CI and prose, closing arc [#1](https://github.com/Slurp9187/msoffice-crypto/issues/1) and slices [#2](https://github.com/Slurp9187/msoffice-crypto/issues/2)–[#7](https://github.com/Slurp9187/msoffice-crypto/issues/7) · Authored 2026-09-11 against `3d48707` · Four-reader gate run 2026-09-14 over CLI-written artifacts in both formats, with both mutation runs failing as required; verdicts in `CHANGELOG.md` · § 13 records what implementation contradicted
 
 # `msoffice-crypto` CLI
 
@@ -394,6 +394,79 @@ worse and would drift. The env-var-not-argv reasoning is already stated locally,
 throwaway shim for `tools/acceptance_gate.py`, and the gate keeps calling it, so the
 four-reader evidence path does not start depending on the CLI's argument grammar — a
 CLI flag rename must not be able to break the gate.
+
+---
+
+## 13. What implementation contradicted
+
+Written after the fact, because a decision that was reversed is more useful than one that
+appears never to have been made. The sections above are left as authored; this is the delta.
+
+**§ 9's S3 row contradicts its own "not this slice".** It requires each password source to
+*decrypt* `agile_encrypted.docx`, while deferring all decrypt plumbing to S4 — and a password
+cannot be shown to have arrived without something consuming it. Resolved by wiring the agile
+OOXML path only, and recording in the slice what S4 still owed: classification dispatch, the
+`legacy-binary` arm, `--integrity`, and the whole of output handling. The seam is written down
+rather than discovered, which is why S4 had nothing to renegotiate.
+
+**§ 9's S4 integrity pair describes a file that cannot exist.** It asks for one artifact whose
+`dataIntegrity` blobs are *blanked*, exiting 8 under the default policy and 0 with
+`integrity: not-declared` under `verify-if-present`. Blanking leaves the element **present**
+with meaningless values, which is `IntegrityCheckFailed` under every policy that checks;
+`not-declared` requires the element to be **absent**. The two halves belong to two different
+mutations. Implemented as two tests plus a control: element deleted → 8 by default, 0 and
+`not-declared` under `verify-if-present`, and the unmodified fixture still `verified` — that
+third leg being what proves the first is a MAC refusal rather than a parse failure — and,
+separately, a ciphertext-body byte flip → 8 by default, 0 under `skip`. Stronger than asked,
+but not what the row says. PR #12's description repeated the row's error and carries a
+correction.
+
+**§ 9's S4 row misattributes the `.ppt` oracle.** It says the three binary fixtures decrypt
+"byte-identically to the SHA-256 constants `tests/legacy_binary_fixtures.rs` already asserts
+against `msoffcrypto-tool`'s output". Three do. `powerpoint97_password.ppt` is pinned to
+`PPT_THIS_CRATE_SHA` — **this crate's own digest** — because msoffcrypto's rewrite gets one
+persist-directory word wrong; it is tied to the oracle indirectly, by
+`powerpoint_output_is_msoffcryptos_but_for_the_persist_count`. Measured 2026-09-14: the CLI
+emits `b6cb4471…d32d`, msoffcrypto-tool 6.0.0 emits `4e13de26…23a7`.
+
+**§ 9 puts the version bump in S6; the changelog protocol forces it into S5.** S5 must record
+the gate verdicts in `CHANGELOG.md`, and `audit_claims.py` check G forbids writing under a
+heading that is dated — which `v0.1.0-rc.1` was, being tagged. So S5 bumped `Cargo.toml` to
+`0.1.0-rc.2` and opened `## v0.1.0-rc.2 — unreleased` in one commit, because check G fails on
+whichever half lands alone, and check E dragged every version literal in the README with it.
+S6 added the remaining prose under the heading S5 opened.
+
+**§ 1.2's re-measurement is platform-dependent, and the plan did not say so.** `cli` over
+`crypto-ops` is **+13 crates on `x86_64-pc-windows-msvc`, +11 on Linux**: `windows-sys` and
+`windows-link` arrive through `rpassword` on Windows alone. The figure is recorded with its
+platform; what a consumer is promised is the property, not the count.
+
+**§ 9's S6 detection-graph assertion had a deeper hole than the row states.** The row asks that
+the job name `clap`, `rpassword` and `serde_json`. But the step measured only the
+`--no-default-features` graph, so adding `cli` to `default` — the exact mutation the close
+condition names as its proof — left it passing unchanged, and adding names to the pattern would
+not have changed that. The job now measures the **default** graph as a second invocation, with a
+paired check that all four crates *are* present in the `cli` graph so their absence elsewhere is
+falsifiable.
+
+**§ 9's S6 row says "the `cli` row in the feature table"; there was no feature table.** The
+README carried a Family/Status table and an acceptance-gate reader table, with the feature
+discussion as prose. One was built.
+
+**§ 12 held.** `tools/acceptance_gate.py` still drives `examples/office_crypto_check.rs` rather
+than the CLI, so a flag rename cannot break the four-reader evidence path.
+
+### Open, and deliberately not closed here
+
+- `src/bin/msoffice-crypto.rs` carries no `#![deny(clippy::unwrap_used, expect_used, panic)]`
+  header. The binary parses no bytes of its own and its four `expect` sites are clap-guaranteed,
+  so landing the header today would mean four `#[allow]`s and an inner allow for the test module
+  — a guard that passes with and without the thing it guards. `SECURITY.md` names the gap
+  instead, as it already does for seven library modules. Auditing the binary properly is a
+  slice, not a line.
+- `SECURITY.md` describes the library's threat model, in which plaintext stays in memory. The
+  CLI writes it to disk and to stdout, unzeroized and persistent. That is specified behaviour,
+  not a defect, and it is undocumented.
 
 ---
 
