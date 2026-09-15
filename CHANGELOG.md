@@ -167,6 +167,49 @@ decrypted*, not that anything was authenticated, and the gate's wording does not
 distinguish the two. The only HMAC claim in this entry is the agile block's, and
 `--corrupt-integrity` above is what makes that one non-vacuous.
 
+### A stale copy of the RC4 key is no longer abandoned on the heap
+
+The 40-bit RC4 CryptoAPI key is built inside its wrapper, five bytes of `Hfinal` zero-padded
+to sixteen ([MS-OFFCRYPTO] §2.3.5.2). It was built by growing an empty buffer —
+`extend_from_slice` then `resize` — and `secure-gate`'s `Dynamic::new_with` hands the closure
+an empty buffer to *grow*, not a sized slot. Either call can reallocate, and a `Vec` realloc
+frees the old block **without wiping it**, leaving a copy of the key on the heap that nothing
+will ever zeroize.
+
+Nothing about that is visible from outside: the wrapper still zeroized what it ended up
+holding, so the key was protected and a stale copy of it was not. One `reserve_exact` makes
+the first allocation the only one. No behaviour changed — the digests
+`tests/legacy_binary_fixtures.rs` pins against `msoffcrypto-tool` are unmoved, which is what
+shows the key schedule still produces the same bytes.
+
+Found while upgrading `secure-gate`, from its maintainers' guidance on growing a
+`Dynamic<Vec<u8>>` in place, and it is the kind of defect that has no symptom to notice.
+
+### `secure-gate` moves to 0.9.0-rc.11, and is pinned
+
+Of the nineteen breaking changes since rc.7, fourteen are in an encoding and serde surface
+this crate does not compile, and four of the remaining five do not reach it. The fifth would
+not have announced itself: `into_inner()` now returns the plain value and protection ends at
+that call, where it used to return a wrapper that kept wiping — so an untyped binding keeps
+compiling and quietly stops zeroizing. Verified absent here; every `into_inner` in `src/` is
+`std::io::Cursor` or `cfb::CompoundFile`.
+
+The one that did reach us was mechanical. rc.10 deleted the `*_alias!` macros, which only
+ever expanded to `type` aliases, so `src/sensitive.rs` becomes seven `type` lines and not one
+call site moves — across roughly forty-six `with_secret` closures, six `ct_eq` comparisons
+and three `from_rng` draws.
+
+The requirement is now pinned with `=`. A caret carrying a pre-release tag matches later
+pre-releases of the same version, so the previous `"0.9.0-rc.7"` already resolved to rc.10 —
+a bare `cargo update` would have deleted those macros with no warning, and only `--locked`
+discipline was holding it.
+
+Measured rather than assumed: `zeroize` drops from `alloc,zeroize_derive` to `alloc`,
+`zeroize_derive` leaves the graph, and a duplicate `syn v2.0.119` leaves with it. `syn v3.0.5`
+stays, via this crate's own `thiserror` — the proc-macro chain does not leave, only that one
+crate does. The detection build still links no `secure-gate` at all, and all five feature
+configurations hold their test counts exactly, seeded encrypt goldens included.
+
 ## v0.1.0-rc.1 — 2026-09-11
 
 First public version. Detection, decryption and encryption of the formats [MS-OFFCRYPTO]
