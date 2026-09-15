@@ -59,12 +59,21 @@ published releases say the boundary stays plain, and the one consumer passes a b
 
 ## What is wrapped
 
-All six aliases live in `src/sensitive.rs`, all `pub(crate)`, all `Dynamic<Vec<u8>>`.
+All seven aliases live in `src/sensitive.rs`, all `pub(crate)`. Six are `Dynamic<Vec<u8>>`;
+`XorObfuscationArray` is the one `Fixed<[u8; 16]>`, and it is `legacy-binary`-gated, which
+makes that the only configuration compiling a `Fixed` at all.
+
+They are plain `type` aliases, not newtypes — since secure-gate 0.9.0-rc.10 deleted the
+`*_alias!` macros, they are spelled as `type` lines directly. Two aliases over
+`Dynamic<Vec<u8>>` are therefore the *same nominal type*: nothing stops a `SessionKey` being
+passed where a `DerivedKey` is meant. The separation buys greppable names and honest doc
+comments, not type safety.
 
 | Alias | Holds | Live at |
 |---|---|---|
-| `PasswordDigest` | agile `H_final` (SHA-512 × `spinCount`), standard's 50 000-round SHA-1 digest | `agile.rs` `spin_hash` return; consumed by `derive_block_key`, `verify_password`. `standard.rs` `derive_standard_key`, inside — **since GH #7**; this row claimed it earlier and the standard path held `H_final` bare until then |
-| `DerivedKey` | a block key, `SHA512(H_final ‖ block_key)[..keyBits/8]`; standard's XOR-ladder key | `agile.rs` `derive_block_key` return; `standard.rs` `derive_standard_key` return, consumed by `standard_encrypt.rs` `generate` and `encrypt_package` |
+| `PasswordDigest` | agile `H_final` (SHA-512 × `spinCount`), standard's 50 000-round SHA-1 digest, RC4 CryptoAPI's `SHA1(salt ‖ password)`, and the five bytes Office 97/2000 RC4 keeps from its second MD5 | `agile.rs` `spin_hash` return; consumed by `derive_block_key`, `verify_password`. `standard.rs` `derive_standard_key`, inside — **since GH #7**; this row claimed it earlier and the standard path held `H_final` bare until then. Under `legacy-binary`: `rc4_cryptoapi.rs` and `rc4_office97.rs` hold it as a struct field for the life of the key schedule |
+| `DerivedKey` | a block key, `SHA512(H_final ‖ block_key)[..keyBits/8]`; standard's XOR-ladder key; the RC4 families' per-block key, zero-padded to 128 bits at exactly 40 | `agile.rs` `derive_block_key` return; `standard.rs` `derive_standard_key` return, consumed by `standard_encrypt.rs` `generate` and `encrypt_package`. Under `legacy-binary`: the `BlockKeySchedule::block_key` return in `rc4_cryptoapi.rs` and `rc4_office97.rs`, consumed by `rc4.rs` |
+| `XorObfuscationArray` | the 16-byte XOR obfuscation array of \[MS-OFFCRYPTO\] §2.3.7.2 — the password transformed, not a key in any cryptographic sense | `xor_obfuscation.rs`, built by `xor_array` with `Fixed::new_with` and held as a struct field. `legacy-binary` only. **`Fixed`, not `Dynamic`: its 16 bytes are the spec's, not the file's** — which is the rule below, applied in the one direction the rest of the table does not show |
 | `SessionKey` | the key that decrypts `EncryptedPackage`, from `encryptedKeyValue` | `agile.rs` `decrypt`, consumed by `decrypt_package` |
 | `VerifierPlaintext` | decrypted `encryptedVerifierHashInput` / `…Value`; on the encrypt side, the drawn verifier and its hash before encryption | `agile.rs` and `standard.rs` `verify_password`; `agile_encrypt.rs` `generate`, `standard_encrypt.rs` `generate` (the standard verifier is drawn straight into the wrapper with `from_rng`) |
 | `IntegrityKey` | the HMAC key from `dataIntegrity/@encryptedHmacKey` | `integrity.rs` `verify` |
@@ -244,15 +253,24 @@ nothing. If nominal separation is ever actually wanted, wrap the alias in a `str
 
 ## Verify
 
-S1's feature split landed, so this is a matrix, not a single run. Both halves are
-load-bearing: the first proves the detection build compiles and passes without a cipher
-crate in the graph, the second that nothing on the decrypt path regressed.
+S1's feature split landed, so this is a matrix, not a single run. Each row is load-bearing:
+the detection build proves it compiles and passes with no cipher crate in the graph;
+`crypto-ops` that nothing on the decrypt path regressed; and **`legacy-binary` is the only
+configuration that compiles `XorObfuscationArray` at all**, so a change to the one `Fixed`
+alias — or to a `use secure_gate::Fixed` import — is invisible without it. The `cli` rows
+build the binary, which links the same wrappers through the library.
 
 ```bash
 cargo test --no-default-features
-cargo test --features crypto-ops
+cargo test --no-default-features --features crypto-ops
+cargo test --no-default-features --features legacy-binary
+cargo test --no-default-features --features cli
+cargo test --no-default-features --features cli,legacy-binary
 cargo clippy --all-targets --no-default-features -- -D warnings
-cargo clippy --all-targets --features crypto-ops -- -D warnings
+cargo clippy --all-targets --no-default-features --features crypto-ops -- -D warnings
+cargo clippy --all-targets --no-default-features --features legacy-binary -- -D warnings
+cargo clippy --all-targets --no-default-features --features cli -- -D warnings
+cargo clippy --all-targets --no-default-features --features cli,legacy-binary -- -D warnings
 cargo fmt --all --check
 
 # and the claim the split exists to make:
