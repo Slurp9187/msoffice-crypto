@@ -226,13 +226,34 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 # msoffcrypto-tool and herumi/msoffice all hold key bytes in bare containers),
 # and it is the reason this crate exists rather than a dependency on one of them.
 #
-# "rand" is NOT enabled yet: nothing in a decrypt-only crate generates
-# randomness. It gets switched on with the encrypt path (plan slice S5), where
-# Fixed::from_random() supplies salts and IVs in production and
-# Fixed::from_rng(&mut seeded) makes the same code deterministic under test --
-# which is what allows byte-exact golden output rather than round-trip-only
-# tests. Version tracks odf-crypto rather than the consumer's =0.8.0-rc.10 pin; see the
+# "rand" IS enabled, through `crypto-ops` below. It arrived with the encrypt path, where
+# `Dynamic::from_rng(len, &mut rng)` draws the session key (agile_encrypt.rs), the standard
+# verifier (standard_encrypt.rs) and the dataIntegrity HMAC key (integrity.rs) straight into
+# the wrapper's own storage, so the secret never exists outside it. Passing the RNG in rather
+# than reaching for a global is what makes the same code deterministic under a seeded
+# generator, and that is what allows byte-exact golden output rather than round-trip-only
+# tests.
+#
+# Salts and IVs are NOT drawn this way and are NOT wrapped: they are written into
+# EncryptionInfo in the clear, so wrapping them would be theatre. (An earlier version of this
+# comment claimed `Fixed::from_random()` supplied them. It never did -- every `from_rng` call
+# in this crate is on `Dynamic`, and `Fixed` is used at exactly one site, the XOR obfuscation
+# array.) Version tracks odf-crypto rather than the consumer's =0.8.0-rc.10 pin; see the
 # README's compatibility note.
+#
+# Pinned with `=`, not a caret, and that is load-bearing on this dependency. A caret
+# requirement carrying a pre-release tag matches later pre-releases of the same version, so
+# the previous `"0.9.0-rc.7"` already resolved to rc.10 -- and rc.10 deleted the four
+# `*_alias!` macros `src/sensitive.rs` was built on. A bare `cargo update` would have broken
+# the build with no warning; only `--locked` discipline was holding it. Upstream's README
+# recommends the pin for exactly this reason.
+#
+# The pin proved itself within minutes of being added: with `=0.9.0-rc.10` written here,
+# `cargo update --precise 0.9.0-rc.11` refused -- "candidate versions found which didn't
+# match: 0.9.0-rc.11" -- so moving the line is a deliberate edit, which is the whole point.
+# rc.11 is what is pinned now; it adds `Fixed::try_new_with` and automatic `ConstantTimeEq`
+# on the newtype-macro arms, neither of which this crate can reach, since every wrapper here
+# is an alias and the one `Fixed` is a 16-byte array whose fill cannot fail.
 #
 # When it goes on, the seeded RNG is a `chacha20` dev-dependency and NOT
 # `rand_chacha`. from_rng's `TryRng + TryCryptoRng` bounds come from rand_core
@@ -270,7 +291,7 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 #
 # This is not a dependency-count argument. In the build that has key material, secure-gate
 # and its `zeroize` come along regardless -- that is what they are for.
-secure-gate = { version = "0.9.0-rc.7", optional = true, default-features = false, features = [
+secure-gate = { version = "=0.9.0-rc.11", optional = true, default-features = false, features = [
     "alloc",
 ] }
 
