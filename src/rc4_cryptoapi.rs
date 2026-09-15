@@ -25,6 +25,14 @@ use sha1::{Digest, Sha1};
 
 /// `AlgID` for RC4 — [MS-OFFCRYPTO] §2.3.2; `0` means "determined by Flags", which with
 /// `fAES` clear is RC4 too.
+/// The 5 bytes of `Hfinal` a 40-bit key takes — [MS-OFFCRYPTO] §2.3.5.2.
+const RC4_DEFAULT_KEY_LEN: usize = 5;
+
+/// …and the 16 bytes it becomes once zero-padded, "creating a 128-bit key" (§2.3.5.2).
+/// The padding is a key-schedule input, not storage: RC4 keyed with 5 bytes and RC4 keyed
+/// with those 5 bytes plus 11 zeros are different ciphers.
+const RC4_PADDED_KEY_LEN: usize = 16;
+
 const ALG_ID_RC4: u32 = 0x0000_6801;
 /// `AlgIDHash` for SHA-1 — §2.3.2; `0` with `fExternal` clear means SHA-1 as well.
 const ALG_ID_HASH_SHA1: u32 = 0x0000_8004;
@@ -289,8 +297,16 @@ impl BlockKeySchedule for CryptoApiKeySchedule {
             let hfinal = hasher.finalize();
             if self.key_bits == RC4_KEY_BITS_DEFAULT {
                 DerivedKey::new_with(|k| {
-                    k.extend_from_slice(&hfinal[..5]);
-                    k.resize(16, 0);
+                    // `reserve_exact` first, and it is not tidiness. `Dynamic::new_with`
+                    // hands the closure an empty buffer to GROW, not a sized slot, so
+                    // `extend_from_slice` then `resize` can reallocate -- and a `Vec`
+                    // realloc frees the old allocation without wiping it, abandoning a
+                    // copy of the key on the heap that nothing will ever zeroize.
+                    // secure-gate's SECURITY.md measures that case. One exact reservation
+                    // makes the first allocation the only one.
+                    k.reserve_exact(RC4_PADDED_KEY_LEN);
+                    k.extend_from_slice(&hfinal[..RC4_DEFAULT_KEY_LEN]);
+                    k.resize(RC4_PADDED_KEY_LEN, 0);
                 })
             } else {
                 let len = usize::try_from(self.key_bits / 8)
