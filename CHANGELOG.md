@@ -177,24 +177,42 @@ frees the old block **without wiping it**, leaving a copy of the key on the heap
 will ever zeroize.
 
 Nothing about that is visible from outside: the wrapper still zeroized what it ended up
-holding, so the key was protected and a stale copy of it was not. One `reserve_exact` makes
-the first allocation the only one. No behaviour changed — the digests
+holding, so the key was protected and a stale copy of it was not. One `reserve_exact` made
+the first allocation the only one — that was the fix as it landed, and it is deliberately
+not what the tree holds now; see the next paragraph. No behaviour changed — the digests
 `tests/legacy_binary_fixtures.rs` pins against `msoffcrypto-tool` are unmoved, which is what
 shows the key schedule still produces the same bytes.
 
 Found while upgrading `secure-gate`, from its maintainers' guidance on growing a
 `Dynamic<Vec<u8>>` in place, and it is the kind of defect that has no symptom to notice.
 
-### `secure-gate` moves to 0.9.0-rc.11, and is pinned
+**And then it stopped being possible to write.** Reporting the defect upstream produced an
+API change rather than a documentation note: as of `secure-gate` 0.9.0-rc.12,
+`Dynamic::new_with` takes a length and hands the closure a pre-zeroed `&mut [u8]` of exactly
+that size, so there is no growable buffer to reallocate. The fix above becomes a single
+`copy_from_slice` with no `reserve_exact` and no trailing `resize` — the discipline is now
+the type's, not this crate's.
 
-Of the nineteen breaking changes since rc.7, fourteen are in an encoding and serde surface
-this crate does not compile, and four of the remaining five do not reach it. The fifth would
-not have announced itself: `into_inner()` now returns the plain value and protection ends at
-that call, where it used to return a wrapper that kept wiping — so an untyped binding keeps
+The all-zero slot is a **documented guarantee** rather than an implementation detail, and
+this crate's key is the case it was made one for: the eleven trailing zeros of the 40-bit RC4
+key are key-schedule input under \[MS-OFFCRYPTO\] §2.3.5.2, so a slot that merely happened to
+be zeroed would have produced a different cipher the day it was not — silently, and as a
+wrong key rather than an error.
+
+### `secure-gate` moves to 0.9.0-rc.12, and is pinned
+
+Two of the breaking changes across this span reach this crate. One is the `Dynamic::new_with`
+signature described above, and it is the reason the upgrade went to rc.12 rather than stopping
+at rc.11. The other is below.
+
+Of the nineteen breaking changes between rc.7 and rc.11, fourteen are in an encoding and serde
+surface this crate does not compile, and four of the remaining five do not reach it. The fifth
+would not have announced itself: `into_inner()` now returns the plain value and protection ends
+at that call, where it used to return a wrapper that kept wiping — so an untyped binding keeps
 compiling and quietly stops zeroizing. Verified absent here; every `into_inner` in `src/` is
 `std::io::Cursor` or `cfb::CompoundFile`.
 
-The one that did reach us was mechanical. rc.10 deleted the `*_alias!` macros, which only
+The one that reached us there was mechanical. rc.10 deleted the `*_alias!` macros, which only
 ever expanded to `type` aliases, so `src/sensitive.rs` becomes seven `type` lines and not one
 call site moves — across roughly forty-six `with_secret` closures, six `ct_eq` comparisons
 and three `from_rng` draws.

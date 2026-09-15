@@ -251,9 +251,18 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 # The pin proved itself within minutes of being added: with `=0.9.0-rc.10` written here,
 # `cargo update --precise 0.9.0-rc.11` refused -- "candidate versions found which didn't
 # match: 0.9.0-rc.11" -- so moving the line is a deliberate edit, which is the whole point.
-# rc.11 is what is pinned now; it adds `Fixed::try_new_with` and automatic `ConstantTimeEq`
-# on the newtype-macro arms, neither of which this crate can reach, since every wrapper here
-# is an alias and the one `Fixed` is a 16-byte array whose fill cannot fail.
+# rc.12 is what is pinned now, and it is the one release in this span that changed something
+# this crate calls. `Dynamic::new_with` went from handing the closure an empty growable `Vec`
+# to handing it a pre-zeroed `&mut [u8]` of exactly `len`, which makes the heap-residue defect
+# fixed two commits earlier in this branch impossible to express rather than merely fixed --
+# see `src/rc4_cryptoapi.rs`. The all-zero slot is a documented guarantee, not an
+# implementation detail, and this crate's 40-bit RC4 key is the case it was made a guarantee
+# for: those eleven trailing zeros are key-schedule input, so a slot that merely happened to
+# be zeroed would produce a different cipher the day it was not.
+#
+# `Fixed::new_with` is unchanged at one argument -- checked against the published source
+# rather than assumed, because `src/xor_obfuscation.rs` is its only caller here and
+# `legacy-binary` is the only configuration that compiles it.
 #
 # When it goes on, the seeded RNG is a `chacha20` dev-dependency and NOT
 # `rand_chacha`. from_rng's `TryRng + TryCryptoRng` bounds come from rand_core
@@ -291,7 +300,7 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 #
 # This is not a dependency-count argument. In the build that has key material, secure-gate
 # and its `zeroize` come along regardless -- that is what they are for.
-secure-gate = { version = "=0.9.0-rc.11", optional = true, default-features = false, features = [
+secure-gate = { version = "=0.9.0-rc.12", optional = true, default-features = false, features = [
     "alloc",
 ] }
 

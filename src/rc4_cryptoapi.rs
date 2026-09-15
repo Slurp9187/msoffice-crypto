@@ -296,17 +296,19 @@ impl BlockKeySchedule for CryptoApiKeySchedule {
             hasher.update(block.to_le_bytes());
             let hfinal = hasher.finalize();
             if self.key_bits == RC4_KEY_BITS_DEFAULT {
-                DerivedKey::new_with(|k| {
-                    // `reserve_exact` first, and it is not tidiness. `Dynamic::new_with`
-                    // hands the closure an empty buffer to GROW, not a sized slot, so
-                    // `extend_from_slice` then `resize` can reallocate -- and a `Vec`
-                    // realloc frees the old allocation without wiping it, abandoning a
-                    // copy of the key on the heap that nothing will ever zeroize.
-                    // secure-gate's SECURITY.md measures that case. One exact reservation
-                    // makes the first allocation the only one.
-                    k.reserve_exact(RC4_PADDED_KEY_LEN);
-                    k.extend_from_slice(&hfinal[..RC4_DEFAULT_KEY_LEN]);
-                    k.resize(RC4_PADDED_KEY_LEN, 0);
+                // The slot is exactly `RC4_PADDED_KEY_LEN` bytes and every one of them is
+                // zero -- both guaranteed by `Dynamic::new_with` since secure-gate
+                // 0.9.0-rc.12, which is why there is no `reserve_exact` and no trailing
+                // `resize` here any more. The eleven zero bytes past the copy are the
+                // §2.3.5.2 padding, and the guarantee is what lets us rely on them rather
+                // than writing them.
+                //
+                // Do not fill this slot from a `Vec` grown inside this closure: the
+                // reallocation the sized slot exists to prevent would simply move to the
+                // source buffer. `hfinal` is a fixed-size digest, so the copy below is the
+                // only write.
+                DerivedKey::new_with(RC4_PADDED_KEY_LEN, |k| {
+                    k[..RC4_DEFAULT_KEY_LEN].copy_from_slice(&hfinal[..RC4_DEFAULT_KEY_LEN]);
                 })
             } else {
                 let len = usize::try_from(self.key_bits / 8)
