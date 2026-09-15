@@ -49,6 +49,29 @@ version = 2
 # as. Everything below is either permissive-with-notice or public-domain-equivalent, and
 # every one of them can travel under both halves.
 #
+# **As of the `cli` feature this is no longer hypothetical.** `rpassword` -- the
+# non-echoing password prompt the binary uses -- and its `rtoolbox` are licensed
+# **Apache-2.0 only**, and measured 2026-09-14 they are the only two crates in this graph
+# that are: `cargo deny --all-features list`, Apache-2.0 set minus MIT set, is exactly
+# {rpassword 7.5.4, rtoolbox 0.0.6}. Everything else here is dual MIT/Apache-2.0 or more
+# permissive. They stay allowed and there is deliberately NO exceptions entry; what the
+# case needed was to be findable, and it is now written down here, in README.md's feature
+# table, and in docs/plans/msoffice-crypto-cli-2026-09-11.md section 1.2 where the choice
+# was made.
+#
+# The narrowing facts, measured rather than assumed: both arrive only under `cli`, which
+# is opt-in and which no library consumer enables -- `cargo tree -e normal
+# --no-default-features --features crypto-ops` contains neither -- and CI's `detection
+# build links no cipher` job fails if either reaches the default graph. A consumer who
+# took the MIT half of this crate's offer and then builds the CLI still has to satisfy
+# Apache-2.0 for those two, which is the sentence that whole paragraph above exists for.
+#
+# `zopfli` is Apache-2.0-only as well and is NOT in scope here: it reaches Cargo.lock
+# through the `zip` DEV-dependency (zip's `deflate` feature), appears in no `cargo tree -e
+# normal` output at all, and `exclude-dev = true` above is why this file never sees it. It
+# is not, as the plan once said, pulled by the office-crypto oracle -- `cargo tree -p
+# office-crypto` does not reach it.
+#
 # Anything absent is denied: under `version = 2` this list is exhaustive, not advisory.
 # The absences that matter, and are deliberate:
 #

@@ -24,6 +24,85 @@ What survives that move is in two places, deliberately:
 
 ## v0.1.0-rc.2 — unreleased
 
+### A command line, behind an opt-in `cli` feature
+
+`msoffice-crypto` is now a binary as well as a library. Three subcommands over the same
+entry points the library already offered:
+
+- `classify FILE [--json]` — container, document, family, the declared algorithm tuple and
+  whether a `dataIntegrity` element is present. It cannot fail: an unencrypted package,
+  sixteen bytes of junk and an unrecognised container all exit 0, because all three are
+  answers, and only an unreadable *file* is an error. `--json` emits one object with the
+  same key set for every input — `key_data` and `password_key` are `null` rather than
+  absent — built as a `serde_json::Value` rather than derived, so a field added to
+  `Classification` later cannot silently vanish from the JSON.
+- `decrypt IN [-o OUT] [--integrity POLICY]` — dispatches on the classification, not the
+  extension, so a `.doc` that is really an OOXML package takes the right route. The
+  97-2003 arm is compiled in only under `legacy-binary`; without it those files exit 9
+  naming the feature to rebuild with, rather than pretending to be unreadable.
+  `--integrity`'s default is rendered from `IntegrityPolicy::default()` rather than typed,
+  because that default has already moved once and a hard-coded help string would have
+  survived the move looking correct. The outcome is printed on stderr after every
+  successful decrypt, including after `--integrity skip`.
+- `encrypt IN [-o OUT] [--format agile|standard]` — agile by default. An input the
+  classifier calls a CFB container is refused at exit 5; the library has no
+  `AlreadyEncrypted` variant, so that guard is the CLI's.
+
+**Passwords never come from `argv`.** There is deliberately no `--password VALUE` flag —
+`argv` is world-readable in a process listing for the lifetime of the run. The four sources
+are `--password-env NAME`, `--password-file PATH`, `--password-stdin` and, with none of
+them, a non-echoing prompt. Exactly one may be given. `--password` is registered hidden so
+that reaching for it produces the reason it does not exist.
+
+**Ten exit codes, not two.** 0-7 carry the sibling crate's meanings; 8 and 9 exist because
+this crate distinguishes facts the sibling's error type does not. 8 is tamper or a policy
+refusal and is not folded into 4 or 6: at a process boundary the number is all a script
+gets, and telling someone their password is wrong when the file was modified is the bug
+`CLAUDE.md` § *Cryptographic Rules* forbids, re-created where it is harder to see.
+`README.md` § *Command line* carries the table.
+
+**The cost, and a licence finding.** The binary is behind `cli`, default off, because a
+library consumer must not pay for an argument parser to ask whether a file is encrypted —
+the same argument `default = []` already makes, one level out. `cli` adds thirteen crates
+over `crypto-ops` on x86_64-pc-windows-msvc (eleven on Linux; two of the thirteen are
+`windows-sys` and `windows-link`, which `rpassword` pulls on Windows alone): `clap` in its
+builder form with no `derive` and no `wrap_help`, `serde_json` with no `serde` derive, and
+`rpassword`. `rpassword` and its `rtoolbox` are licensed **Apache-2.0 only**, and they are
+the only two crates in this graph that are — every other crate here is dual MIT/Apache-2.0
+or more permissive. That matters because this crate is offered as `MIT OR Apache-2.0` and
+the point of the dual offer is that a consumer may take either: one who took the MIT half
+and then builds the binary must still satisfy Apache-2.0 for those two. They stay allowed
+with **no `[[licenses.exceptions]]` entry**, since `Apache-2.0` was already on
+`deny.toml`'s allow list; what changed is that the case is written down where it can be
+found, in `deny.toml` beside the allow list and in `README.md`'s new feature table.
+(`zopfli` is Apache-2.0-only as well, and is not in scope: it reaches `Cargo.lock` through
+the `zip` dev-dependency and appears in no `cargo tree -e normal` output.)
+
+**CI now runs five feature configurations, not three.** `cli` and `cli,legacy-binary`
+joined the clippy and test matrices; until they did, CI had never built or tested the
+binary at all and every figure about it had been measured by hand.
+
+Two guards landed with them, and both were proved by causing the failure rather than by
+being added:
+
+- The `detection build links no cipher` job now also asserts that `clap`, `rpassword`,
+  `rtoolbox` and `serde_json` are absent — the claim that `cli` is opt-in was previously
+  enforced by nothing — and it measures the **default** graph as well as the
+  `--no-default-features` one. That second half is the real finding: the step already
+  carried `--no-default-features`, so putting `cli` into `default` left it passing
+  unchanged, and adding names to the pattern would not have fixed that. With the extra
+  invocation, the same mutation prints the four crates and exits 1. A matching vacuity
+  guard asserts all four are **present** in the `cli` graph, so their absence elsewhere is
+  falsifiable.
+- `packaging-invariants` now asserts `cargo package --locked --list` ships
+  `src/bin/msoffice-crypto.rs`. Dropping it from the `include` allowlist does not fail
+  `cargo package`: it exits 0, adds one more `warning: ignoring binary ...` to the seven
+  `ignoring example/test` warnings a correct package already prints, and ships a tarball
+  whose only symptom is that `cargo install msoffice-crypto --features cli` installs
+  nothing. `cargo package`'s verify build cannot see it either, because the binary is
+  `required-features = ["cli"]` and verify builds default features. That is the same silent
+  shape as the `build.rs` invariant beside it.
+
 ### The four-reader acceptance gate, over a CLI-written artifact
 
 `msoffice-crypto encrypt` writes the container the library writes, so the gate below ran
