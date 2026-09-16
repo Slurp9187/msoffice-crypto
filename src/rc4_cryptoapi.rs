@@ -25,6 +25,14 @@ use sha1::{Digest, Sha1};
 
 /// `AlgID` for RC4 — [MS-OFFCRYPTO] §2.3.2; `0` means "determined by Flags", which with
 /// `fAES` clear is RC4 too.
+/// The 5 bytes of `Hfinal` a 40-bit key takes — [MS-OFFCRYPTO] §2.3.5.2.
+const RC4_DEFAULT_KEY_LEN: usize = 5;
+
+/// …and the 16 bytes it becomes once zero-padded, "creating a 128-bit key" (§2.3.5.2).
+/// The padding is a key-schedule input, not storage: RC4 keyed with 5 bytes and RC4 keyed
+/// with those 5 bytes plus 11 zeros are different ciphers.
+const RC4_PADDED_KEY_LEN: usize = 16;
+
 const ALG_ID_RC4: u32 = 0x0000_6801;
 /// `AlgIDHash` for SHA-1 — §2.3.2; `0` with `fExternal` clear means SHA-1 as well.
 const ALG_ID_HASH_SHA1: u32 = 0x0000_8004;
@@ -288,9 +296,19 @@ impl BlockKeySchedule for CryptoApiKeySchedule {
             hasher.update(block.to_le_bytes());
             let hfinal = hasher.finalize();
             if self.key_bits == RC4_KEY_BITS_DEFAULT {
-                DerivedKey::new_with(|k| {
-                    k.extend_from_slice(&hfinal[..5]);
-                    k.resize(16, 0);
+                // The slot is exactly `RC4_PADDED_KEY_LEN` bytes and every one of them is
+                // zero -- both guaranteed by `Dynamic::new_with` since secure-gate
+                // 0.9.0-rc.12, which is why there is no `reserve_exact` and no trailing
+                // `resize` here any more. The eleven zero bytes past the copy are the
+                // §2.3.5.2 padding, and the guarantee is what lets us rely on them rather
+                // than writing them.
+                //
+                // Do not fill this slot from a `Vec` grown inside this closure: the
+                // reallocation the sized slot exists to prevent would simply move to the
+                // source buffer. `hfinal` is a fixed-size digest, so the copy below is the
+                // only write.
+                DerivedKey::new_with(RC4_PADDED_KEY_LEN, |k| {
+                    k[..RC4_DEFAULT_KEY_LEN].copy_from_slice(&hfinal[..RC4_DEFAULT_KEY_LEN]);
                 })
             } else {
                 let len = usize::try_from(self.key_bits / 8)

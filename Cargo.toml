@@ -188,8 +188,24 @@ sha1 = { version = "0.10", optional = true }
 # of SHA-1/256/384/512 are wired even though every fixture in the corpus is SHA-512.
 hmac = { version = "0.12", optional = true }
 
-aes = { version = "0.8", optional = true }
-cbc = { version = "0.1", optional = true, features = ["block-padding"] }
+# `zeroize` on both, for the reason it is on `rc4` below: the AES key schedule is the
+# round keys expanded from the session key, and the CBC state carries a block of
+# key-dependent material. Neither is reachable from this crate -- they live inside the
+# cipher objects -- so a wrapper here cannot cover them and only the upstream feature can.
+# `aes` declares `zeroize` as an optional dependency rather than in `[features]`, so the
+# feature is implicit; it implements `ZeroizeOnDrop` on the round keys in all three
+# backends (`soft.rs`, `ni.rs`, `armv8.rs`), which is what makes it worth turning on
+# wherever this actually runs. `ecb` has no such feature to enable -- checked, not assumed.
+#
+# This adds no crate to any graph: `zeroize` is already a `crypto-ops` node through
+# secure-gate, so both lines switch on code in crates that are already there.
+#
+# It was missing here while `rc4` had it since the legacy work, which is the more
+# interesting half: the hazard was identified, given a CI packaging invariant, and applied
+# to the cipher in `legacy-binary` while the cipher in the default `crypto-ops` build went
+# without. Found by auditing what crosses a `with_secret` boundary, not by reading this file.
+aes = { version = "0.8", optional = true, features = ["zeroize"] }
+cbc = { version = "0.1", optional = true, features = ["block-padding", "zeroize"] }
 ecb = { version = "0.1", optional = true }
 base64 = { version = "0.22", optional = true }
 
@@ -226,13 +242,43 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 # msoffcrypto-tool and herumi/msoffice all hold key bytes in bare containers),
 # and it is the reason this crate exists rather than a dependency on one of them.
 #
-# "rand" is NOT enabled yet: nothing in a decrypt-only crate generates
-# randomness. It gets switched on with the encrypt path (plan slice S5), where
-# Fixed::from_random() supplies salts and IVs in production and
-# Fixed::from_rng(&mut seeded) makes the same code deterministic under test --
-# which is what allows byte-exact golden output rather than round-trip-only
-# tests. Version tracks odf-crypto rather than the consumer's =0.8.0-rc.10 pin; see the
+# "rand" IS enabled, through `crypto-ops` below. It arrived with the encrypt path, where
+# `Dynamic::from_rng(len, &mut rng)` draws the session key (agile_encrypt.rs), the standard
+# verifier (standard_encrypt.rs) and the dataIntegrity HMAC key (integrity.rs) straight into
+# the wrapper's own storage, so the secret never exists outside it. Passing the RNG in rather
+# than reaching for a global is what makes the same code deterministic under a seeded
+# generator, and that is what allows byte-exact golden output rather than round-trip-only
+# tests.
+#
+# Salts and IVs are NOT drawn this way and are NOT wrapped: they are written into
+# EncryptionInfo in the clear, so wrapping them would be theatre. (An earlier version of this
+# comment claimed `Fixed::from_random()` supplied them. It never did -- every `from_rng` call
+# in this crate is on `Dynamic`, and `Fixed` is used at exactly one site, the XOR obfuscation
+# array.) Version tracks odf-crypto rather than the consumer's =0.8.0-rc.10 pin; see the
 # README's compatibility note.
+#
+# Pinned with `=`, not a caret, and that is load-bearing on this dependency. A caret
+# requirement carrying a pre-release tag matches later pre-releases of the same version, so
+# the previous `"0.9.0-rc.7"` already resolved to rc.10 -- and rc.10 deleted the four
+# `*_alias!` macros `src/sensitive.rs` was built on. A bare `cargo update` would have broken
+# the build with no warning; only `--locked` discipline was holding it. Upstream's README
+# recommends the pin for exactly this reason.
+#
+# The pin proved itself within minutes of being added: with `=0.9.0-rc.10` written here,
+# `cargo update --precise 0.9.0-rc.11` refused -- "candidate versions found which didn't
+# match: 0.9.0-rc.11" -- so moving the line is a deliberate edit, which is the whole point.
+# rc.12 is what is pinned now, and it is the one release in this span that changed something
+# this crate calls. `Dynamic::new_with` went from handing the closure an empty growable `Vec`
+# to handing it a pre-zeroed `&mut [u8]` of exactly `len`, which makes the heap-residue defect
+# fixed two commits earlier in this branch impossible to express rather than merely fixed --
+# see `src/rc4_cryptoapi.rs`. The all-zero slot is a documented guarantee, not an
+# implementation detail, and this crate's 40-bit RC4 key is the case it was made a guarantee
+# for: those eleven trailing zeros are key-schedule input, so a slot that merely happened to
+# be zeroed would produce a different cipher the day it was not.
+#
+# `Fixed::new_with` is unchanged at one argument -- checked against the published source
+# rather than assumed, because `src/xor_obfuscation.rs` is its only caller here and
+# `legacy-binary` is the only configuration that compiles it.
 #
 # When it goes on, the seeded RNG is a `chacha20` dev-dependency and NOT
 # `rand_chacha`. from_rng's `TryRng + TryCryptoRng` bounds come from rand_core
@@ -270,7 +316,7 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 #
 # This is not a dependency-count argument. In the build that has key material, secure-gate
 # and its `zeroize` come along regardless -- that is what they are for.
-secure-gate = { version = "0.9.0-rc.7", optional = true, default-features = false, features = [
+secure-gate = { version = "=0.9.0-rc.12", optional = true, default-features = false, features = [
     "alloc",
 ] }
 

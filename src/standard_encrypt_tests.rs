@@ -440,20 +440,42 @@ fn a_package_over_the_ceiling_is_refused_before_any_work() {
     );
 }
 
-/// Writes the artifact the external readers are run against — real Word over COM and
-/// `msoffcrypto-tool` — and prints where. `cargo test` cannot drive those; their verdicts
-/// are recorded in `CHANGELOG.md` against this exact file. Reproduce with
-/// `tools/word_com_check.ps1 -Path <this path>`.
+/// Writes the artifact the external readers are run against — real Word over COM,
+/// LibreOffice over UNO, `msoffcrypto-tool` and `office-crypto` — and prints where.
+/// `cargo test` cannot drive the first two; `tools/acceptance_gate.py` drives all four
+/// and their verdicts are recorded in `CHANGELOG.md` against this exact file.
+///
+/// The directory is `MSOFFICE_CRYPTO_ARTIFACT_DIR` when set, else the system temp
+/// directory — the same rule as the agile artifact, and for the same reason. **This test
+/// honoured neither until the secure-gate rc.12 work**: it hardcoded the system temp
+/// directory, so the one artifact whose writer was being changed was the one a
+/// concurrent session could substitute. The mitigation was built for #8, documented on
+/// the agile test, and applied to one of the two files.
+///
+/// The SHA-256 below is the one the gate prints on its first line: if they differ, the
+/// gate did not read this run's file. That check is why the evidence in `CHANGELOG.md`
+/// is recorded against a digest rather than a path, and this test could not support it
+/// before, because it printed no digest at all.
 #[test]
 fn encrypt_ooxml_standard_writes_the_artifact_the_external_readers_are_run_on() {
-    let path = std::env::temp_dir().join("msoffice_crypto_encrypt_ooxml_standard.docx");
+    let dir = std::env::var_os("MSOFFICE_CRYPTO_ARTIFACT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let path = dir.join("msoffice_crypto_encrypt_ooxml_standard.docx");
     std::fs::write(
         &path,
         crate::encrypt_ooxml_standard(&plain_docx(), PASSWORD).unwrap(),
     )
     .unwrap();
+    // Digested from the file rather than from the buffer that was written, so the number
+    // below describes the bytes the gate will actually hash. A digest of the in-memory
+    // value would agree with the gate in every case except the one worth catching -- a
+    // short or transformed write -- and would claim to have verified it.
+    let written = std::fs::read(&path).unwrap();
+    let digest = hex(&crate::hash::HashAlgorithm::Sha256.digest(&written));
     println!(
-        "encrypt_ooxml_standard artifact written to {}",
-        path.display()
+        "encrypt_ooxml_standard artifact written to {} ({} bytes, SHA-256 {digest})",
+        path.display(),
+        written.len()
     );
 }

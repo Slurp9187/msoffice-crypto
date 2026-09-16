@@ -1,0 +1,74 @@
+# CodeQL, advanced setup.
+#
+# This replaces the repository's *default setup*, which ran from 2026-09-11 to 2026-09-15.
+# The switch is not a preference: default setup accepts no configuration file, and the only
+# fix for 236 standing false positives was a path filter. See
+# `.github/codeql/codeql-config.yml` for what is filtered and why.
+#
+# **Coverage is deliberately identical to the default setup it replaces**, so the switch
+# cannot quietly narrow what is scanned. Default setup reported:
+#
+#     languages: [actions, python, rust]   query_suite: default
+#     threat_model: remote                 schedule: weekly
+#
+# and every one of those is reproduced below. If a language is ever dropped from the matrix,
+# say so in the commit -- it is the kind of change that looks like cleanup and is not.
+#
+# Default setup must be disabled for this workflow to run; the two conflict, and with both
+# enabled this one fails rather than falling back.
+
+name: "CodeQL"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, matching the default setup's cadence. Arbitrary day and hour, chosen off the
+    # hour because GitHub's scheduler is busiest exactly on it.
+    - cron: "37 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: rust
+            build-mode: none
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@977e6ceaea7361825998245d787fa3b4d6b9e5df # codeql-bundle-v2.27.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+          # `security-extended` is NOT set: default setup ran the `default` suite, and
+          # widening the suite in the same change that adds a path filter would make the
+          # alert delta impossible to attribute.
+          queries: ""
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@977e6ceaea7361825998245d787fa3b4d6b9e5df # codeql-bundle-v2.27.0
+        with:
+          category: "/language:${{ matrix.language }}"
