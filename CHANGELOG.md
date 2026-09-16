@@ -22,7 +22,7 @@ What survives that move is in two places, deliberately:
 
 ---
 
-## v0.1.0-rc.2 — unreleased
+## v0.1.0-rc.2 — 2026-09-15
 
 ### A command line, behind an opt-in `cli` feature
 

@@ -197,7 +197,13 @@ def main():
     cargo = read(ROOT / "Cargo.toml")
     msrv = re.search(r'^rust-version = "([^"]+)"', cargo, re.M).group(1)
     pkg = re.search(r'^version = "([^"]+)"', cargo, re.M).group(1)
-    for name in LIVE_DOCS:
+    # `src/lib.rs` is checked here but is not a LIVE_DOCS member: that list also feeds
+    # ALL_DOCS, whose link and citation checks expect Markdown. The crate-level docs carry
+    # the same two `msoffice-crypto = { version = "..." }` snippets README.md does, they are
+    # what renders on docs.rs, and they are what a reader copies. They drifted to rc.1 while
+    # README was bumped to rc.2 -- invisible to this check until the version literal was
+    # looked for by hand while cutting the tag.
+    for name in LIVE_DOCS + ["src/lib.rs"]:
         p = ROOT / name
         if not p.exists():
             continue
