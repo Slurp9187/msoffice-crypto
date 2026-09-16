@@ -1,0 +1,58 @@
+# CodeQL configuration.
+#
+# This repository ran CodeQL *default setup* until 2026-09-15. Default setup cannot take a
+# configuration file, which is the only reason this one exists: there was no way to tell it
+# that this crate's test code is test code.
+#
+# The problem it solves. `rust/hard-coded-cryptographic-value` had **236 open alerts**, all
+# critical, and every one examined was noise. Two independent reasons, and neither is
+# fixable by editing the code:
+#
+#   1. This crate proves its cryptography with known-answer tests. Vectors pinned against
+#      [MS-OFFCRYPTO] and against `msoffcrypto-tool` are hard-coded keys, salts and
+#      passwords by definition -- that is what a known-answer test is. `CLAUDE.md` requires
+#      them: "Generate fixtures, don't copy them" and "Use the differential oracles."
+#   2. The production code hard-codes cryptographic constants **by mandate**. `CLAUDE.md`:
+#      "Do not invent format constants. Every magic byte, block key and salt derivation is
+#      in the spec or in a permissive reference." Block keys, the 0x36/0x5C pads and the XOR
+#      PadArray are published in a Microsoft Open Specification. They are not secrets.
+#
+# So the rule can never go clean here, and 236 standing alerts is worse than none: a list
+# that large is never read, and the one alert that meant something would arrive into a
+# graveyard. That is the actual risk being managed, not the tidiness.
+#
+# What this does NOT do. It does not disable the rule. Production code under `src/` is still
+# analysed by it, and by every other rule, exactly as before. Only files that are *entirely*
+# test code are excluded, and only from analysis -- nothing is dismissed, so a genuine
+# finding in production code still surfaces and still has to be judged on its merits.
+#
+# Sampling note, because the number matters: 100 of the 236 were classified by hand before
+# this file was written. 94 were in test code. The remaining 6 were in production files and
+# every one was the rule misfiring -- a key *derived* from a hash, the literal `16` inside a
+# salt-size error message, a doc comment, and three zero-initialised buffers, two of which
+# are filled from the CSPRNG on the following line. The other 136 were not individually
+# reviewed. If any of them is in production code it stays visible after this change, which
+# is the point of filtering by path rather than excluding the query.
+
+name: "msoffice-crypto CodeQL config"
+
+paths-ignore:
+  # Rust unit tests that live beside the module they exercise, included with
+  # `#[cfg(test)] #[path = "..."] mod tests;`. Test-only in every build.
+  - src/agile_encrypt_tests.rs
+  - src/classify_tests.rs
+  - src/dataspaces_tests.rs
+  - src/encryption_info_tests.rs
+  - src/segments_tests.rs
+  - src/standard_encrypt_tests.rs
+  - src/bin/msoffice-crypto_tests.rs
+
+  # The hostile-input suites. These carry no `#[cfg(test)]` marker *inside* the file --
+  # the gate is on the `mod` declaration in `src/lib.rs:248` and `:253`
+  # (`#[cfg(all(test, feature = "crypto-ops"))]` and `... "legacy-binary"`), so a reader
+  # inspecting the file alone would wrongly conclude it ships. It does not.
+  - src/malformed_input.rs
+  - src/legacy_malformed.rs
+
+  # Integration tests, run as separate crates against the public API.
+  - tests/
