@@ -462,12 +462,20 @@ fn encrypt_ooxml_standard_writes_the_artifact_the_external_readers_are_run_on() 
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     let path = dir.join("msoffice_crypto_encrypt_ooxml_standard.docx");
-    let artifact = crate::encrypt_ooxml_standard(&plain_docx(), PASSWORD).unwrap();
-    let digest = hex(&crate::hash::HashAlgorithm::Sha256.digest(&artifact));
-    std::fs::write(&path, &artifact).unwrap();
+    std::fs::write(
+        &path,
+        crate::encrypt_ooxml_standard(&plain_docx(), PASSWORD).unwrap(),
+    )
+    .unwrap();
+    // Digested from the file rather than from the buffer that was written, so the number
+    // below describes the bytes the gate will actually hash. A digest of the in-memory
+    // value would agree with the gate in every case except the one worth catching -- a
+    // short or transformed write -- and would claim to have verified it.
+    let written = std::fs::read(&path).unwrap();
+    let digest = hex(&crate::hash::HashAlgorithm::Sha256.digest(&written));
     println!(
         "encrypt_ooxml_standard artifact written to {} ({} bytes, SHA-256 {digest})",
         path.display(),
-        artifact.len()
+        written.len()
     );
 }

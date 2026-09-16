@@ -524,12 +524,19 @@ fn encrypt_ooxml_writes_the_artifact_the_external_readers_are_run_on() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     let path = dir.join("msoffice_crypto_encrypt_ooxml.docx");
-    let artifact = crate::encrypt_ooxml(&plain_docx(), PASSWORD).unwrap();
-    let digest = hex(&crate::hash::HashAlgorithm::Sha256.digest(&artifact));
-    std::fs::write(&path, &artifact).unwrap();
+    std::fs::write(
+        &path,
+        crate::encrypt_ooxml(&plain_docx(), PASSWORD).unwrap(),
+    )
+    .unwrap();
+    // Digested from the file rather than from the buffer that was written -- see the note
+    // on the standard sibling. Both writers say this the same way on purpose; the last
+    // time these two drifted, the one without the mitigation was the one that changed.
+    let written = std::fs::read(&path).unwrap();
+    let digest = hex(&crate::hash::HashAlgorithm::Sha256.digest(&written));
     println!(
         "encrypt_ooxml artifact written to {} ({} bytes, SHA-256 {digest})",
         path.display(),
-        artifact.len()
+        written.len()
     );
 }
