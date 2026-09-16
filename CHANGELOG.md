@@ -167,6 +167,122 @@ decrypted*, not that anything was authenticated, and the gate's wording does not
 distinguish the two. The only HMAC claim in this entry is the agile block's, and
 `--corrupt-integrity` above is what makes that one non-vacuous.
 
+### A stale copy of the RC4 key is no longer abandoned on the heap
+
+The 40-bit RC4 CryptoAPI key is built inside its wrapper, five bytes of `Hfinal` zero-padded
+to sixteen ([MS-OFFCRYPTO] §2.3.5.2). It was built by growing an empty buffer —
+`extend_from_slice` then `resize` — and `secure-gate`'s `Dynamic::new_with` hands the closure
+an empty buffer to *grow*, not a sized slot. Either call can reallocate, and a `Vec` realloc
+frees the old block **without wiping it**, leaving a copy of the key on the heap that nothing
+will ever zeroize.
+
+Nothing about that is visible from outside: the wrapper still zeroized what it ended up
+holding, so the key was protected and a stale copy of it was not. One `reserve_exact` made
+the first allocation the only one — that was the fix as it landed, and it is deliberately
+not what the tree holds now; see the next paragraph. No behaviour changed — the digests
+`tests/legacy_binary_fixtures.rs` pins against `msoffcrypto-tool` are unmoved, which is what
+shows the key schedule still produces the same bytes.
+
+Found while upgrading `secure-gate`, from its maintainers' guidance on growing a
+`Dynamic<Vec<u8>>` in place, and it is the kind of defect that has no symptom to notice.
+
+**And then it stopped being possible to write.** Reporting the defect upstream produced an
+API change rather than a documentation note: as of `secure-gate` 0.9.0-rc.12,
+`Dynamic::new_with` takes a length and hands the closure a pre-zeroed `&mut [u8]` of exactly
+that size, so there is no growable buffer to reallocate. The fix above becomes a single
+`copy_from_slice` with no `reserve_exact` and no trailing `resize` — the discipline is now
+the type's, not this crate's.
+
+The all-zero slot is a **documented guarantee** rather than an implementation detail, and
+this crate's key is the case it was made one for: the eleven trailing zeros of the 40-bit RC4
+key are key-schedule input under \[MS-OFFCRYPTO\] §2.3.5.2, so a slot that merely happened to
+be zeroed would have produced a different cipher the day it was not — silently, and as a
+wrong key rather than an error.
+
+### The same defect, found a second time, in the standard writer
+
+`standard_encrypt::generate` built `SHA1(verifier)` by `to_vec()` on the 20-byte digest and
+`resize` to the 32-byte blob. `to_vec` allocates exactly 20; 32 does not fit, so it
+reallocated and freed the block holding the digest **unwiped**. Measured rather than
+inferred — the pointer moves and capacity goes 20 → 40:
+
+```
+before resize: ptr=0x2d5556d0600 len=20 cap=20
+after  resize: ptr=0x2d5556ce670 len=32 cap=40
+```
+
+Unlike the RC4 one this is in the **default `crypto-ops` build**, not `legacy-binary`, and
+it is older than the upgrade that found it.
+
+It also carried a second defect the first site did not. The digest left the `with_secret`
+closure as a bare `Vec` and was wrapped only by the constructor on the outer line — so the
+value **is** wrapped, and an audit asking "is this wrapped?" gets a yes. The gap is *where*,
+and it is invisible at a glance. Size is no guide either: at 20 bytes any "check the large
+buffers first" instinct ranks it last. Both are gone in one move, for the same reason —
+`VerifierPlaintext::new_with(32, |slot| slot[..20].copy_from_slice(&Sha1::digest(v)))`
+allocates once at the final size and never exists outside the closure.
+
+A `const _: () = assert!(SHA1_LEN <= ENCRYPTED_VERIFIER_HASH_LEN)` now sits beside the
+existing `VERIFIER_HASH_SIZE == SHA1_LEN` check, so the slice index is a build failure
+rather than a panic if either constant ever moves.
+
+No behaviour changed: the seeded-RNG goldens — `the_material_is_byte_exact_under_a_seeded_rng`
+and `the_whole_container_is_byte_exact_under_a_seeded_rng` — are unmoved, which is what shows
+the written bytes are identical.
+
+### `aes` and `cbc` now zeroize, as `rc4` already did
+
+The AES key schedule is the round keys expanded from the session key, and the CBC state
+carries a block of key-dependent material. Both live inside the cipher objects where no
+wrapper in this crate can reach them; only the upstream feature can, and it was off.
+
+`rc4` has carried `features = ["zeroize"]` since the legacy-binary work, with a CI packaging
+invariant to keep it. So the hazard was identified, guarded against regression, and applied
+to the cipher in `legacy-binary` — while the cipher in the default build went without. That
+asymmetry is the finding; the fix is two words.
+
+`aes` declares `zeroize` as an optional dependency rather than in `[features]`, so the
+feature is implicit, and it implements `ZeroizeOnDrop` on the round keys in all three
+backends (`soft.rs`, `ni.rs`, `armv8.rs`). `ecb` has no such feature — checked. **No crate
+enters any graph**: `zeroize` is already a `crypto-ops` node through secure-gate, so the
+lockfile change is one line adding it as an edge of `aes`, and the set of crates is
+byte-identical before and after.
+
+`hmac` 0.12.1 is the one that cannot be fixed here: no `Drop`, no zeroize, and its only two
+features are `reset` and `std`. Its opad/ipad state is derived from `IntegrityKey` and
+nothing wipes it — MAC-forgery capability under that key rather than key recovery. Recorded
+in the secure-gate skill's residual list, which had the hasher class written down and had
+never carried the HMAC one across.
+
+### `secure-gate` moves to 0.9.0-rc.12, and is pinned
+
+Two of the breaking changes across this span reach this crate. One is the `Dynamic::new_with`
+signature described above, and it is the reason the upgrade went to rc.12 rather than stopping
+at rc.11. The other is below.
+
+Of the nineteen breaking changes between rc.7 and rc.11, fourteen are in an encoding and serde
+surface this crate does not compile, and four of the remaining five do not reach it. The fifth
+would not have announced itself: `into_inner()` now returns the plain value and protection ends
+at that call, where it used to return a wrapper that kept wiping — so an untyped binding keeps
+compiling and quietly stops zeroizing. Verified absent here; every `into_inner` in `src/` is
+`std::io::Cursor` or `cfb::CompoundFile`.
+
+The one that reached us there was mechanical. rc.10 deleted the `*_alias!` macros, which only
+ever expanded to `type` aliases, so `src/sensitive.rs` becomes seven `type` lines and not one
+call site moves — across roughly forty-six `with_secret` closures, six `ct_eq` comparisons
+and three `from_rng` draws.
+
+The requirement is now pinned with `=`. A caret carrying a pre-release tag matches later
+pre-releases of the same version, so the previous `"0.9.0-rc.7"` already resolved to rc.10 —
+a bare `cargo update` would have deleted those macros with no warning, and only `--locked`
+discipline was holding it.
+
+Measured rather than assumed: `zeroize` drops from `alloc,zeroize_derive` to `alloc`,
+`zeroize_derive` leaves the graph, and a duplicate `syn v2.0.119` leaves with it. `syn v3.0.5`
+stays, via this crate's own `thiserror` — the proc-macro chain does not leave, only that one
+crate does. The detection build still links no `secure-gate` at all, and all five feature
+configurations hold their test counts exactly, seeded encrypt goldens included.
+
 ## v0.1.0-rc.1 — 2026-09-11
 
 First public version. Detection, decryption and encryption of the formats [MS-OFFCRYPTO]

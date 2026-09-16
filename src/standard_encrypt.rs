@@ -139,6 +139,11 @@ const _: () = assert!(VERIFIER_HASH_SIZE as usize == SHA1_LEN);
 
 /// `EncryptedVerifierHash` — the 20-byte digest padded to 32 for AES, §2.3.3.
 pub(crate) const ENCRYPTED_VERIFIER_HASH_LEN: usize = 32;
+/// `generate` writes the digest into the first `SHA1_LEN` bytes of a slot this long, so a
+/// digest that outgrew the blob would be a slice panic rather than a refusal. It cannot
+/// for SHA-1, but "cannot" is an argument and this is a check: if either constant ever
+/// moves — a hash generalisation, a format variant — this fails the build instead.
+const _: () = assert!(SHA1_LEN <= ENCRYPTED_VERIFIER_HASH_LEN);
 
 /// The AES block size — the multiple the package tail is padded to.
 const AES_BLOCK_LEN: usize = 16;
@@ -195,11 +200,24 @@ pub(crate) fn generate<R: TryRng + TryCryptoRng>(
     // SHA1(verifier), zero-padded to the 32-byte AES blob. Zeros, not 0x36: Word compares
     // the whole decrypted blob (GH #13), and LibreOffice's standard writer pads the same
     // way (`Standard2007Engine.cxx:60`, behaviour only).
-    let verifier_hash = VerifierPlaintext::new(verifier.with_secret(|v| {
-        let mut digest = Sha1::digest(v).to_vec();
-        digest.resize(ENCRYPTED_VERIFIER_HASH_LEN, 0);
-        digest
-    }));
+    //
+    // The wrapping happens INSIDE the closure, and that placement is the point: built the
+    // obvious way -- `VerifierPlaintext::new(with_secret(|v| Sha1::digest(v).to_vec()))` --
+    // the digest is an unprotected `Vec` from the moment it is computed until the outer
+    // constructor closes over it. The value is wrapped, so an audit asking "is this
+    // wrapped?" sees a yes; the gap is *where*. Worse, `to_vec()` allocated exactly 20
+    // bytes and `resize` to 32 could not fit, so it reallocated and freed the block
+    // holding SHA1(verifier) without wiping it -- the same defect `rc4_cryptoapi.rs`
+    // carried, measured here at 20 abandoned bytes.
+    //
+    // `new_with` closes both: one allocation at the final size, so nothing is abandoned,
+    // and the tail is zero by secure-gate's guarantee rather than by a `resize` that
+    // reallocates to write it.
+    let verifier_hash = verifier.with_secret(|v| {
+        VerifierPlaintext::new_with(ENCRYPTED_VERIFIER_HASH_LEN, |slot| {
+            slot[..SHA1_LEN].copy_from_slice(&Sha1::digest(v));
+        })
+    });
     let encrypted_verifier_hash =
         verifier_hash.with_secret(|h| key.with_secret(|k| aes128_ecb_encrypt(k, h)))?;
 

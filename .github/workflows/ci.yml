@@ -429,10 +429,17 @@ jobs:
     #    tarball ignores them too (the corpus is not shipped). Correct operation and total
     #    absence are indistinguishable from outside. Verified by mutation, 2026-09-10.
     #
-    # 2. `rc4` must keep its `zeroize` feature. It wipes the 256-byte key schedule on drop,
-    #    and the schedule is a function of the block key -- so losing it leaves key material
-    #    behind. Deleting the feature leaves the entire suite green: the property has no
-    #    test, and cannot easily have one, since it is about memory after a drop.
+    # 2. `aes`, `cbc` and `rc4` must keep their `zeroize` features. Each wipes cipher state
+    #    that is a function of a key -- rc4's 256-byte schedule, aes's expanded round keys,
+    #    cbc's chaining block -- so losing one leaves key material behind. Deleting any of
+    #    them leaves the entire suite green: the property has no test, and cannot easily
+    #    have one, since it is about memory after a drop.
+    #
+    #    `rc4` was guarded here from the legacy-binary work; `aes` and `cbc` were not, and
+    #    had never had the feature at all until the secure-gate rc.12 audit. A guard that
+    #    covers one of three instances of a hazard is how the other two stay missing, so
+    #    this step checks all three rather than growing a second copy of itself later.
+    #    `legacy-binary` is a superset of `crypto-ops`, so one feature tree sees all three.
     #
     # 3. `src/bin/msoffice-crypto.rs` must be in the packaged files. Same silent shape as
     #    (1): with the binary excluded, `cargo package --locked` still EXITS 0. It adds one
@@ -459,15 +466,21 @@ jobs:
             exit 1
           fi
           echo "build.rs ships"
-      - name: rc4 keeps its zeroize feature
+      - name: the cipher crates keep their zeroize features
         run: |
           cargo tree --locked -e features --no-default-features --features legacy-binary > feats.txt
-          if ! grep -q 'rc4 feature "zeroize"' feats.txt; then
-            echo "::error::the rc4 dependency has lost its zeroize feature; the key schedule"
-            echo "is a function of the block key, so it would survive the drop in memory."
+          missing=
+          for c in aes cbc rc4; do
+            grep -q "$c feature \"zeroize\"" feats.txt || missing="$missing $c"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::these cipher dependencies have lost their zeroize feature:$missing"
+            echo "Each wipes cipher state derived from a key -- rc4's 256-byte schedule,"
+            echo "aes's expanded round keys, cbc's chaining block. Without it that state"
+            echo "survives the drop in memory, and no test in this suite can see it."
             exit 1
           fi
-          echo "rc4/zeroize enabled"
+          echo "aes/cbc/rc4 zeroize enabled"
       - name: the CLI ships in the package
         run: |
           cargo package --locked --list > files.txt
