@@ -24,6 +24,13 @@ What survives that move is in two places, deliberately:
 
 ## v0.1.0-rc.2 — 2026-09-15
 
+**This is the first release published to crates.io.** `v0.1.0-rc.1` exists as a git tag and
+as the section below, and was never published — the CLI and the pre-publish security work
+were wanted first, so the line above it is the one that ships. A reader comparing this
+changelog against crates.io will find no `0.1.0-rc.1` there, and that is the reason. The
+section below calls itself "First public version"; read that as the first tagged tree, not
+the first thing anyone could `cargo add`.
+
 ### A command line, behind an opt-in `cli` feature
 
 `msoffice-crypto` is now a binary as well as a library. Three subcommands over the same
