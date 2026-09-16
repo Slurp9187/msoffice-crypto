@@ -158,10 +158,81 @@ Three shapes worth naming:
   `aes128_ecb_decrypt` are called *from inside* `with_secret`; Rust's auto-deref coerces
   the `&Vec<u8>` closure parameter, so none of them needed a signature change.
 
+## What a `with_secret` closure may return
+
+**Every `with_secret` closure returns either a non-secret — a `bool`, a length, ciphertext
+— or a secret that already zeroizes on drop.** Anything else is the defect, whatever the
+wrapper and whatever syntax carried the bytes out. Wrap *inside* the closure:
+
+```rust
+// wrong -- SHA1(verifier) is an unprotected Vec until the outer constructor closes over it
+VerifierPlaintext::new(verifier.with_secret(|v| Sha1::digest(v).to_vec()))
+
+// right -- never exists unwrapped
+verifier.with_secret(|v| VerifierPlaintext::new_with(LEN, |slot| { /* ... */ }))
+```
+
+**That wrong form was in this crate**, at `standard_encrypt.rs`, until the rc.12 work. It
+is the case that shows why the question is *where* rather than *whether*: the value **is**
+wrapped, `VerifierPlaintext::new(...)` sits right there on the line, so an audit asking
+"is this wrapped?" gets a yes and moves on. The escape lives in the gap between where the
+copy is made and where the wrapper closes over it. Size is no guide either — it was 20
+bytes, so any "check the big buffers first" heuristic ranks it last.
+
+It also stacked a second defect underneath: `to_vec()` allocated exactly 20 bytes and
+`resize(32)` could not fit, so it reallocated and abandoned the block holding
+`SHA1(verifier)` unwiped — the realloc hazard from the section below, co-occurring with
+this one, killed by the same `new_with`. **Expect them together**: a closure that builds a
+secret by growing a buffer usually also hands it out unwrapped.
+
+Three syntaxes reach it: `*p`, the pattern binding `|&p|`, and **any `self`-taking method
+returning an owned value** — `.to_vec()`, `.clone()`, `.to_owned()`, `.to_string()`,
+`.into()`, `collect()`, `try_from(p.as_slice())`. That list is unbounded and the last is
+not even a method on the secret, so **do not treat it as a checklist**.
+
+The first two need `T: Copy`, so they can only occur on a `Fixed<T: Copy>`; on a `Dynamic`
+they are `E0507`. **The third occurs on everything.** So the borrow checker removes two
+syntaxes from what you read for — it does not remove the reading, and **no alias is
+exempt.** Do not reason from the `FixedStorage` impl list either: it holds leaking members
+(`Option<T>`, tuples, `Wrapping<T>`, `MaybeUninit<T>`) and immune ones (`Zeroizing<T>`,
+`Fixed<T>`, whose `Drop` makes `Copy` an `E0184`) side by side, so membership predicts
+nothing. `Copy` is the discriminator; enumerate nothing.
+
+"Already zeroizes on drop" is deliberately not "is a secure-gate type". A cipher object
+whose crate has its `zeroize` feature on is fine as-is, and wrapping one in a `Fixed` would
+be worse than leaving it. But that property is a feature flag in another crate's manifest,
+invisible at the call site — see the `aes`/`cbc`/`rc4` note in `Cargo.toml`, and the `hmac`
+entry below for what happens when the feature does not exist.
+
+**No lint catches any of this.** Not "none found": `clippy::all`, `pedantic`, `nursery` and
+`restriction` pointed at code leaking a key return only cosmetic diagnostics, and rustc is
+silent under `-D warnings`. Detection is reading the closures.
+
+A grep decides *what to read*; it never decides what is clean. An over-broad window that
+flags thirteen sites and needs one read each is the useful kind — the rc.12 sweep ran
+exactly that and 12 of 13 were false positives, which is the point rather than a flaw. A
+pattern precise enough to be trusted is a pattern that gets trusted.
+
+**Record coverage, not a verdict.** Say which spellings were searched and how many closure
+bodies were read. "Audited, clean" cannot be corrected by someone who later learns a new
+form; "checked these four spellings, read 15 of 60 bodies" tells the next person exactly
+where to look. That note is why the second sweep found `standard_encrypt.rs` at all.
+
 ## Residual the wrapper cannot reach — know it, don't chase it
 
 - The `Sha512`/`Sha1` hashers buffer the raw password bytes internally until `finalize`,
   and are dropped unzeroized. `sha1`/`sha2` at 0.10 expose no `zeroize` feature.
+- **`HmacSha*` holds its opad/ipad state, derived from `IntegrityKey`, and nothing wipes
+  it.** `hmac` 0.12.1 has no `Drop` impl, no zeroize, and only two features — `reset` and
+  `std` — so unlike `aes`, `cbc` and `rc4` there is no flag to turn on. The exposure is
+  MAC-forgery capability under that key rather than key recovery, since the state is a hash
+  of key-derived material. It moves only on a dependency bump.
+
+  **This entry was missing until the rc.12 audit**, and the way it was missing is the
+  lesson: the hasher class directly above it was known, written down, and then not carried
+  across to the HMAC path in the same crate. A residual list is only as good as the sweep
+  that populates it, so re-derive it from the dependency manifests rather than trusting
+  that it is complete.
 - `sha2::compress512` spills its message schedule on the stack, and `W[0..16]` of that
   schedule *is* the message block verbatim.
 - **The spin loop is the loud one here and is specific to this format.** `spin_hash` runs
@@ -222,12 +293,23 @@ parameters beside them. They are drawn from the same injected CSPRNG via
 ## Adding a new alias
 
 1. **Is its length fixed by your own design, or by input you don't control?** By design →
-   `fixed_alias!`. By input (a `keyBits` attribute, a hash algorithm named in the file) →
-   `dynamic_alias!`, matching the four already there.
+   `Fixed<[u8; N]>`. By input (a `keyBits` attribute, a hash algorithm named in the file) →
+   `Dynamic<Vec<u8>>`, matching the six already there.
+
+   These are plain `type` aliases. **The `fixed_alias!` / `dynamic_alias!` macros this step
+   named until the rc.12 work no longer exist** — secure-gate 0.9.0-rc.10 deleted them, and
+   since they only ever expanded to `type` aliases the migration moved no call site. Do not
+   reach for `fixed_newtype!` / `dynamic_newtype!` as replacements: those build real
+   newtypes with a narrower API, which is a different decision from what this step is
+   asking. See the note at the end of this section on what aliases do and do not buy.
 2. Declare it `pub(crate)` in `sensitive.rs` beside its peers, with a doc string saying
    what it is and — for a `Dynamic` — why not `Fixed`.
-3. Wrap at the point of creation, in the function that produces the value.
-4. Check whether it needs to leave the crate on a public signature. Per "Scope" that is
+3. Wrap at the point of creation, in the function that produces the value. If the value is
+   built rather than moved in whole, build it with `new_with(len, |slot| ...)` — see "What
+   a `with_secret` closure may return".
+4. **If it is a `Fixed<T>` where `T: Copy`, it joins that section's audit.** Today
+   `XorObfuscationArray` is the only one.
+5. Check whether it needs to leave the crate on a public signature. Per "Scope" that is
    unlikely before S1 — but if it does, decide it explicitly and record it here.
 
 **S2 (dataIntegrity) landed and this section was wrong about it in two ways**, both worth
@@ -246,10 +328,24 @@ keeping as a record of how the reasoning failed:
 
 One factual correction while here: this section claims separating `SessionKey` from
 `DerivedKey` "makes it hard to pass one where the other belongs". It does not.
-secure-gate's `macros/mod.rs:7-12` is explicit that these are plain `type` aliases, not
-newtypes — two aliases over `Dynamic<Vec<u8>>` are the *same nominal type* and are freely
-interchangeable. The separation buys readability and grep targets; the compiler enforces
-nothing. If nominal separation is ever actually wanted, wrap the alias in a `struct`.
+secure-gate's `macros/mod.rs:19-26` is explicit that a plain `type` alias "is a readability
+and audit-grep device, not compile-time separation between cryptographic roles" — two
+aliases over `Dynamic<Vec<u8>>` are the *same nominal type* and are freely interchangeable.
+The separation buys readability and grep targets; the compiler enforces nothing.
+
+(That citation read `:7-12` until the rc.12 work, and by then pointed at the paragraph
+arguing the opposite — upstream inserted a "Newtype or plain `type`?" heading above it. The
+claim stayed true because it is a language fact; the line reference did not. A `file:line`
+citation into a dependency is a claim that goes stale on someone else's schedule, so
+re-read them on every upgrade rather than only when the surrounding prose changes.)
+
+**If nominal separation is ever wanted, secure-gate now ships it and recommends it.**
+`fixed_newtype!` / `dynamic_newtype!` emit a real `struct`, so passing a `SessionKey` where
+a `DerivedKey` belongs becomes a compile error; `macros/mod.rs:10-18` says to prefer one
+"where you are unsure". Our seven are aliases and this is not a live problem — nothing has
+yet passed the wrong one — so it stays a deliberate open choice rather than a TODO. Revisit
+it if a third key of the same shape appears, since the risk is in the count of
+interchangeable `Dynamic<Vec<u8>>` roles, and that is already six.
 
 ## Verify
 
