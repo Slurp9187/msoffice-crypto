@@ -143,6 +143,17 @@ verifier and the package HMAC cannot be compared with `==` even by accident. If 
 decrypting documents inside a process that also holds other secrets, that difference is
 the point.
 
+Scoped honestly, because point 5 below is a promise about claims: this covers the key
+material *this crate holds*. Key-derived state inside a dependency is a separate question
+with three answers — the `aes`, `cbc` and `rc4` key schedules are wiped because this crate
+enables each crate's `zeroize` feature and CI keeps them on; the `HmacSha*` opad/ipad state
+is not, because `hmac` 0.12 offers no way to; and hasher buffers hold password bytes until
+`finalize` for the same reason. `SECURITY.md` says which is which. And the wrapper property
+itself is enforced by construction and review rather than by a test — a test that observes
+freed memory is not something this suite can honestly write, so what is checked is that
+secrets are reachable only through `with_secret`, never through `expose_secret` or an
+owned copy that outlives the closure.
+
 **3. Detection costs nothing.** Asking *what is this file, is it encrypted, how strongly*
 is the common case — routing, triage, telling a user why an upload was rejected — and it
 pulls in no cryptography here, a property CI asserts rather than a claim this file makes.

@@ -199,6 +199,35 @@ key are key-schedule input under \[MS-OFFCRYPTO\] §2.3.5.2, so a slot that mere
 be zeroed would have produced a different cipher the day it was not — silently, and as a
 wrong key rather than an error.
 
+### The gate re-run after the standard writer changed, and the artifact it could not have gated before
+
+`standard_encrypt::generate` changed below, which is a change to the encrypt path, so the
+four-reader gate was re-run on this machine rather than inferred from the byte-exact
+goldens. Measured 2026-09-15 against Word 16.0 build 16.0.19127, LibreOffice 26.2.1.2,
+msoffcrypto-tool 6.0.0 and office-crypto 0.3. Both artifacts `GATE: PASS (4 of 4 readers
+ran; 0 not selected)`:
+
+- standard, 40960 bytes, SHA-256
+  `08083d48f76431783ba66055d262d09b9faa1c4435b13de0ce453e7964545357`
+- agile, 41984 bytes, SHA-256
+  `6915cfcba6f6c7a974b0a893cadde0995892b39f576c5808bcbe9e44ef9d923f`
+
+Both mutation runs fail as they must. `--tamper --expect-fail` → `GATE: FAIL (4 of 4
+selected readers failed)`. `--corrupt-integrity --expect-fail` → `GATE: FAIL (3 of 4
+selected readers failed: office, libreoffice, msoffcrypto)` — **three, not four, and that
+is the correct number**: office-crypto verifies neither the verifier nor `dataIntegrity`,
+so blanking those blobs cannot make it fail. It is the one reader whose passing there
+carries no information, which is exactly why msoffcrypto-tool's line is what makes the
+HMAC claim non-vacuous.
+
+**The standard artifact could not honestly have been gated before this release.** Its test
+wrote to the shared system temp directory and printed no digest, while its agile sibling
+honoured `MSOFFICE_CRYPTO_ARTIFACT_DIR` and printed a SHA-256 precisely so a reader can
+tell whether the gate measured this run's file. The mitigation was built for the #8 gate,
+documented on the agile test, and applied to one of the two writers — leaving the
+unprotected one to be the writer that changed here. Both now take the variable and print a
+digest, and the digests above are the ones the tests printed.
+
 ### The same defect, found a second time, in the standard writer
 
 `standard_encrypt::generate` built `SHA1(verifier)` by `to_vec()` on the 20-byte digest and

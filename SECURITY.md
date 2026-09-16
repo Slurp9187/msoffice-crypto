@@ -58,8 +58,17 @@ another crate:
   Neither is zeroized on the caller's copy. This is a documented design decision, not an
   oversight: no `secure-gate` type crosses the public API, which is what lets a consumer on
   a different `secure-gate` version link this crate at all. Wrapping happens the moment the
-  password is used, and everything derived from it is wrapped. If you want the caller's copy
-  zeroized, that is the caller's `Zeroizing<String>` to hold.
+  password is used. If you want the caller's copy zeroized, that is the caller's
+  `Zeroizing<String>` to hold.
+- **Key-derived state held inside a dependency, where no wrapper here can reach it.** Three
+  kinds, and they are different in what can be done about them. The cipher key schedules
+  *are* wiped, because `aes`, `cbc` and `rc4` each have a `zeroize` feature and this crate
+  enables all three — a CI invariant keeps them on, since losing one is silent. The
+  `HmacSha*` opad/ipad state, derived from the integrity key, is **not**: `hmac` 0.12 has no
+  `Drop` and no feature to enable, so it moves only on a dependency bump. Hasher buffers
+  (`sha1`, `sha2`, `md-5` at 0.10) are likewise not wipeable and hold password bytes until
+  `finalize`. Reports here are welcome and will be forwarded upstream, but this crate cannot
+  fix them in place.
 - **Anything requiring the attacker to already control the calling process.**
 - **Findings in a dependency** with an advisory already published. Those belong upstream;
   `cargo deny check advisories` runs here on every push and will surface them.
