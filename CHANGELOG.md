@@ -199,6 +199,61 @@ key are key-schedule input under \[MS-OFFCRYPTO\] §2.3.5.2, so a slot that mere
 be zeroed would have produced a different cipher the day it was not — silently, and as a
 wrong key rather than an error.
 
+### The same defect, found a second time, in the standard writer
+
+`standard_encrypt::generate` built `SHA1(verifier)` by `to_vec()` on the 20-byte digest and
+`resize` to the 32-byte blob. `to_vec` allocates exactly 20; 32 does not fit, so it
+reallocated and freed the block holding the digest **unwiped**. Measured rather than
+inferred — the pointer moves and capacity goes 20 → 40:
+
+```
+before resize: ptr=0x2d5556d0600 len=20 cap=20
+after  resize: ptr=0x2d5556ce670 len=32 cap=40
+```
+
+Unlike the RC4 one this is in the **default `crypto-ops` build**, not `legacy-binary`, and
+it is older than the upgrade that found it.
+
+It also carried a second defect the first site did not. The digest left the `with_secret`
+closure as a bare `Vec` and was wrapped only by the constructor on the outer line — so the
+value **is** wrapped, and an audit asking "is this wrapped?" gets a yes. The gap is *where*,
+and it is invisible at a glance. Size is no guide either: at 20 bytes any "check the large
+buffers first" instinct ranks it last. Both are gone in one move, for the same reason —
+`VerifierPlaintext::new_with(32, |slot| slot[..20].copy_from_slice(&Sha1::digest(v)))`
+allocates once at the final size and never exists outside the closure.
+
+A `const _: () = assert!(SHA1_LEN <= ENCRYPTED_VERIFIER_HASH_LEN)` now sits beside the
+existing `VERIFIER_HASH_SIZE == SHA1_LEN` check, so the slice index is a build failure
+rather than a panic if either constant ever moves.
+
+No behaviour changed: the seeded-RNG goldens — `the_material_is_byte_exact_under_a_seeded_rng`
+and `the_whole_container_is_byte_exact_under_a_seeded_rng` — are unmoved, which is what shows
+the written bytes are identical.
+
+### `aes` and `cbc` now zeroize, as `rc4` already did
+
+The AES key schedule is the round keys expanded from the session key, and the CBC state
+carries a block of key-dependent material. Both live inside the cipher objects where no
+wrapper in this crate can reach them; only the upstream feature can, and it was off.
+
+`rc4` has carried `features = ["zeroize"]` since the legacy-binary work, with a CI packaging
+invariant to keep it. So the hazard was identified, guarded against regression, and applied
+to the cipher in `legacy-binary` — while the cipher in the default build went without. That
+asymmetry is the finding; the fix is two words.
+
+`aes` declares `zeroize` as an optional dependency rather than in `[features]`, so the
+feature is implicit, and it implements `ZeroizeOnDrop` on the round keys in all three
+backends (`soft.rs`, `ni.rs`, `armv8.rs`). `ecb` has no such feature — checked. **No crate
+enters any graph**: `zeroize` is already a `crypto-ops` node through secure-gate, so the
+lockfile change is one line adding it as an edge of `aes`, and the set of crates is
+byte-identical before and after.
+
+`hmac` 0.12.1 is the one that cannot be fixed here: no `Drop`, no zeroize, and its only two
+features are `reset` and `std`. Its opad/ipad state is derived from `IntegrityKey` and
+nothing wipes it — MAC-forgery capability under that key rather than key recovery. Recorded
+in the secure-gate skill's residual list, which had the hasher class written down and had
+never carried the HMAC one across.
+
 ### `secure-gate` moves to 0.9.0-rc.12, and is pinned
 
 Two of the breaking changes across this span reach this crate. One is the `Dynamic::new_with`

@@ -188,8 +188,24 @@ sha1 = { version = "0.10", optional = true }
 # of SHA-1/256/384/512 are wired even though every fixture in the corpus is SHA-512.
 hmac = { version = "0.12", optional = true }
 
-aes = { version = "0.8", optional = true }
-cbc = { version = "0.1", optional = true, features = ["block-padding"] }
+# `zeroize` on both, for the reason it is on `rc4` below: the AES key schedule is the
+# round keys expanded from the session key, and the CBC state carries a block of
+# key-dependent material. Neither is reachable from this crate -- they live inside the
+# cipher objects -- so a wrapper here cannot cover them and only the upstream feature can.
+# `aes` declares `zeroize` as an optional dependency rather than in `[features]`, so the
+# feature is implicit; it implements `ZeroizeOnDrop` on the round keys in all three
+# backends (`soft.rs`, `ni.rs`, `armv8.rs`), which is what makes it worth turning on
+# wherever this actually runs. `ecb` has no such feature to enable -- checked, not assumed.
+#
+# This adds no crate to any graph: `zeroize` is already a `crypto-ops` node through
+# secure-gate, so both lines switch on code in crates that are already there.
+#
+# It was missing here while `rc4` had it since the legacy work, which is the more
+# interesting half: the hazard was identified, given a CI packaging invariant, and applied
+# to the cipher in `legacy-binary` while the cipher in the default `crypto-ops` build went
+# without. Found by auditing what crosses a `with_secret` boundary, not by reading this file.
+aes = { version = "0.8", optional = true, features = ["zeroize"] }
+cbc = { version = "0.1", optional = true, features = ["block-padding", "zeroize"] }
 ecb = { version = "0.1", optional = true }
 base64 = { version = "0.22", optional = true }
 
