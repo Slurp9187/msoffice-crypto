@@ -245,8 +245,10 @@ SECURITY.md            the disclosure policy, and what this crate counts as a vu
 docs/RELEASING.md      the release runbook; a live procedure, not a dated snapshot
 docs/plan-workflow.md  how plans become issues
 docs/design/           why the crate is shaped as it is -- development-record.md (what the
-                       issues and PRs decided, reversed and deferred, and the #N index) and
-                       msoffice-crypto-format-history.md (the formats, and what converts)
+                       issues and PRs decided, reversed and deferred, and the #N index),
+                       msoffice-crypto-format-history.md (the formats, and what converts) and
+                       heap-residue.md (what a Vec abandons that a wrapper cannot reach, and
+                       what a zeroizing allocator does and does not close)
 docs/audits/           external audit reports; deltas only, dated, not revised after filing
 docs/plans/            dated plan files; the arc lives in msoffice-crypto-foundation-2026-09-04.md
 .claude/skills/        msoffice-crypto-secure-gate (policy), file-plan-issues (protocol),

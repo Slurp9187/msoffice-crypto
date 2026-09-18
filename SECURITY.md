@@ -93,7 +93,12 @@ release rather than a backport.
   key-wrapping crate. CI asserts that property on every push. A consumer who only calls
   `classify` has none of the attack surface below it.
 - The crate contains **no `unsafe`**, enforced by `#![forbid(unsafe_code)]` at the crate
-  root, so memory-safety findings would have to originate in a dependency.
+  root, so memory-safety findings would have to originate in a dependency. That attribute
+  binds `src/` — the code that ships. Two test harnesses in `tests/`, which are separate
+  crates and reach no consumer, do use `unsafe` to install a `#[global_allocator]`:
+  `legacy_allocation.rs` measures peak allocation and `heap_residue.rs` measures abandoned
+  non-zero memory. Neither is in the published tarball, and a `grep` over a clone finding
+  `unsafe` there is not a contradiction of the line above.
 - `classify`, the binary-format prober and every 97-2003 parser (`word97`, `excel97`,
   `powerpoint97`, the three RC4 families, `xor_obfuscation`, `legacy_container`) deny
   `clippy::unwrap_used`, `expect_used` and `panic` on themselves, and CI runs clippy under
