@@ -151,11 +151,19 @@ The agile figure is different in kind: ~100,000 of its released blocks are `spin
 per-round intermediates, which *are* key-derived, and which the secure-gate skill names as
 a case a wrapper cannot economically reach.
 
-**Which is why there is no regression test here, only a measurement.** One block in 520,
-against counts that already move with the optimization level and the randomised verifier,
-is below the noise. `tests/heap_residue.rs` is `#[ignore]`d and asserts only that the
-instrument is still observing — a threshold would pass with and without the thing it
-claimed to guard.
+**A block *count* is still not assertable** — the defect moves it by one in 520, against
+counts that shift with the optimization level and the randomised verifier. But `dirty == 0`
+is, because zero is zero. So the committed tests assert that rather than a threshold, across
+three binaries that differ only in their `#[global_allocator]`:
+
+| binary | allocator | asserts |
+|---|---|---|
+| `tests/heap_residue.rs` | bare `Spy` | residue **is** released |
+| `tests/heap_residue_nowipe.rs` | `NoWipe<Spy>` | the probe sees it in the composed position |
+| `tests/heap_residue_wiped.rs` | `ZeroAlloc<Spy>` | none of it survives |
+
+The middle one is what makes the third meaningful, and is the control this pair originally
+lacked.
 
 ### Independently reproduced, with a third configuration that settles the instrument
 
@@ -266,6 +274,36 @@ observing through the interface an adversary would actually use. It is rhetorica
 stronger and materially weaker: it must skip the first 64 bytes, because a freed glibc
 chunk carries free-list links there, so it cannot see residue confined to the prefix. The
 probe used here skips nothing.
+
+## Does the wipe survive an optimizer? Measured separately, because this probe cannot
+
+Everything above is a *functional* result: blocks are clean when released. Whether the wipe
+survives an aggressive optimizer is a different claim, and the probe above is structurally
+incapable of testing it — the volatile read that makes the measurement possible is exactly
+what stops a compiler removing the store it observes.
+
+`tools/pgo_allocator_compare.sh` answers it the only way that works: build under
+`-Cprofile-use` with `lto = "fat"` and `codegen-units = 1`, then read a freed block back.
+Measured 2026-09-18, rustc 1.96.1, WSL2 glibc 2.39, x86-64. Pattern bytes recovered out of
+16; `same=true` throughout, so the same block really did come back.
+
+| configuration | 64 B | 4096 B | |
+|---|---|---|---|
+| no allocator | **16/16** | **16/16** | probe verified |
+| fn-pointer wipe, no volatile read of the pointer | **16/16** | **16/16** | **eliminated** |
+| `zeroizing-alloc` 0.1.1 | **0/16** | **0/16** | survives |
+
+**The middle row is the finding worth carrying.** A wipe that loads its callee through
+`read_volatile` from a `#[used]` static — which looks like a serious barrier — is *still*
+removed completely by PGO with fat LTO. As recoverable as having no allocator at all.
+
+`zeroizing-alloc` survives because it carries a second barrier that row omits: a volatile
+read of the block pointer itself inside `dealloc`, whose comment in that crate says it is
+there "to prevent optimizers (such as PGO) from observing that there is a dead store". That
+one line is the entire difference between 16/16 and 0/16.
+
+Scope: one toolchain, one platform, one probe. It is evidence that the mechanism holds
+where it was measured, not a proof that it holds everywhere.
 
 ## Environment traps, for whoever repeats this
 

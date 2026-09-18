@@ -236,6 +236,8 @@ tools/                 the fixture generators (msoffcrypto-tool; Office over COM
                        (Word, Excel, PowerPoint), libreoffice_uno_check.py (UNO), msoffcrypto-tool and
                        the example — and office_com_check_binary.ps1, the Office side of the decrypted
                        binary documents
+tools/pgo_allocator_compare.sh  does a zeroizing allocator's wipe survive PGO with fat LTO?
+                       Linux/glibc only; the question tests/heap_residue*.rs cannot answer
 tools/audit_claims.py  reads the prose back against the tree; CI runs it, and so does
                        docs/RELEASING.md step 1 with the clones attached
 .github/workflows/ci.yml  the matrix below, on every push

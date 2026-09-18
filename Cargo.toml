@@ -321,6 +321,21 @@ secure-gate = { version = "=0.9.0-rc.12", optional = true, default-features = fa
 ] }
 
 [dev-dependencies]
+# The zeroizing global allocator the three `tests/heap_residue*.rs` binaries measure.
+# 1Password's, 103 lines, no dependencies of its own, MIT OR Apache-2.0.
+#
+# Dev-only and invisible to a consumer: every `cargo tree` in CI's graph-property jobs uses
+# `-e normal`, and `deny.toml` sets `exclude-dev = true`. A library must never declare a
+# `#[global_allocator]` -- only one may exist per program, and a second anywhere in the
+# graph is a hard compile error naming a crate the consumer never wrote down -- so this is
+# reachable only from `tests/`, which are separate crates that reach nobody.
+#
+# Chosen over the alternative on a measurement rather than on size. Under PGO with fat LTO
+# and `codegen-units = 1`, a probe recovers 0 of 16 pattern bytes from a freed block with
+# this crate installed and 16 of 16 with none -- see docs/design/heap-residue.md, which also
+# records what a zeroizing allocator does and does not cover.
+zeroizing-alloc = "0.1.1"
+
 # Already a normal dependency, optional under "cli" (dep:serde_json). Repeated here for the
 # same reason as `cfb` below: tests/cli.rs's own need for a real JSON parser must not depend
 # on the "cli" feature continuing to spell dep:serde_json exactly this way. (Not actually
