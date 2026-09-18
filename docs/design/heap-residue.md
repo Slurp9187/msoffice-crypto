@@ -136,10 +136,26 @@ still released clean. Note what this does and does not add: the *workload* is op
 here, but the wipe itself is still observed by the probe, so this is not evidence about
 dead-store elimination either — see below.
 
-`20-byte dirty` is the reverted defect itself — 23 abandoned `SHA1(verifier)` blocks per
-`encrypt_ooxml_standard`. The 100,238 dirty blocks in the agile control are `spin_hash`'s
-abandoned intermediates, ~100,000 per decrypt, which the secure-gate skill names as a case
-a wrapper cannot economically reach.
+**Two things these figures are not**, both established by re-running the control against
+the *fixed* code afterwards:
+
+- **`20-byte dirty` is not a count of the defect.** Fixed, `encrypt_ooxml_standard` still
+  releases 22 dirty 20-byte blocks; reverted, 23. The defect contributes **exactly one**,
+  and the other 22 are unrelated 20-byte allocations on the same path. An earlier draft of
+  this document called all 23 abandoned `SHA1(verifier)` blocks. That was wrong.
+- **`dirty_bytes` is not a secret-exposure number.** It counts every non-zero byte in every
+  released block, and most of the `encrypt_ooxml_standard` figure is document data — the
+  package, the ciphertext, ZIP and CFB buffers.
+
+The agile figure is different in kind: ~100,000 of its released blocks are `spin_hash`'s
+per-round intermediates, which *are* key-derived, and which the secure-gate skill names as
+a case a wrapper cannot economically reach.
+
+**Which is why there is no regression test here, only a measurement.** One block in 520,
+against counts that already move with the optimization level and the randomised verifier,
+is below the noise. `tests/heap_residue.rs` is `#[ignore]`d and asserts only that the
+instrument is still observing — a threshold would pass with and without the thing it
+claimed to guard.
 
 ### The control was wrong first, in the direction that flattered the allocator
 
