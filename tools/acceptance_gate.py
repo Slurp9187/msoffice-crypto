@@ -50,6 +50,13 @@ system temp directory can gate another build's artifact, and has --
     python tools/acceptance_gate.py <artifact> ... --corrupt-integrity --expect-fail
     python tools/acceptance_gate.py <artifact> ... --password not-the-password --expect-fail
 
+`--corrupt-integrity` is **agile-only**: Office 2007 standard encryption defines no
+`dataIntegrity` element and its `EncryptionInfo` is a binary header rather than XML, so the
+mutation cannot be built for it. Asked for anyway it prints `GATE: NOT RUN` and exits 2 --
+neither 0 nor 1, because the run proved nothing either way. `--tamper` applies to both
+families. Both flags report the same way for an artifact that is not a CFB container at all,
+which is what a run against a non-ECMA-376 look-alike hits.
+
 `--readers` names which legs MUST run and pass (default: all four). A leg not selected is
 reported NOT RUN and does not fail the gate; a leg selected but unable to run does. CI
 runs `--readers msoffcrypto,office-crypto` on Linux, where the two applications do not
@@ -58,7 +65,8 @@ Windows before a change to the encrypt path is merged, and their verdicts are re
 CHANGELOG.md against the exact artifact.
 
 A pass looks like four lines ending in PASS and a final `GATE: PASS`. Exit 0 then, 1
-otherwise -- and the other way round under `--expect-fail`.
+otherwise -- and the other way round under `--expect-fail`. Exit 2 is neither: it is
+`GATE: NOT RUN`, a mutation flag asked for on an artifact it cannot describe.
 
 Environment: MSOFFICE_CRYPTO_LO_PYTHON (LibreOffice's python.exe; default the standard
 install path), MSOFFICE_CRYPTO_PWSH (default `pwsh`), CARGO_TARGET_DIR passes through
@@ -259,6 +267,21 @@ def leg_office_crypto(artifact: Path, pw: str, wrong: str, exp: Expectation, wor
 # ---- the two mutations, each of which the gate must fail ------------------------------------
 
 
+class MutationNotApplicable(Exception):
+    """The requested mutation has no meaning for this artifact, so this run proves nothing.
+
+    Distinct from a failed gate on purpose. `--corrupt-integrity --expect-fail` is a proof
+    that the gate notices blanked `dataIntegrity` blobs; run against a file that has none,
+    it is not a proof that failed, it is a proof that could not be attempted. Reporting it
+    as `GATE: FAIL` would let a green CI step stand for evidence nobody produced.
+
+    Before this existed the same case was an uncaught `UnicodeDecodeError` from decoding an
+    Office 2007 `EncryptionInfo` binary header as XML: exit 1, no `GATE:` line, and
+    `--expect-fail` never reached its inversion, so the run failed while looking like the
+    gate had held.
+    """
+
+
 def tamper(src: Path, dest: Path) -> str:
     """Copy `src` to `dest` and flip one bit in the EncryptedPackage ciphertext BODY.
 
@@ -271,8 +294,17 @@ def tamper(src: Path, dest: Path) -> str:
     import olefile  # only the --tamper path needs it
 
     shutil.copyfile(src, dest)
+    if not olefile.isOleFile(str(dest)):
+        raise MutationNotApplicable(
+            "--tamper flips a bit in the EncryptedPackage stream, and this artifact is not a "
+            "CFB container at all, so there is no such stream to reach"
+        )
     ole = olefile.OleFileIO(str(dest), write_mode=True)
     try:
+        if not ole.exists("EncryptedPackage"):
+            raise MutationNotApplicable(
+                "the artifact is a CFB container but carries no EncryptedPackage stream"
+            )
         data = bytearray(ole.openstream("EncryptedPackage").read())
         offset = 8 + 4096 + 100
         if offset >= len(data):
@@ -299,16 +331,56 @@ def corrupt_integrity(src: Path, dest: Path) -> str:
 
     This is the mutation the review found the CI half of the gate could not catch
     ([MS-OFFCRYPTO] 2.3.4.14 is the field; CHANGELOG 2026-09-05 § *Review* the finding).
+
+    **ECMA-376 agile (4.4) only**, and it says so rather than assuming it. Office 2007
+    standard encryption defines no `dataIntegrity` element, and its `EncryptionInfo` is a
+    binary header rather than XML, so this mutation cannot be built for it -- use
+    `--tamper`, which reaches the same `EncryptedPackage` in either family.
     """
     import re
 
     import olefile
 
     shutil.copyfile(src, dest)
+    if not olefile.isOleFile(str(dest)):
+        raise MutationNotApplicable(
+            "--corrupt-integrity blanks the dataIntegrity blobs inside an agile "
+            "EncryptionInfo, and this artifact is not a CFB container at all"
+        )
     ole = olefile.OleFileIO(str(dest), write_mode=True)
     try:
+        if not ole.exists("EncryptionInfo"):
+            raise MutationNotApplicable(
+                "the artifact is a CFB container but carries no EncryptionInfo stream"
+            )
         info = ole.openstream("EncryptionInfo").read()
-        head, xml = info[:8], info[8:].decode("utf-8")  # 8 = version + flags, 2.3.4.10
+        # [MS-OFFCRYPTO] 2.3.4.10: vMajor and vMinor are the first two LE u16s. Checked
+        # before the decode below, because that decode is what used to raise
+        # UnicodeDecodeError on a standard artifact -- the version pair names the family
+        # without guessing, and the message can then name it back.
+        if len(info) < 8:
+            raise MutationNotApplicable(
+                f"the EncryptionInfo stream is {len(info)} bytes, too short to carry a version pair"
+            )
+        version = (int.from_bytes(info[0:2], "little"), int.from_bytes(info[2:4], "little"))
+        if version != (4, 4):
+            detail = (
+                " -- Office 2007 standard encryption defines no dataIntegrity element to blank; "
+                "use --tamper for this artifact"
+                if version[1] == 2
+                else ""
+            )
+            raise MutationNotApplicable(
+                f"--corrupt-integrity applies only to ECMA-376 agile encryption (4.4), and "
+                f"this artifact declares {version[0]}.{version[1]}{detail}"
+            )
+        try:
+            head, xml = info[:8], info[8:].decode("utf-8")  # 8 = version + flags, 2.3.4.10
+        except UnicodeDecodeError as e:
+            raise MutationNotApplicable(
+                f"the artifact declares agile encryption (4.4) but its EncryptionInfo is not "
+                f"UTF-8 XML, so there is nothing to blank: {e}"
+            ) from e
         for attr in HMAC_ATTRS:
             blanked, n = re.subn(rf'({attr}=")([^"]*)(")', _blank_base64, xml)
             if n != 1:
@@ -373,7 +445,20 @@ def main() -> int:
         print(f"artifact : {artifact} ({len(raw)} bytes, SHA-256 {hashlib.sha256(raw).hexdigest()})")
         if args.tamper or args.corrupt_integrity:
             mutant = work / artifact.name
-            how = tamper(artifact, mutant) if args.tamper else corrupt_integrity(artifact, mutant)
+            try:
+                how = (
+                    tamper(artifact, mutant) if args.tamper else corrupt_integrity(artifact, mutant)
+                )
+            except MutationNotApplicable as why:
+                # Exit 2, distinct from both 0 and 1: this run neither passed nor failed,
+                # so a caller that only tests `exit == 0` must not read it as either. The
+                # flag was asked for on an artifact it cannot describe, and saying so is
+                # the honest verdict -- see MutationNotApplicable.
+                flag = "--tamper" if args.tamper else "--corrupt-integrity"
+                print(f"mutation : NOT APPLICABLE -- {why}")
+                print()
+                print(f"GATE: NOT RUN ({flag} does not apply to this artifact; nothing was proven)")
+                return 2
             artifact = mutant
             what = (
                 "every reader must now refuse or produce the wrong bytes"
