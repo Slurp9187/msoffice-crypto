@@ -41,7 +41,7 @@ Decryption is the `crypto-ops` feature, which adds the ciphers and hashes (`aes`
 for the encrypt half, a CSPRNG (`rand`):
 
 ```toml
-msoffice-crypto = { version = "0.1.0-rc.2", features = ["crypto-ops"] }
+msoffice-crypto = { version = "0.1.0-rc.3", features = ["crypto-ops"] }
 ```
 
 ```rust
@@ -85,7 +85,7 @@ CFB container with its encrypted streams replaced, which is what Word, Excel and
 PowerPoint open.
 
 ```toml
-msoffice-crypto = { version = "0.1.0-rc.2", features = ["legacy-binary"] }
+msoffice-crypto = { version = "0.1.0-rc.3", features = ["legacy-binary"] }
 ```
 
 ```rust
@@ -222,24 +222,25 @@ exits 2.
 
 ```text
 $ msoffice-crypto classify protected.docx
-container:    cfb
-document:     ooxml-package
-version:      4.4
-family:       agile
-encrypted:    yes
-supported:    yes
-integrity:    declared
-key-cipher:   AES
-key-hash:     SHA-512
-key-bits:     256
-key-block:    16
-key-salt:     16
-pw-cipher:    AES
-pw-hash:      SHA-512
-pw-bits:      256
-pw-block:     16
-pw-salt:      16
-pw-spin:      100000
+container:      cfb
+container-read: opened
+document:       ooxml-package
+version:        4.4
+family:         agile
+encrypted:      yes
+supported:      yes
+integrity:      declared
+key-cipher:     AES
+key-hash:       SHA-512
+key-bits:       256
+key-block:      16
+key-salt:       16
+pw-cipher:      AES
+pw-hash:        SHA-512
+pw-bits:        256
+pw-block:       16
+pw-salt:        16
+pw-spin:        100000
 ```
 
 `--json` prints one object instead, with the same key set for every input — an unencrypted
@@ -248,7 +249,7 @@ can index the result without first checking whether the key is there:
 
 ```text
 $ msoffice-crypto classify protected.docx --json
-{"container":"cfb","data_integrity":"declared","document":"ooxml-package","encrypted":true,"family":"agile","key_data":{"block_size":16,"cipher":"AES","hash":"SHA-512","key_bits":256,"salt_size":16,"spin_count":null},"password_key":{"block_size":16,"cipher":"AES","hash":"SHA-512","key_bits":256,"salt_size":16,"spin_count":100000},"supported":true,"version":"4.4"}
+{"container":"cfb","container_read":"opened","data_integrity":"declared","document":"ooxml-package","encrypted":true,"family":"agile","key_data":{"block_size":16,"cipher":"AES","hash":"SHA-512","key_bits":256,"salt_size":16,"spin_count":null},"password_key":{"block_size":16,"cipher":"AES","hash":"SHA-512","key_bits":256,"salt_size":16,"spin_count":100000},"supported":true,"version":"4.4"}
 ```
 
 ### `decrypt` — and it says what it verified

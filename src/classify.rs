@@ -40,6 +40,10 @@ use quick_xml::{events::Event, Reader};
 
 use crate::binary_office;
 use crate::cfb_reader;
+// Ungated, as in `cfb_reader`: the *type* exists in every build and only its re-export is
+// behind `crypto-ops`. `classify_cfb` matches one variant of it to tell "the container
+// would not open" from "it opened and carried no EncryptionInfo".
+use crate::error::Error;
 
 /// The container [`classify()`] found the bytes wrapped in.
 ///
@@ -91,8 +95,14 @@ pub enum Container {
 /// ```
 /// use msoffice_crypto::{classify, Document};
 ///
+/// // A plain package is a ZIP this crate did not open, and says so.
 /// assert_eq!(
 ///     classify(include_bytes!("../tests/fixtures/plain.docx")).document,
+///     Document::ZipArchive
+/// );
+/// // Inside an ECMA-376 container the claim is the format's, so it is made.
+/// assert_eq!(
+///     classify(include_bytes!("../tests/fixtures/agile_encrypted.docx")).document,
 ///     Document::OoxmlPackage
 /// );
 /// assert_eq!(classify(b"????").document, Document::Unknown);
@@ -101,11 +111,28 @@ pub enum Container {
 #[non_exhaustive]
 pub enum Document {
     /// An OOXML package — `.docx` / `.xlsx` / `.pptx` and their macro-enabled and binary
-    /// (`.xlsb`) siblings — either plain, or wrapped in a CFB by ECMA-376 encryption.
+    /// (`.xlsb`) siblings — wrapped in a CFB by ECMA-376 encryption.
     ///
-    /// From a plain archive this is decided by the ZIP signature alone and no entry is
-    /// read, so any ZIP lands here — an `.odt` for the sibling crate included.
+    /// **Only ever reported for a CFB container**, where the container was opened and an
+    /// `EncryptionInfo` stream read: ECMA-376 encryption wraps a package by definition, so
+    /// the claim is the format's rather than this crate's guess. A plain archive is
+    /// [`Document::ZipArchive`] — see that variant for why the two are not the same fact.
     OoxmlPackage,
+    /// A ZIP archive whose contents were **not examined**.
+    ///
+    /// Reported for every plain `PK` signature this crate knows, and it is deliberately
+    /// not [`Document::OoxmlPackage`]: the decision is four bytes of magic, no entry is
+    /// read, and no content type is looked at. A `.docx`, a `.vsdx`, an `.odt`, a `.jar`
+    /// and a backup archive are indistinguishable here, which is the honest report of
+    /// what was checked.
+    ///
+    /// This crate holds [`Classification::is_encrypted`] to "nothing determined is not a
+    /// claim the file is plain"; naming a plain ZIP an OOXML package would have been the
+    /// same principle abandoned on the other side — an affirmative claim about a format
+    /// from a test that never looked at one. A caller that needs "is this really a Word
+    /// document" must read `[Content_Types].xml` or the root relationship itself; there is
+    /// no shortcut here, and pretending otherwise is what this variant exists to stop.
+    ZipArchive,
     /// Word 97-2003 binary (`.doc`).
     WordBinary,
     /// Excel 97-2003 binary (`.xls`).
@@ -351,6 +378,61 @@ pub enum IntegrityDeclaration {
     Unknown,
 }
 
+/// Whether the container's own directory could be read from the bytes supplied.
+///
+/// The fact this crate can establish, and no more. A CFB container names its directory
+/// and FAT by sector offset, so a caller handed the first few kilobytes of a file has a
+/// recognisable signature and an unreachable directory — and every field downstream of it
+/// then reports `Unknown`, which is indistinguishable from a genuinely unrecognisable
+/// file unless something says which happened.
+///
+/// **This is the difference between "I looked and found nothing" and "I could not
+/// look."** A dispatcher that matches [`Family::Agile`] and falls through on anything else
+/// takes no arm in both cases, silently, and for a prefix that is the wrong answer rather
+/// than a missing one.
+///
+/// Named for what was observed rather than what caused it: a directory outside the
+/// supplied bytes is equally a truncation, a prefix, and a corrupt header that points
+/// past the end. This crate cannot tell those apart and does not claim to.
+///
+/// # Examples
+///
+/// ```
+/// use msoffice_crypto::{classify, ContainerRead, Family};
+///
+/// let whole = include_bytes!("../tests/fixtures/agile_encrypted.docx");
+/// assert_eq!(classify(whole).container_read, ContainerRead::Opened);
+///
+/// // The same file's first 128 bytes: still recognisably a CFB, nothing readable in it.
+/// let prefix = classify(&whole[..128]);
+/// assert_eq!(prefix.family, Family::Unknown);
+/// assert_eq!(prefix.container_read, ContainerRead::Unreadable);
+///
+/// // A ZIP is identified by signature alone, so nothing was opened to begin with.
+/// assert_eq!(
+///     classify(include_bytes!("../tests/fixtures/plain.docx")).container_read,
+///     ContainerRead::NotAttempted
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ContainerRead {
+    /// The container was opened and its directory read. Every other field of the
+    /// [`Classification`] describes bytes this crate actually reached.
+    Opened,
+    /// The container's signature matched but it could not be opened from these bytes:
+    /// its directory or FAT lies outside them, or contradicts them.
+    ///
+    /// **A prefix of a longer file reaches this**, and so does a corrupt or truncated
+    /// container. Re-read with the whole file before believing any other field.
+    Unreadable,
+    /// Nothing was opened, so nothing failed. Either no container was recognised at all
+    /// ([`Container::Unknown`]), or the container is identified by signature alone and
+    /// this crate does not open it ([`Container::Zip`], whose entries it never reads —
+    /// see [`Document::ZipArchive`]).
+    NotAttempted,
+}
+
 /// What [`classify()`] found. Never an error: an unreadable file is `Unknown`, not a
 /// failure.
 ///
@@ -392,6 +474,12 @@ pub struct Classification {
     pub password_key: Option<AlgorithmParams>,
     /// Whether a `dataIntegrity` element is declared (D1).
     pub data_integrity: IntegrityDeclaration,
+    /// Whether the container's directory could be read from the bytes supplied.
+    ///
+    /// Read this before trusting a `Unknown` in any field above it:
+    /// [`ContainerRead::Unreadable`] means the bytes were too few or too damaged to look
+    /// inside, which is a different fact from having looked and found nothing.
+    pub container_read: ContainerRead,
 }
 
 impl Classification {
@@ -527,26 +615,33 @@ pub fn classify(data: &[u8]) -> Classification {
     if is_zip(data) {
         return Classification {
             container: Container::Zip,
-            document: Document::OoxmlPackage,
+            // Four bytes of signature, and nothing inside the archive is read. See
+            // `Document::ZipArchive` for why this is not `OoxmlPackage`.
+            document: Document::ZipArchive,
             version: None,
             family: Family::Unencrypted,
             key_data: None,
             password_key: None,
             data_integrity: IntegrityDeclaration::NotApplicable,
+            container_read: ContainerRead::NotAttempted,
         };
     }
-    unknown(Container::Unknown)
+    unknown(Container::Unknown, ContainerRead::NotAttempted)
 }
 
 /// Everything-unreadable result for a container we could name but not read.
-fn unknown(container: Container) -> Classification {
-    unknown_document(container, Document::Unknown)
+fn unknown(container: Container, container_read: ContainerRead) -> Classification {
+    unknown_document(container, Document::Unknown, container_read)
 }
 
 /// `unknown`, for a container whose *format* was recognised even though its encryption
 /// was not. A legacy binary document reaches this: we know it is a `.doc`, which is
 /// strictly more than we knew before.
-fn unknown_document(container: Container, document: Document) -> Classification {
+fn unknown_document(
+    container: Container,
+    document: Document,
+    container_read: ContainerRead,
+) -> Classification {
     Classification {
         container,
         document,
@@ -555,6 +650,7 @@ fn unknown_document(container: Container, document: Document) -> Classification 
         key_data: None,
         password_key: None,
         data_integrity: IntegrityDeclaration::Unknown,
+        container_read,
     }
 }
 
@@ -571,8 +667,17 @@ fn classify_cfb(data: &[u8]) -> Classification {
     // before giving up -- otherwise an encrypted `.doc` classifies identically to a
     // corrupt file, which is the failure this crate made in GH #11 and LibreOffice makes
     // on `.ppt` to this day.
-    let Ok(info) = cfb_reader::read_encryption_info(data) else {
-        return classify_binary(data);
+    // The error is the signal, not noise. `read_encryption_info` distinguishes "the
+    // container would not open" (`NotACfbFile`, from `cfb::CompoundFile::open`) from
+    // "it opened and the stream is missing or oversized" -- and a `let`-else used to
+    // discard that, so a 128-byte prefix of this very file and sixteen bytes of junk
+    // came back identically `Unknown`. `binary_office::probe` opens the container with
+    // the same call, so there is nothing for it to find either; returning here rather
+    // than walking on is what lets the verdict say which of the two happened.
+    let info = match cfb_reader::read_encryption_info(data) {
+        Ok(info) => info,
+        Err(Error::NotACfbFile) => return unknown(Container::Cfb, ContainerRead::Unreadable),
+        Err(_) => return classify_binary(data),
     };
     if info.len() < 8 {
         return classify_binary(data);
@@ -598,6 +703,7 @@ fn classify_cfb(data: &[u8]) -> Classification {
             key_data: None,
             password_key: None,
             data_integrity: IntegrityDeclaration::Unknown,
+            container_read: ContainerRead::Opened,
         },
     }
 }
@@ -610,7 +716,9 @@ fn classify_cfb(data: &[u8]) -> Classification {
 /// an RC4 AlgID, so `Family::Rc4CryptoApi` alone would not tell a `.doc` from a `.docx`.
 fn classify_binary(data: &[u8]) -> Classification {
     let Some(v) = binary_office::probe(data) else {
-        return unknown(Container::Cfb);
+        // The container opened -- `classify_cfb` returned above when it would not -- so
+        // this is "looked inside, recognised no format", not "could not look".
+        return unknown(Container::Cfb, ContainerRead::Opened);
     };
 
     let document = match v.format {
@@ -654,6 +762,7 @@ fn classify_binary(data: &[u8]) -> Classification {
         password_key: None,
         // None of the binary formats defines an integrity element.
         data_integrity: IntegrityDeclaration::NotApplicable,
+        container_read: ContainerRead::Opened,
     }
 }
 
@@ -732,6 +841,7 @@ fn classify_agile(xml: &[u8], version: Option<(u16, u16)>) -> Classification {
         key_data: saw_key_data.then_some(key_data),
         password_key: saw_password_key.then_some(password_key),
         data_integrity,
+        container_read: ContainerRead::Opened,
     }
 }
 
@@ -894,6 +1004,7 @@ fn classify_standard(body: &[u8], version: Option<(u16, u16)>) -> Classification
         // [MS-OFFCRYPTO] §2.3.4.5 defines no integrity element for this format, and the
         // RC4 families define none either. Absence is the spec, not a defect.
         data_integrity: IntegrityDeclaration::NotApplicable,
+        container_read: ContainerRead::Opened,
     }
 }
 

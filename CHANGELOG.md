@@ -22,6 +22,110 @@ What survives that move is in two places, deliberately:
 
 ---
 
+## v0.1.0-rc.3 — unreleased
+
+### `classify` no longer claims a plain ZIP is an OOXML package
+
+`Document::ZipArchive` is a new variant, and every plain `PK` signature reports it instead of
+`Document::OoxmlPackage`. The decision was — and still is — four bytes of magic: `is_zip`
+reads `PK` / `PK` / `PK` and opens nothing, reads no entry and
+looks at no content type. `OoxmlPackage` was therefore an affirmative claim about a format
+that nothing had examined, and a `.vsdx`, an `.odt`, a `.jar` and a backup archive all
+carried it.
+
+**The argument that settled it is this crate's own, applied on the side it had been skipped
+on.** `Classification::is_encrypted` returns `false` for `Family::Unknown` because "nothing
+could be determined is not a claim the file is plain" — and the ZIP branch was making exactly
+the claim that rule forbids, in the other direction. Raised by a downstream consumer
+integrating the crate, who hit it as a live defect: a test asserting "a non-Office zip is not
+detected as OOXML" would have failed against a verdict that forwarded `classify`.
+
+`OoxmlPackage` keeps its meaning for a CFB container, where an `EncryptionInfo` stream was
+actually read and ECMA-376 encryption wraps a package by definition.
+
+Scope, checked rather than assumed: `Classification::is_supported` is unaffected (it matches
+`(OoxmlPackage, Agile | Standard)`, so a plain archive was already `false`), the CLI's
+`encrypt` guard matches on `Container` rather than `Document`, and the CLI's decrypt routing
+refuses `Family::Unencrypted` before it reaches the document match. The CLI renders it as
+`zip-archive`.
+
+### `classify` reports whether it could open the container at all
+
+`Classification::container_read` is a new field, carrying the new `ContainerRead` enum:
+`Opened`, `Unreadable`, `NotAttempted`.
+
+The fact it records was already being computed and thrown away. `classify_cfb` called
+`cfb_reader::read_encryption_info`, whose error distinguishes "the container would not open"
+(`NotACfbFile`, straight from `cfb::CompoundFile::open`) from "it opened and the stream is
+missing or oversized" — and a `let`-else discarded it. So the first 128 bytes of an agile
+`.docx` and sixteen bytes of junk came back identically `Family::Unknown`,
+`Document::Unknown`, `IntegrityDeclaration::Unknown`, with nothing to tell a caller which had
+happened.
+
+**That is a wrong answer rather than a missing one, and it is reachable from an ordinary
+dispatcher.** Code that sniffs a file header, matches `Family::Agile`, and falls through
+otherwise takes the same branch for "this is not an Office file" as for "you handed me a
+prefix". Found by a downstream consumer whose key-rotation path peeked 128 bytes and
+dispatched on the result.
+
+4096 bytes is not enough either, which is what rules out "peek a bigger header" as the fix: a
+CFB names its directory by sector offset and Office writes it near the end of the file. The
+whole file is the requirement, and `Unreadable` is how a caller learns that rather than
+guessing.
+
+Named for what was observed, not for what caused it. A directory outside the supplied bytes
+is equally a truncation, a prefix, and a corrupt header pointing past the end; this crate
+cannot tell those apart and the variant does not claim to.
+
+The CLI prints it as `container-read:` and carries `container_read` in `--json`, which takes
+the top-level key set from nine to ten. The human column widened from 14 to 16, the longest
+key having grown.
+
+### The acceptance gate says when a mutation does not apply, instead of crashing
+
+`tools/acceptance_gate.py --corrupt-integrity` blanks the two `dataIntegrity` blobs in an
+agile `EncryptionInfo`. Run against an Office 2007 standard artifact it decoded that stream's
+binary header as UTF-8 XML and died with an uncaught `UnicodeDecodeError`: exit 1, no `GATE:`
+line, and under `--expect-fail` the inversion never ran — so the step failed while looking
+like the gate had held.
+
+Both mutation flags now check what they are being asked to mutate and report
+`GATE: NOT RUN` with **exit 2**, distinct from the 0 and 1 a gate run returns, because such a
+run neither passed nor failed. `--corrupt-integrity` is agile-only by construction — standard
+encryption defines no element to blank — and both flags refuse an artifact that is not a CFB
+container at all, which is what a run against a non-ECMA-376 look-alike hits.
+
+Found by a downstream consumer whose plan invoked the flag family-agnostically, on both
+writers.
+
+### `gen_plain_binary_fixtures.ps1` produced fixtures this repository's own suite rejects
+
+The generator set no scrub, so every fixture it wrote carried the generating machine's Office
+user name in `Author` and `LastAuthor` — while `tests/fixture_identity.rs` asserts those are
+empty or absent for all ten Office-written fixtures, `word97_plain.doc` among them. A rerun
+therefore produced a corpus that failed the suite, and the script's own header described that
+as expected and left the remedy to the reader.
+
+Each document now sets `RemovePersonalInformation` before `SaveAs` — the programmatic
+Document Inspector, which is what produced the empty fields in the fixtures already
+committed. Measured both ways against a scratch fixture directory: without it all three files
+carry a 13-character name in both properties; with it all three are empty.
+
+**The remedy the old header recommended could not have worked**, which is why this was not a
+one-line fix. `Application.UserName = ''` is rejected by Word with "Bad parameter";
+PowerPoint's `Application` exposes no `UserName` property at all (`Get-Member`: False); and
+`BuiltInDocumentProperties('Author').Value = ''` fails under PowerShell with "Object
+reference not set to an instance of an object", because a parameterised COM property cannot
+be assigned that way. All three checked, not reasoned about.
+
+The header also cited the decision as "GH #9", which `docs/design/development-record.md` § 7
+describes as the publish issue about a fresh `cargo test` inside the unpacked tarball.
+Whether #9 also carried the metadata item is not resolvable from this repository — the issues
+live in the archived one — so the header now names the check instead of the number.
+
+**The committed fixtures were never affected.** `tests/fixture_identity.rs` has been green
+throughout; it was the generator, not the corpus, that was wrong.
+
 ## v0.1.0-rc.2 — 2026-09-15
 
 **This is the first release published to crates.io.** `v0.1.0-rc.1` exists as a git tag and

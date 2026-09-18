@@ -121,11 +121,12 @@ const FIELD_MAP: [(&str, &str); 19] = [
     ("pw-spin:", "/password_key/spin_count"),
 ];
 
-/// The nine top-level `--json` keys, alphabetised -- `serde_json::Map` is a `BTreeMap`
+/// The ten top-level `--json` keys, alphabetised -- `serde_json::Map` is a `BTreeMap`
 /// with no `preserve_order`, so this is the order they actually serialise in, and no
 /// test may assume any other.
-const TOP_LEVEL_KEYS: [&str; 9] = [
+const TOP_LEVEL_KEYS: [&str; 10] = [
     "container",
+    "container_read",
     "data_integrity",
     "document",
     "encrypted",
@@ -747,7 +748,8 @@ fn an_unencrypted_file_carries_both_parameter_blocks_as_null() {
     // A whole-object comparison against a literal, parsed rather than typed as a raw
     // string -- so no key order is asserted, only the parsed value.
     let expected: Value = serde_json::from_str(
-        r#"{"container":"zip","data_integrity":"not-applicable","document":"ooxml-package",
+        r#"{"container":"zip","container_read":"not-attempted",
+            "data_integrity":"not-applicable","document":"zip-archive",
             "encrypted":false,"family":"unencrypted","key_data":null,"password_key":null,
             "supported":false,"version":null}"#,
     )

@@ -34,10 +34,28 @@
     every presentation; ppLayoutBlank is the floor. A ppLayoutText slide carrying the
     same string measured 274,944 -- 17,408 bytes for text nothing asserts.
 
-    The files carry the machine's Office user name in Author and LastSavedBy, as the
-    *_password twins already do. Set $word.UserName / $excel.UserName / $ppt.UserName
-    before the Add() calls to change that; it is a pre-publish decision (GH #9), and it
-    applies to all nine Office-written fixtures at once, not to these three.
+    The author fields are cleared before each SaveAs, because tests/fixture_identity.rs
+    asserts that every Office-written fixture -- word97_plain.doc among them -- carries an
+    Author and LastAuthor that are empty or absent. Office stamps Application.UserName into
+    everything it saves, so a run that did not clear them produced fixtures this
+    repository's own suite rejects, which is what this script used to do while its header
+    said the leak was expected and left the remedy to the reader.
+
+    Two things that header also got wrong, both checked rather than reasoned about:
+    PowerPoint.Application has no UserName property at all (Get-Member: False) and Word
+    rejects an empty one outright ("Bad parameter"), so the advice to set
+    $word.UserName / $excel.UserName / $ppt.UserName could not have worked on any of the
+    three; and the decision was cited as
+    "GH #9", which docs/design/development-record.md section 7 describes as the publish
+    issue about a fresh cargo test inside the unpacked tarball. Whether #9 also carried the
+    metadata item is not resolvable from this repository -- the issues live in the archived
+    one -- so the check is named here instead of the number.
+
+    Clearing the properties is not the whole story for a fixture that is committed:
+    Office's own Document Inspector is what produced the empty fields in the six
+    regenerated fixtures, and this script reproduces that result rather than that process.
+    Run tests/fixture_identity.rs after any regeneration; it reads all four places the name
+    hides, only one of which a grep over tests/fixtures/ can see.
 
 .NOTES
     Every application is Quit inside a finally block. A leaked WINWORD.EXE holds
@@ -76,6 +94,28 @@ function Remove-Existing([string]$path) {
     if (Test-Path $path) { Remove-Item $path -Force }
 }
 
+# The programmatic Document Inspector, which is what produced the empty author fields in
+# the fixtures already committed -- so this reproduces their state by the same route
+# rather than approximating it. Word, Excel and PowerPoint each expose it on the document
+# object, and it applies at save, which is what makes it reach LastAuthor as well as
+# Author.
+#
+# Measured, because the two obvious alternatives do not work and the old header
+# recommended one of them:
+#
+#   $app.UserName = ''                              -> "Bad parameter" (Word rejects empty)
+#   $doc.BuiltInDocumentProperties('Author').Value = ''
+#                                                   -> "Object reference not set to an
+#                                                      instance of an object", PowerShell
+#                                                      cannot assign through a
+#                                                      parameterised COM property
+#
+# Set on the document, never on the application: it is a per-document flag, and a
+# fixture that was saved without it carries the name whatever the application was told.
+function Set-RemovePersonalInformation($item) {
+    $item.RemovePersonalInformation = $true
+}
+
 # ---- Word 97-2003 (.doc) --------------------------------------------------------------
 # wdFormatDocument97 = 0. The FIB's fEncrypted bit (0x0100 at offset 0x0A) stays clear,
 # which is the single bit src/binary_office.rs::probe_word reads to reach Some(false).
@@ -91,6 +131,7 @@ try {
     $word.DisplayAlerts = 0
     $doc = $word.Documents.Add()
     $doc.Content.Text = $text
+    Set-RemovePersonalInformation $doc
     $doc.SaveAs2([ref]$wordPath, [ref]0)
 } finally {
     if ($doc) { $doc.Close(0); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($doc) }
@@ -114,6 +155,7 @@ try {
     $excel.DisplayAlerts = $false
     $wb = $excel.Workbooks.Add()
     $wb.Worksheets.Item(1).Range('A1').Value2 = $text
+    Set-RemovePersonalInformation $wb
     $wb.SaveAs($excelPath, 56)
 } finally {
     if ($wb) { $wb.Close($false); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($wb) }
@@ -135,6 +177,7 @@ try {
     # closest it offers, and it is why the finally below matters more here than anywhere.
     $pres = $ppt.Presentations.Add($false)
     [void]$pres.Slides.Add(1, 12)
+    Set-RemovePersonalInformation $pres
     $pres.SaveAs($pptPath, 1)
 } finally {
     if ($pres) { $pres.Close(); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($pres) }
