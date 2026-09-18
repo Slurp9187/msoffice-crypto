@@ -231,6 +231,17 @@ releasing them, across a real cryptographic workload. Whether that clearing surv
 aggressive optimizer is a different claim, tested elsewhere, and nothing in this document
 should be read as evidence for it.
 
+This is not a limitation that was noticed late. The allocator's own
+`tests/pgo_regression.rs` states it as the reason that question is tested at the IR level
+rather than at runtime:
+
+> A spy allocator that inspects the block before releasing it cannot detect compiler DSE of
+> the wipe: reading the memory is exactly what makes the store live, so the observation
+> prevents the elimination it is trying to observe.
+
+A runtime probe of this shape is therefore not merely silent on optimizer survival — it is
+structurally incapable of answering it, and the volatile read is precisely why.
+
 ### Why this cannot be measured on Windows
 
 `HeapFree` is not a deallocation function LLVM recognises, so a fill before it is never

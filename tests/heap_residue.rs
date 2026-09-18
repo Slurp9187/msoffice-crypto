@@ -62,9 +62,17 @@
 //! subject's `0 dirty` from a silence into a measurement, because a spy reading the wrong
 //! memory would report clean under the subject *and* would report clean under `NoWipe`,
 //! while a working one reports every dirty block there. It is deliberately **not** added
-//! now: with no subject to compare against it is redundant with the bare `Spy` below, and a
-//! test that can only be informative later is a test nobody re-reads when it becomes so.
-//! Independently reproduced with that third leg; see `docs/design/heap-residue.md`.
+//! now: with no subject to compare against it is *numerically indistinguishable* from the
+//! bare `Spy` below — measured, same blocks, same dirty count, same 20-byte count, on both
+//! profiles — so it would be a second test producing the first one's numbers, which someone
+//! would correctly delete in a tidy-up.
+//!
+//! **The trap this is guarding against is the two-configuration version.** Control and
+//! subject alone read as a clean pass whether the probe works or not: a spy observing the
+//! wrong memory reports clean under the subject, and nothing contradicts it. That is how
+//! this harness misled its own author once already — see the `realloc` note below for the
+//! other half of the same lesson. Independently reproduced with the third leg;
+//! `docs/design/heap-residue.md` carries the table.
 #![cfg(feature = "crypto-ops")]
 
 use std::alloc::{GlobalAlloc, Layout, System};
