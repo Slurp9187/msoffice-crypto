@@ -56,6 +56,15 @@
 //! `#[global_allocator] static A: ZeroizingAlloc<Spy> = ZeroizingAlloc(Spy);` in place of
 //! the bare `Spy` below. `Spy::realloc` must keep mirroring the wrapper's rather than
 //! forwarding to `System` — see the note on it.
+//!
+//! **Add a third binary at the same time, not later: `NoWipe<Spy>`** — the wrapper's exact
+//! structure and the same move-always `realloc`, with no wipe. It is what turns the
+//! subject's `0 dirty` from a silence into a measurement, because a spy reading the wrong
+//! memory would report clean under the subject *and* would report clean under `NoWipe`,
+//! while a working one reports every dirty block there. It is deliberately **not** added
+//! now: with no subject to compare against it is redundant with the bare `Spy` below, and a
+//! test that can only be informative later is a test nobody re-reads when it becomes so.
+//! Independently reproduced with that third leg; see `docs/design/heap-residue.md`.
 #![cfg(feature = "crypto-ops")]
 
 use std::alloc::{GlobalAlloc, Layout, System};

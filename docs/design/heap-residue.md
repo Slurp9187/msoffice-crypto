@@ -157,6 +157,46 @@ is below the noise. `tests/heap_residue.rs` is `#[ignore]`d and asserts only tha
 instrument is still observing — a threshold would pass with and without the thing it
 claimed to guard.
 
+### Independently reproduced, with a third configuration that settles the instrument
+
+The allocator's author rebuilt the harness from a written description — deliberately not
+from this probe's source, so agreement would mean something — and reproduced the result.
+They added a configuration this pair was missing:
+
+**`NoWipe<Spy>`: the wrapper's exact structure, the same move-always `realloc`, and no
+wipe.** It differs from the subject by one thing.
+
+|  | blocks | dirty | non-zero | 20-byte dirty |
+|---|---|---|---|---|
+| control (bare spy) | 520 | 515 | 256,787 | 23 |
+| **`NoWipe`** | 520 | 515 | 256,688 | **23** |
+| subject (`ZeroizingAlloc`) | 520 | **0** | **0** | **0** |
+
+This is what makes `0 dirty` a measurement rather than a silence. A `blocks > 0` assertion
+shows the counter ran; it does not show the spy reads the bytes it claims to, *in the
+position it claims to*. A spy reading the wrong memory would come back clean under `NoWipe`
+as well. It does not — it sees 515 dirty blocks and every one of the 23 twenty-byte blocks.
+So the instrument is live in exactly the subject's position, and offset 0 is confirmed
+empirically rather than by argument: `NoWipe` reads real payload there, the subject reads
+zero, so the wipe covers from byte 0 and nothing has written free-list links at that point.
+
+It also tightens the identical-count argument. Two configurations agreeing could in
+principle coincide; three agreeing (520/520/520, 100,225 three times, 404/404/404) where
+two of them differ only by the wipe cannot plausibly.
+
+**Counts are harness-relative; the signature is not.** The independent run reported 520,
+100,225 and 404 blocks against this one's 521, 100,251 and 405 — different fixture, different
+armed-window boundaries. But `20-byte dirty` matched **exactly**: 23 debug, 4 agile, 12
+release. Two harnesses agreeing on the defect's signature while differing on incidentals is
+better evidence than two agreeing on everything, which would suggest one had copied the
+other. Read a block count only within one harness comparing configurations.
+
+**Gating did not leak, for this workload.** A foreign-thread counter reported zero
+deallocations inside the armed window from any thread other than the one that armed it, and
+an identical 205 unarmed blocks in every run — so the gate separates blocks rather than
+losing them. That is a fact about this workload under `--test-threads=1`, not a property of
+the technique: a threaded workload would need per-thread state.
+
 ### The control was wrong first, in the direction that flattered the allocator
 
 Worth recording because the next person composing a spy will hit it.
