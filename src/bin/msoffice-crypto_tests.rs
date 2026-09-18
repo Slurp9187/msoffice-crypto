@@ -373,6 +373,7 @@ fn the_enum_spellings_are_lower_kebab_and_stable() {
     assert_eq!(container_name(Container::Unknown), "unknown");
 
     assert_eq!(document_name(Document::OoxmlPackage), "ooxml-package");
+    assert_eq!(document_name(Document::ZipArchive), "zip-archive");
     assert_eq!(document_name(Document::WordBinary), "word-binary");
     assert_eq!(document_name(Document::ExcelBinary), "excel-binary");
     assert_eq!(
@@ -431,12 +432,13 @@ fn human_output_answers_for_bytes_that_are_not_an_office_file() {
     let text = classification_human(&classify(b"not an office file"));
     assert_eq!(
         text,
-        "container:    unknown\n\
-         document:     unknown\n\
-         family:       unknown\n\
-         encrypted:    no\n\
-         supported:    no\n\
-         integrity:    unknown\n"
+        "container:      unknown\n\
+         container-read: not-attempted\n\
+         document:       unknown\n\
+         family:         unknown\n\
+         encrypted:      no\n\
+         supported:      no\n\
+         integrity:      unknown\n"
     );
     // A `None` field is omitted entirely, never printed as an empty value or a dash.
     assert!(!text.contains("version:"));
@@ -455,15 +457,15 @@ fn the_parameter_block_prints_six_fields_and_omits_the_absent_ones() {
     });
     assert_eq!(
         params_lines("key", &p),
-        "key-cipher:   AES\n\
-         key-hash:     SHA-512\n\
-         key-bits:     256\n\
-         key-spin:     100000\n"
+        "key-cipher:     AES\n\
+         key-hash:       SHA-512\n\
+         key-bits:       256\n\
+         key-spin:       100000\n"
     );
     // The same six-field loop under the other prefix -- one function, run twice.
     assert_eq!(
         params_lines("pw", &params(|p| p.block_size = Some(16))),
-        "pw-block:     16\n"
+        "pw-block:       16\n"
     );
     // An all-absent block prints nothing at all rather than six empty lines.
     assert_eq!(params_lines("key", &params(|_| {})), "");
@@ -481,6 +483,7 @@ fn the_json_object_carries_the_full_key_set_for_an_input_that_classifies_as_noth
         keys,
         [
             "container",
+            "container_read",
             "data_integrity",
             "document",
             "encrypted",
@@ -778,8 +781,9 @@ fn junk_routes_to_not_office_with_the_unknown_container_wording() {
 
 #[test]
 fn a_plain_zip_routes_to_refused_with_the_shared_not_encrypted_sentence() {
-    // `is_zip` needs four bytes: `PK\x03\x04` classifies as Zip / OoxmlPackage /
-    // Unencrypted with no fixture at all.
+    // `is_zip` needs four bytes: `PK\x03\x04` classifies as Zip / ZipArchive /
+    // Unencrypted with no fixture at all -- `ZipArchive` rather than `OoxmlPackage`
+    // because nothing inside the archive is read.
     assert_eq!(
         route_for(&classify(b"PK\x03\x04"), IntegrityPolicy::default()),
         Err(Refusal {

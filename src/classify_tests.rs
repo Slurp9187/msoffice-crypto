@@ -631,11 +631,125 @@ fn an_ooxml_container_is_still_reported_as_an_ooxml_package() {
             "{name}: an EncryptionInfo container is an OOXML package, never a binary one"
         );
     }
+    // ...and the other half of the same rule: a *plain* archive is not one of those, and
+    // must not claim to be. `is_zip` reads four bytes and opens nothing, so `OoxmlPackage`
+    // here would be an affirmative claim about a format nothing looked at.
     assert_eq!(
         classify(&fixture("plain.docx")).document,
-        Document::OoxmlPackage,
-        "a plain zip package is an OOXML package too"
+        Document::ZipArchive,
+        "a plain zip is reported as the archive it is, not as the package it might be"
     );
+}
+
+/// The contract [`Document::ZipArchive`] states, asserted rather than described: at this
+/// layer a real `.docx` and a zip that merely starts with `PK\x03\x04` are *the same
+/// verdict*, because the test that produced it is the same four bytes in both cases.
+///
+/// Delete `Document::ZipArchive` and route the ZIP branch back to `OoxmlPackage` and this
+/// still passes -- it is about the two being equal, not about which variant they are. So
+/// the assertion below on `plain.docx` is what makes the pair meaningful, and the two
+/// tests are written to fail for different reasons on purpose.
+#[test]
+#[cfg_attr(
+    not(fixture_corpus),
+    ignore = "needs the fixture corpus, which the published crate does not ship"
+)]
+fn a_zip_is_not_inspected_so_a_package_and_an_impostor_are_indistinguishable() {
+    // A zip signature followed by bytes belonging to no package at all -- the shape of a
+    // look-alike that carries Office-ish structure without being an Office file.
+    let impostor = b"PK\x03\x04not an OOXML package, and nothing here was read";
+    let real = classify(&fixture("plain.docx"));
+    let fake = classify(impostor);
+
+    assert_eq!(real.document, fake.document);
+    assert_eq!(real.container, fake.container);
+    assert_eq!(real.family, fake.family);
+    assert_eq!(
+        real.document,
+        Document::ZipArchive,
+        "and the shared verdict is the one that claims nothing about the contents"
+    );
+    // Nothing was opened, so nothing failed to open -- which is a different fact from
+    // the `Unreadable` a truncated CFB gets.
+    assert_eq!(fake.container_read, ContainerRead::NotAttempted);
+}
+
+/// A prefix of a real file and a genuinely unrecognisable one are **not** the same
+/// verdict, and before `container_read` existed they were.
+///
+/// This is the test the feature is for. Every other field agrees across the two inputs
+/// below -- both are `Family::Unknown`, both `Document::Unknown`,
+/// `IntegrityDeclaration::Unknown` -- so a caller dispatching on any of them takes the
+/// same branch for "I was handed too few bytes" as for "this is not an Office file". One
+/// of those is a missing answer and the other is a wrong one.
+///
+/// **Proven by removal**: route the `Err(Error::NotACfbFile)` arm in `classify_cfb` back
+/// to `classify_binary(data)` and the first assertion fails with
+/// `Opened`/`NotAttempted` -- because `binary_office::probe` opens the container with the
+/// same call that already failed, so the walk reports "looked, found nothing".
+#[test]
+#[cfg_attr(
+    not(fixture_corpus),
+    ignore = "needs the fixture corpus, which the published crate does not ship"
+)]
+fn a_prefix_is_reported_as_unreadable_rather_than_as_unknown() {
+    let whole = fixture("agile_encrypted.docx");
+
+    // 128 bytes is what a header sniff typically reads; 4096 is a whole CFB sector, and
+    // is included because "peek a bigger header" is the obvious wrong fix.
+    for cut in [128usize, 512, 4096] {
+        let part = classify(&whole[..cut]);
+        assert_eq!(
+            part.container,
+            Container::Cfb,
+            "{cut}: the signature is in the first eight bytes and is still read"
+        );
+        assert_eq!(
+            part.container_read,
+            ContainerRead::Unreadable,
+            "{cut}: the directory is past the end of these bytes"
+        );
+        // The fields a caller would otherwise dispatch on, all uninformative.
+        assert_eq!(part.family, Family::Unknown, "{cut}");
+        assert_eq!(part.document, Document::Unknown, "{cut}");
+    }
+
+    // The control: the same `Family::Unknown`, reached the other way. Without this the
+    // test above could pass by reporting `Unreadable` for everything.
+    let junk = classify(b"not an office file at all");
+    assert_eq!(junk.family, Family::Unknown);
+    assert_eq!(junk.container_read, ContainerRead::NotAttempted);
+
+    // And the whole file, so the test cannot pass by never reporting `Opened`.
+    assert_eq!(classify(&whole).container_read, ContainerRead::Opened);
+    assert_eq!(classify(&whole).family, Family::Agile);
+}
+
+/// A CFB this crate opens but recognises nothing in reports `Opened`, not `Unreadable`.
+///
+/// The distinction the enum exists for, from the other side: `excel97_plain.xls` opens
+/// fine and is a format the probe knows, so anything reporting `Unreadable` there would
+/// be claiming the bytes were short when they were complete.
+#[test]
+#[cfg_attr(
+    not(fixture_corpus),
+    ignore = "needs the fixture corpus, which the published crate does not ship"
+)]
+fn a_container_that_opens_reports_opened_whatever_was_found_inside() {
+    for name in [
+        "agile_encrypted.docx",
+        "standard_encrypted.docx",
+        "word97_plain.doc",
+        "excel97_plain.xls",
+        "excel97_xor.xls",
+        "powerpoint97_password.ppt",
+    ] {
+        assert_eq!(
+            classify(&fixture(name)).container_read,
+            ContainerRead::Opened,
+            "{name}: the container opened, so the verdict describes bytes that were read"
+        );
+    }
 }
 
 #[test]

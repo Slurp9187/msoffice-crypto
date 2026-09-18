@@ -17,8 +17,8 @@ use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command};
 use msoffice_crypto::decrypt_binary_office;
 use msoffice_crypto::{
     classify, decrypt_ooxml_with_policy, encrypt_ooxml, encrypt_ooxml_standard, AlgorithmParams,
-    CipherAlgorithm, Classification, Container, Decrypted, Document, Error, Family, HashAlgorithm,
-    IntegrityDeclaration, IntegrityOutcome, IntegrityPolicy,
+    CipherAlgorithm, Classification, Container, ContainerRead, Decrypted, Document, Error, Family,
+    HashAlgorithm, IntegrityDeclaration, IntegrityOutcome, IntegrityPolicy,
 };
 use serde_json::{json, Map, Value};
 
@@ -296,10 +296,26 @@ fn container_name(c: Container) -> &'static str {
 fn document_name(d: Document) -> &'static str {
     match d {
         Document::OoxmlPackage => "ooxml-package",
+        // Not "ooxml-package": four bytes of `PK` magic, nothing inside the archive read.
+        // The two were one word until the classifier stopped claiming more than it checked.
+        Document::ZipArchive => "zip-archive",
         Document::WordBinary => "word-binary",
         Document::ExcelBinary => "excel-binary",
         Document::PowerPointBinary => "powerpoint-binary",
         Document::Unknown => "unknown",
+        _ => "unrecognised",
+    }
+}
+
+/// `container-read:` — whether the container's directory was reachable in the bytes
+/// supplied. The one line that tells a reader whether the `unknown`s above it mean
+/// "looked, found nothing" or "could not look", which for a file handed over in pieces is
+/// the difference between an answer and a missing one.
+fn container_read_name(r: ContainerRead) -> &'static str {
+    match r {
+        ContainerRead::Opened => "opened",
+        ContainerRead::Unreadable => "unreadable",
+        ContainerRead::NotAttempted => "not-attempted",
         _ => "unrecognised",
     }
 }
@@ -438,7 +454,7 @@ fn outcome_name(o: IntegrityOutcome) -> &'static str {
 /// crate goes out of its way to surface it.
 fn params_lines(prefix: &str, p: &AlgorithmParams) -> String {
     let mut out = String::new();
-    let mut line = |k: String, v: String| out.push_str(&format!("{k:<14}{v}\n"));
+    let mut line = |k: String, v: String| out.push_str(&format!("{k:<16}{v}\n"));
     if let Some(v) = p.cipher {
         line(format!("{prefix}-cipher:"), cipher_name(v).to_string());
     }
@@ -488,10 +504,15 @@ fn params_json(p: &AlgorithmParams) -> Value {
 fn classification_human(c: &Classification) -> String {
     let mut out = String::new();
     {
-        // The sibling's idiom at width 14: `key-cipher:` is eleven characters and the
-        // plan's sample aligns every value at column 15.
-        let mut line = |k: &str, v: &str| out.push_str(&format!("{k:<14}{v}\n"));
+        // Width 16, taken from the longest key rather than chosen by eye:
+        // `container-read:` is fifteen characters, and at the 14 this used to be its
+        // value ran straight into the colon with no gap. `params_lines` above shares the
+        // width because its output is appended to this one.
+        // (Was 14, the sibling's idiom, when `key-cipher:` at eleven was the longest.)
+        let mut line = |k: &str, v: &str| out.push_str(&format!("{k:<16}{v}\n"));
         line("container:", container_name(c.container));
+        // Immediately after `container:`, because it qualifies every line below it.
+        line("container-read:", container_read_name(c.container_read));
         line("document:", document_name(c.document));
         // Omitted entirely when absent -- never printed as an empty value or a dash.
         if let Some((major, minor)) = c.version {
@@ -531,6 +552,10 @@ fn classification_human(c: &Classification) -> String {
 fn classification_json(c: &Classification) -> String {
     let mut o = Map::new();
     o.insert("container".into(), json!(container_name(c.container)));
+    o.insert(
+        "container_read".into(),
+        json!(container_read_name(c.container_read)),
+    );
     o.insert("document".into(), json!(document_name(c.document)));
     o.insert(
         "version".into(),

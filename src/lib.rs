@@ -87,7 +87,7 @@
 //! it, together with `aes`, `cbc`, `ecb`, `sha1`, `sha2`, `hmac`, `base64` and `rand`:
 //!
 //! ```toml
-//! msoffice-crypto = { version = "0.1.0-rc.2", features = ["crypto-ops"] }
+//! msoffice-crypto = { version = "0.1.0-rc.3", features = ["crypto-ops"] }
 //! ```
 //!
 //! <div class="warning">
@@ -125,7 +125,7 @@
 //! nothing modern needs — to that build alone:
 //!
 //! ```toml
-//! msoffice-crypto = { version = "0.1.0-rc.2", features = ["legacy-binary"] }
+//! msoffice-crypto = { version = "0.1.0-rc.3", features = ["legacy-binary"] }
 //! ```
 //!
 //! # Trademarks
@@ -254,8 +254,8 @@ mod malformed_input;
 mod legacy_malformed;
 
 pub use classify::{
-    classify, AlgorithmParams, CipherAlgorithm, Classification, Container, Document, Family,
-    HashAlgorithm, IntegrityDeclaration,
+    classify, AlgorithmParams, CipherAlgorithm, Classification, Container, ContainerRead, Document,
+    Family, HashAlgorithm, IntegrityDeclaration,
 };
 /// Gated with the functions that return it. In a detection-only build no public
 /// function returns a `Result`, so an ungated re-export was a public type nothing
