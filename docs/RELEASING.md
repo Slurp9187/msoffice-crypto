@@ -85,17 +85,53 @@ two fixtures. Everything else — `tests/*.rs`, `examples/`, the other seventeen
 
 ```bash
 cargo publish --locked --dry-run            # builds AND verifies; not --no-verify
+cargo package --locked                      # and NOT just --list; see below
 cargo package --locked --list               # read it, do not skim it
 ```
 
-Then unpack and test what a consumer would actually receive:
+**`--dry-run` leaves no `.crate` behind**, so it cannot satisfy the unpack step on its own.
+It builds and verifies and then discards the artifact. `cargo package` is what writes the
+`.crate` and an unpacked copy beside it. Running only `--dry-run` and then looking for a
+tarball finds the *previous* release's, which is the wrong file and looks like the right
+one.
+
+**Find the artifact rather than assuming `target/`.** `CARGO_TARGET_DIR` may be set in the
+environment — it was for the rc.3 cut, pointing into a scratch directory — and everything
+lands under it instead:
 
 ```bash
-cd target/package/msoffice-crypto-<version>
+cargo package --locked 2>&1 | grep -i packaged      # says how many files
+find "${CARGO_TARGET_DIR:-target}/package" -name '*.crate' -newer Cargo.toml
+```
+
+Then unpack and test what a consumer would actually receive. **Extract to a short path on
+Windows.** Cargo appends `target/debug/build/<pkg>-<hash>/build_script_build-<hash>.exe` to
+wherever the tarball sits, and from a scratch directory that crosses `MAX_PATH`: every build
+script then fails `LINK : fatal error LNK1104: cannot open file`, which reads as a crate
+defect and is not one.
+
+```bash
+mkdir -p /o/t && tar -xzf <path>/msoffice-crypto-<version>.crate -C /o/t
+cd /o/t/msoffice-crypto-<version>
+unset CARGO_TARGET_DIR                      # or the build escapes the tarball
 cargo test --no-default-features
 cargo test --no-default-features --features crypto-ops
 cargo test --no-default-features --features legacy-binary
 ```
+
+Use a POSIX path with `tar` (`/c/...`, not `C:/...`) — GNU tar reads `C:` as a remote host
+and fails with `Cannot connect to C: resolve failed`.
+
+**Assert you are in the tarball before believing any of it.** A failed `cd` leaves the
+commands running in the repository, where they pass and mean nothing:
+
+```bash
+[ -f Cargo.toml ] && [ ! -d docs ] && [ ! -d tools ] || { echo "not the tarball"; exit 1; }
+```
+
+That guard is not hypothetical. During the rc.3 cut a failed `cd` produced seven
+"absent as intended" lines checked against a directory that did not exist, and three green
+test configurations that had run in the repository.
 
 Measured 2026-09-19 for v0.1.0-rc.3, and **every one must be green**:
 
