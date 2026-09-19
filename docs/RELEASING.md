@@ -97,13 +97,20 @@ cargo test --no-default-features --features crypto-ops
 cargo test --no-default-features --features legacy-binary
 ```
 
-Measured 2026-09-05, and **every one must be green**:
+Measured 2026-09-19 for v0.1.0-rc.3, and **every one must be green**:
 
 | Build | tarball | repository |
 | --- | --- | --- |
-| detection | 20 passed, 0 failed, **10 ignored** | 30 passed, **0 ignored** |
-| `crypto-ops` | 156 passed, 0 failed, **19 ignored** | 175 passed, **0 ignored** |
-| `legacy-binary` | 175 passed, 0 failed, **30 ignored** | 205 passed, **0 ignored** |
+| detection | 37 passed, 0 failed, **13 ignored** | 50 passed, **0 ignored** |
+| `crypto-ops` | 184 passed, 0 failed, **22 ignored** | 215 passed, **0 ignored** |
+| `legacy-binary` | 205 passed, 0 failed, **33 ignored** | 257 passed, **0 ignored** |
+
+**Re-measure these at each release rather than trusting them.** They were the 2026-09-05
+figures until rc.3 and every one of the six had drifted; nothing machine-checks them. The
+totals are not expected to match across the two columns either: `detection` does
+(37 + 13 = 50, the same tests with thirteen reported honestly as ignored), but the other two
+lose tests outright, because the `tests/*.rs` integration files are not in the `include`
+allowlist and so do not exist in the tarball at all.
 
 **The ignored count is a check, not an accident.** `build.rs` sets `cfg(fixture_corpus)`
 when it finds any of the seventeen withheld fixtures, and the corpus-dependent tests carry

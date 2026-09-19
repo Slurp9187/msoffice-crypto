@@ -170,10 +170,12 @@ spec or in a permissive reference. Cite where it came from.
   `include_bytes!` — because the other seventeen were two thirds of the `.crate`.
 - **The corpus tests are `#[ignore]`d where there is no corpus, never skipped silently.**
   `build.rs` sets `cfg(fixture_corpus)` when it finds any of the seventeen withheld
-  fixtures, and the thirty corpus-dependent tests carry
+  fixtures, and the 33 corpus-dependent tests carry
   `#[cfg_attr(not(fixture_corpus), ignore = "…")]`. So the published crate's `cargo test` is
-  green with them reported as **ignored, with a reason**, while this repository runs all
-  thirty. An early `return` on a missing file would be the anti-pattern above wearing a hat.
+  green with them reported as **ignored, with a reason**, while this repository runs all 33.
+  (The count is a moving figure, not an invariant -- it was thirty until the v0.1.0-rc.3
+  classify work added three. The invariant is the two-way read below, which does not depend
+  on it.) An early `return` on a missing file would be the anti-pattern above wearing a hat.
   **Read the ignored count in both directions:** 0 in a tarball means the corpus leaked into
   the allowlist; anything but 0 here means a fixture is missing. A partial corpus counts as
   present, so the one that is gone still fails by name.

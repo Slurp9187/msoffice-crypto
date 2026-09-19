@@ -24,6 +24,30 @@ What survives that move is in two places, deliberately:
 
 ## v0.1.0-rc.3 — unreleased
 
+### Evidence for this release
+
+The four-reader acceptance gate, run on this machine 2026-09-19 against artifact SHA-256
+`7b381f54483d962ef542204ed79aee6ae7bada32e09cd615722e45595d8a92e9` (41,984 bytes), written
+into a private directory rather than shared system temp:
+
+```
+office         PASS  Word 16.0 build 16.0.19127: OPENED, content matches | WRONG PASSWORD REFUSED 0x800A1520
+libreoffice    PASS  LibreOffice 26.2.1.2: OPENED, content matches | WRONG PASSWORD REFUSED (verifier)
+msoffcrypto    PASS  msoffcrypto-tool 6.0.0: byte-identical to plain.docx | dataIntegrity HMAC verifies
+office-crypto  PASS  office-crypto 0.3: byte-identical to plain.docx
+GATE: PASS (4 of 4 readers ran; 0 not selected)
+```
+
+Both mutation proofs reached `EXPECTED FAIL`. `--tamper` failed **4 of 4** readers;
+`--corrupt-integrity` failed **3 of 4** — office-crypto 0.3 verifies neither the password
+verifier nor `dataIntegrity`, so blanking those blobs cannot make it fail, and three is the
+number that shows the mutation hit the field it names.
+
+Tarball verified by extraction and re-run, not by inspection: 46 files, the two allowlisted
+fixtures and no others, and the ignored count inverting as it must — 13/22/33 ignored inside
+the tarball against 0 in the repository.
+
+
 ### `classify` no longer claims a plain ZIP is an OOXML package
 
 `Document::ZipArchive` is a new variant, and every plain `PK` signature reports it instead of
