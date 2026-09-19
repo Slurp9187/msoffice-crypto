@@ -10,6 +10,11 @@
 >
 > The experimental code was never merged and no longer exists: a throwaway WSL clone with
 > `standard_encrypt::generate` reverted to its pre-fix form.
+>
+> **The one test that did land has since moved out.** `tests/heap_residue.rs` reached `main`
+> and was removed again: every assertion in it was a property of the allocator rather than
+> of this crate, and it went to `secure-gate` along with the rest of the harness and the raw
+> captures. The design document records where.
 
 ---
 

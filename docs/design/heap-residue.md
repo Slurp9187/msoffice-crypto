@@ -151,11 +151,22 @@ The agile figure is different in kind: ~100,000 of its released blocks are `spin
 per-round intermediates, which *are* key-derived, and which the secure-gate skill names as
 a case a wrapper cannot economically reach.
 
-**Which is why there is no regression test here, only a measurement.** One block in 520,
-against counts that already move with the optimization level and the randomised verifier,
-is below the noise. `tests/heap_residue.rs` is `#[ignore]`d and asserts only that the
-instrument is still observing — a threshold would pass with and without the thing it
+**Which is why there was never a regression test here, only a measurement.** One block in
+520, against counts that already move with the optimization level and the randomised
+verifier, is below the noise — a threshold would have passed with and without the thing it
 claimed to guard.
+
+**The harness itself no longer lives here.** Every assertion it made was a property of the
+*allocator* rather than of this crate, so it moved to `secure-gate`, which is the crate
+whose `SECURITY.md` recommends installing one and therefore the crate that owes the
+demonstration (`Slurp9187/secure-gate` PR #259). What went with it: the spy, the `NoWipe`
+control, the three test binaries, the PGO comparison script, and — committed there as
+receipts rather than transcribed — the raw captures and the ad-hoc scripts that actually
+produced the numbers below.
+
+**Read the tables here as dated evidence, not as something reproducible in this tree.**
+They were measured on the dates and toolchains stated. Re-running them is `secure-gate`'s
+harness now.
 
 ### Independently reproduced, with a third configuration that settles the instrument
 
