@@ -22,6 +22,26 @@ What survives that move is in two places, deliberately:
 
 ---
 
+## v0.1.0-rc.4 — unreleased
+
+### The release runbook now covers the window between tagging and publishing
+
+`cargo publish` packages the working tree, not the tag, and
+`.cargo_vcs_info.json` inside the `.crate` records `HEAD` at the moment it ran. A commit
+made after tagging therefore decides what is published, silently, and the tag is never
+consulted.
+
+Found by doing it: during the rc.3 cut a docs-only commit landed about a minute after the
+tag, and the publish recorded that commit rather than the tagged one. It cost nothing —
+`docs/` is not in the `include` allowlist, and the published crate was verified
+byte-identical to the tagged tree, 42 shipped files compared, 0 differing — but the same
+mistake one directory over would have published a tree the acceptance gate never ran
+against.
+
+`docs/RELEASING.md` § 5a now says to stop committing until step 6 is done, and carries the
+two commands for finding out what a publish actually recorded, plus the decision that
+follows: move the tag if nothing shipped changed, yank and re-cut if something did.
+
 ## v0.1.0-rc.3 — 2026-09-19
 
 ### Evidence for this release

@@ -246,6 +246,45 @@ tags *missing* from the remote — it will not move one, and reports `Everything
 while the remote quietly keeps the old commit. To move one: `git push -f origin vX.Y.Z`, by
 name. Never `git push --tags`, which publishes every local tag including scratch markers.
 
+### Then stop committing until step 6 is done
+
+**`cargo publish` packages the working tree, not the tag.** Any commit made between tagging
+and publishing silently decides what gets published, because the `.cargo_vcs_info.json`
+inside the `.crate` records `HEAD` at the moment `cargo publish` ran. The tag is not
+consulted.
+
+This is not hypothetical. During the rc.3 cut a docs-only commit landed on `main` about a
+minute after the tag, and the publish that followed recorded **that** commit rather than the
+tagged one:
+
+```
+tag v0.1.0-rc.3          -> 4d2635b  "Cut v0.1.0-rc.3"
+published .cargo_vcs_info -> 50bbbb3  "Teach the runbook ..."
+```
+
+It cost nothing, because the commit touched only `docs/RELEASING.md` and `docs/` is not in
+the `include` allowlist — the published crate was verified byte-identical to the tagged tree,
+42 shipped files compared, 0 differing. Had it touched anything under `src/`, the published
+artifact would have been a tree nobody ran the gate against, and the tag would have pointed
+somewhere else entirely.
+
+So: **tag, publish, and only then resume committing.** If a commit does slip in, do not
+assume it was harmless — check, then decide:
+
+```bash
+# what did the published crate actually record?
+curl -sL "https://crates.io/api/v1/crates/<name>/<version>/download" -o published.crate
+tar -xzOf published.crate <name>-<version>/.cargo_vcs_info.json
+
+# did any SHIPPED file change between that commit and the tag?
+git diff --name-only <tag>..<published-sha>   | grep -E '^(src/|build\.rs|LICENSE|NOTICE|SECURITY\.md|README\.md|Cargo\.toml)'
+```
+
+If nothing shipped changed, move the tag to the published commit so it describes the
+artifact (`git push -f origin vX.Y.Z`). If something did, the tag is the smaller problem:
+the published `.crate` is immutable and was built from an unverified tree, so yank and
+re-cut.
+
 ## 6. Publish
 
 ```bash

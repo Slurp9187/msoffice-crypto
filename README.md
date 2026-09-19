@@ -41,7 +41,7 @@ Decryption is the `crypto-ops` feature, which adds the ciphers and hashes (`aes`
 for the encrypt half, a CSPRNG (`rand`):
 
 ```toml
-msoffice-crypto = { version = "0.1.0-rc.3", features = ["crypto-ops"] }
+msoffice-crypto = { version = "0.1.0-rc.4", features = ["crypto-ops"] }
 ```
 
 ```rust
@@ -85,7 +85,7 @@ CFB container with its encrypted streams replaced, which is what Word, Excel and
 PowerPoint open.
 
 ```toml
-msoffice-crypto = { version = "0.1.0-rc.3", features = ["legacy-binary"] }
+msoffice-crypto = { version = "0.1.0-rc.4", features = ["legacy-binary"] }
 ```
 
 ```rust
