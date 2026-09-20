@@ -128,6 +128,21 @@ the bump would have broken plain-package detection with a green build and green 
 No remedy is offered and none is needed: the break happened, it stands, and this is the
 sentence that says so.
 
+**The two breaking changes in this release are not the same kind, and the difference is what
+a consumer can plan for.** `check_encryptable` refusing input that used to be accepted
+*announces itself*: an `unwrap` panics, a handled `Result` takes its error arm, a test that
+asserted the old permissiveness goes red. Something happens, at a place that names the
+change. The `Document` narrowing does none of that — a `matches!` arm quietly evaluates
+`false` and the program carries on being wrong. **A consumer can plan for a build that
+breaks and cannot plan for a match arm that stops matching**, so a silent narrowing needs
+this paragraph in a way a loud refusal does not.
+
+Drawn from the downstream consumer again, who found the distinction by having one of each:
+the refusal broke exactly one of their assertions — a *negative control* written to prove
+their own input gate was load-bearing rather than decorative, which this release makes
+redundant in the good direction — while the narrowing would have broken nothing visible at
+all. They are keeping the refusal and rewriting the control.
+
 ### The acceptance gate no longer claims to have verified an HMAC that does not exist
 
 `tools/acceptance_gate.py`'s `msoffcrypto` leg returned `dataIntegrity HMAC verifies
