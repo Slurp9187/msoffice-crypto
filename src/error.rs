@@ -6,12 +6,19 @@
 
 /// Every reason this crate refuses a file.
 ///
-/// `#[non_exhaustive]`: variants are still arriving — RC4 CryptoAPI decryption (GH #4)
-/// and the encrypt path (GH #6) each add their own — and this crate's own testing rule
-/// makes consumers match on variants by name, so a wildcard arm has to be theirs to
-/// write. Free to add now; a breaking change the moment GH #9 publishes.
+/// `#[non_exhaustive]`: variants are still arriving — RC4 CryptoAPI decryption (GH #4),
+/// the encrypt path (GH #6) and the encrypt guard have each added their own — and this
+/// crate's own testing rule makes consumers match on variants by name, so a wildcard arm
+/// has to be theirs to write.
 ///
-/// Nine of the fourteen variants exist only under `crypto-ops`, one only under
+/// Adding a variant therefore never fails a consumer's build. That is the hazard, not the
+/// safety: their wildcard arm silently absorbs the new case, so a variant that splits a
+/// fact they were handling changes what their code does with nothing red anywhere. The
+/// crate is published on a release-candidate line where that is permitted (see CLAUDE.md
+/// § *Project Status*), and the obligation it leaves is to name the split in the changelog
+/// as a fact.
+///
+/// Twelve of the seventeen variants exist only under `crypto-ops`, one only under
 /// `legacy-binary`, and so does the public re-export of the type itself. In a
 /// detection-only build no public function returns a `Result` — [`crate::classify()`]
 /// answers every input and [`crate::is_cfb_office()`] is a `bool` — so the type would be a
@@ -24,6 +31,12 @@
 /// interpolated into [`Error::BadParameters`] — it is bounded and truncated at
 /// the construction site, and the variant says so. Match with a `_` arm: the enum does
 /// not implement `PartialEq`.
+///
+/// The encrypt guard's three variants quote nothing at all.
+/// [`Error::AlreadyEncrypted`] carries [`crate::Family`] and [`crate::Document`], which
+/// are fieldless `Copy` enums from the detection half; the other two carry no payload.
+/// None of the three has a byte of the file in it, and none interpolates its payload into
+/// its message.
 ///
 /// # Who the messages are written for
 ///
@@ -295,6 +308,82 @@ pub enum Error {
     #[cfg(feature = "crypto-ops")]
     RandomSource(String),
 
+    /// The bytes handed to an encrypt entry point already carry a password-to-open.
+    ///
+    /// **This crate used to encrypt them anyway.** The result was a CFB container wrapped
+    /// in a second CFB container, indistinguishable from a single wrap without decrypting
+    /// it, and openable only by decrypting twice with two passwords the holder believed
+    /// was one. It was found by a consumer, which had to reimplement this crate's own CLI
+    /// guard to avoid it — the definition of a check that was in the wrong place.
+    ///
+    /// Distinct from [`Self::NotAPlainPackage`], and the distinction is the remedy: this
+    /// file can be decrypted and re-encrypted, and that one cannot be encrypted at all. A
+    /// renderer that collapses the two tells the holder of a `.doc` to decrypt it first,
+    /// which this crate will do and then refuse to undo.
+    ///
+    /// The partition is [`crate::Classification::is_encrypted`], so a CFB whose container
+    /// could not be read ([`crate::ContainerRead::Unreadable`]) reports
+    /// [`Self::NotAPlainPackage`] rather than this. Both are refusals, so nothing is
+    /// admitted because a family could not be determined.
+    ///
+    /// `family` and `document` are [`crate::classify()`]'s verdict on the same bytes:
+    /// `Copy` enums from the detection half, never text, so no part of the file reaches
+    /// this variant. They are payload rather than message because the wording a caller
+    /// wants depends on them — "decrypt it first" is a remedy for an encrypted package and
+    /// a dead end for an encrypted `.doc`, which has no writer in any build — and because
+    /// making a caller re-run `classify()` to learn a fact this refusal already
+    /// established is what the note above tells consumers they should not have to do.
+    /// Neither is interpolated into the message: neither has a `Display` impl,
+    /// deliberately, because naming them is a renderer's job.
+    #[error(
+        "the input is already encrypted: this crate encrypts a plain OOXML package, and \
+        these bytes are an Office-encrypted CFB container"
+    )]
+    #[cfg(feature = "crypto-ops")]
+    AlreadyEncrypted {
+        /// The encryption family [`crate::classify()`] found.
+        family: crate::Family,
+        /// The document kind it found, or [`crate::Document::Unknown`] where it could not
+        /// tell — eight bytes of CFB magic are `Unknown`, and the remedy differs by kind.
+        document: crate::Document,
+    },
+
+    /// The bytes are a CFB container that is not an encrypted package: a 97-2003 binary
+    /// document, or a container this crate could not read far enough to say.
+    ///
+    /// Distinct from [`Self::AlreadyEncrypted`] because there is no remedy. This crate has
+    /// no writer for the 97-2003 binary formats, so "decrypt it first" is advice that ends
+    /// in a second refusal in every build.
+    ///
+    /// **Deliberately carries no `Document`.** The commonest input here — a CFB whose
+    /// directory is unreachable — is [`crate::Document::Unknown`], and a message built
+    /// from it would name a document kind [`crate::classify()`] refused to name. The
+    /// variant has no field to build one from, so that cannot be written by accident.
+    #[error(
+        "the input is a CFB container, not a plain OOXML package: this crate writes \
+        encryption around a .docx/.xlsx/.pptx ZIP, and there is no writer for the \
+        97-2003 binary formats"
+    )]
+    #[cfg(feature = "crypto-ops")]
+    NotAPlainPackage,
+
+    /// The bytes are neither a ZIP package nor a CFB container.
+    ///
+    /// Its own variant rather than a case of [`Self::NotAPlainPackage`] because a caller
+    /// acts on it differently, and this crate's CLI already proves it: an unrecognised
+    /// container is "you handed me the wrong file" (exit 3) and a CFB is "I recognise this
+    /// and will not write into it" (exit 5). Two facts, two numbers, two variants.
+    ///
+    /// Not [`Self::NotACfbFile`], which is the decrypt side's refusal and means the
+    /// opposite thing: there a CFB is what was wanted, and here it is one of the two
+    /// shapes being refused.
+    #[error(
+        "the input is neither an OOXML package nor a CFB container: there is nothing \
+        here to encrypt"
+    )]
+    #[cfg(feature = "crypto-ops")]
+    UnknownContainer,
+
     /// Reading or writing the in-memory CFB container failed.
     ///
     /// The inner [`std::io::Error`] describes the operation — a flush, a stream write —
@@ -307,7 +396,7 @@ pub enum Error {
 ///
 /// `src/bin/msoffice-crypto.rs` maps every [`Error`] to an exit code, and its `match`
 /// needs a `_` arm: the enum is `#[non_exhaustive]` and the binary is a separate crate.
-/// A `_` arm produces no diagnostic when a variant is added, so a fifteenth variant
+/// A `_` arm produces no diagnostic when a variant is added, so an eighteenth variant
 /// would silently become exit 7 with nothing red anywhere.
 ///
 /// This table duplicates that one **without** a `_` arm, inside the defining crate,
@@ -349,6 +438,12 @@ mod exit_code_canary {
             Error::IntegrityUnavailable(_) => 8,
             #[cfg(feature = "crypto-ops")]
             Error::RandomSource(_) => 7,
+            #[cfg(feature = "crypto-ops")]
+            Error::AlreadyEncrypted { .. } => 5,
+            #[cfg(feature = "crypto-ops")]
+            Error::NotAPlainPackage => 5,
+            #[cfg(feature = "crypto-ops")]
+            Error::UnknownContainer => 3,
         }
     }
 
@@ -360,5 +455,11 @@ mod exit_code_canary {
         assert_eq!(exit_code(&Error::IntegrityElementMissing), 8);
         #[cfg(feature = "legacy-binary")]
         assert_eq!(exit_code(&Error::NotEncrypted), 5);
+        // The two encrypt-guard refusals that share a code, and the one that does not:
+        // 5 is "I recognise this and will not write into it", 3 is "wrong file".
+        #[cfg(feature = "crypto-ops")]
+        assert_eq!(exit_code(&Error::NotAPlainPackage), 5);
+        #[cfg(feature = "crypto-ops")]
+        assert_eq!(exit_code(&Error::UnknownContainer), 3);
     }
 }

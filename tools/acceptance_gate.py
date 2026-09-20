@@ -177,6 +177,38 @@ def leg_libreoffice(artifact: Path, pw: str, wrong: str, exp: Expectation) -> Ve
 # ---- the two independent implementations ---------------------------------------------------
 
 
+def declares_data_integrity(artifact: Path) -> bool:
+    """Does this artifact carry a `<dataIntegrity>` element for anything to verify?
+
+    Same technique as `corrupt_integrity`, and for the same reason: the version pair
+    ([MS-OFFCRYPTO] 2.3.4.10, the first two LE u16s of `EncryptionInfo`) names the family
+    without guessing, and only agile (4.4) has an XML `EncryptionInfo` that can carry the
+    element. Anything else -- a standard 2007 binary header, a stream too short to hold a
+    version, a file that is not a CFB at all -- declares none.
+
+    Deliberately total rather than raising: this answers a question about what a verdict
+    is allowed to claim, and a gate leg must not fail because the question was hard.
+    """
+    import olefile  # a dependency of the leg, not of the gate
+
+    try:
+        if not olefile.isOleFile(str(artifact)):
+            return False
+        ole = olefile.OleFileIO(str(artifact))
+        try:
+            if not ole.exists("EncryptionInfo"):
+                return False
+            info = ole.openstream("EncryptionInfo").read()
+            if len(info) < 8:
+                return False
+            version = (int.from_bytes(info[0:2], "little"), int.from_bytes(info[2:4], "little"))
+            return version == (4, 4) and b"dataIntegrity" in info
+        finally:
+            ole.close()
+    except Exception:  # noqa: BLE001 -- unreadable means undeclarable, for this purpose
+        return False
+
+
 def msoffcrypto_integrity(artifact: Path, pw: str) -> tuple[bool, str]:
     """Does the agile `dataIntegrity` HMAC verify, according to an implementation that is
     not this crate?
@@ -188,13 +220,21 @@ def msoffcrypto_integrity(artifact: Path, pw: str) -> tuple[bool, str]:
     comparison covers -- a package that decrypts to the right bytes under blobs that are
     meaningless is exactly what this catches, and what `--corrupt-integrity` builds.
 
-    A file with no `dataIntegrity` at all (ECMA-376 standard) has nothing to verify, and
-    msoffcrypto ignores the keyword for it; the verdict then says only that it decrypted.
+    **A file with no `dataIntegrity` says so, and this used to be a live defect in the
+    gate.** ECMA-376 standard defines no such element, msoffcrypto silently ignores the
+    keyword for it, and this function nevertheless returned "dataIntegrity HMAC verifies
+    (verify_integrity=True)" -- byte-identical to the line a real agile verification
+    produces. The docstring claimed the distinction the code did not make, so a 2007
+    artifact's PASS line asserted a check nobody had run. Reported by a downstream
+    consumer measuring its own artifacts, 2026-09-19. `declares_data_integrity` is now
+    consulted and the two cases read differently, so the string is evidence of exactly
+    what happened.
     """
     import io
 
     import msoffcrypto  # a dependency of the leg, not of the gate
 
+    declared = declares_data_integrity(artifact)
     try:
         with artifact.open("rb") as fh:
             of = msoffcrypto.OfficeFile(fh)
@@ -202,6 +242,8 @@ def msoffcrypto_integrity(artifact: Path, pw: str) -> tuple[bool, str]:
             of.decrypt(io.BytesIO(), verify_integrity=True)
     except Exception as e:  # noqa: BLE001 -- any refusal is a failed verification
         return False, f"{type(e).__module__}.{type(e).__name__}: {e}"
+    if not declared:
+        return True, "decrypted; NO dataIntegrity element to verify (verify_integrity is inert here)"
     return True, "dataIntegrity HMAC verifies (verify_integrity=True)"
 
 

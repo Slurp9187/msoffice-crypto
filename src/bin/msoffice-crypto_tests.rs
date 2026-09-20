@@ -141,6 +141,15 @@ fn exit_codes_map_every_error_class() {
     assert_eq!(exit_code(&Error::IntegrityElementMissing), EX_INTEGRITY);
     assert_eq!(exit_code(&Error::IntegrityUnavailable("x")), EX_INTEGRITY);
     assert_eq!(exit_code(&Error::RandomSource(String::new())), EX_INTERNAL);
+    assert_eq!(
+        exit_code(&Error::AlreadyEncrypted {
+            family: Family::Agile,
+            document: Document::OoxmlPackage
+        }),
+        EX_REFUSED
+    );
+    assert_eq!(exit_code(&Error::NotAPlainPackage), EX_REFUSED);
+    assert_eq!(exit_code(&Error::UnknownContainer), EX_NOT_OFFICE);
 
     // Gated with the variant itself: `cli` does not enable `legacy-binary`, and
     // `Error::NotEncrypted` does not exist in that column.
@@ -761,12 +770,6 @@ fn the_integrity_word_for_each_format_is_the_librarys_declaration() {
 }
 
 #[test]
-fn a_plain_zip_is_the_one_thing_encrypt_accepts() {
-    // Four bytes, no fixture: `is_zip` (classify.rs) needs exactly that.
-    assert_eq!(encrypt_guard(&classify(b"PK\x03\x04")), Ok(()));
-}
-
-#[test]
 fn junk_routes_to_not_office_with_the_unknown_container_wording() {
     // Fixture-free: sixteen bytes of junk is a legal Classification (T4).
     let r = route_for(&classify(b"sixteen bytes!!!"), IntegrityPolicy::default());
@@ -813,12 +816,11 @@ fn a_cfb_that_is_not_office_routes_to_not_office() {
 fn a_cfb_input_is_refused_at_five_without_naming_a_document_kind() {
     // The same eight CFB magic bytes as `a_cfb_that_is_not_office_routes_to_not_office`:
     // Cfb / Document::Unknown / not encrypted.
-    let magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
-    let r = encrypt_guard(&classify(&magic));
-    let Err(Refusal { code, why }) = r else {
-        panic!("a bare CFB must be refused, got {r:?}")
-    };
-    assert_eq!(code, EX_REFUSED);
+    // The guard moved into the library, so this is now about how the CLI renders the
+    // variant it raises rather than about the classification that raised it. The
+    // sentence and the code are unchanged, which is the point.
+    let why = describe(&Error::NotAPlainPackage);
+    assert_eq!(exit_code(&Error::NotAPlainPackage), EX_REFUSED);
     assert!(why.contains("CFB container"), "{why}");
     assert!(why.contains("OOXML package"), "{why}");
     // The load-bearing negative: `Document::Unknown` for these bytes must not be
@@ -839,9 +841,7 @@ fn encrypt_and_decrypt_answer_a_bare_cfb_with_different_codes() {
     let decrypt_code = route_for(&class, IntegrityPolicy::default())
         .expect_err("a bare CFB is not decryptable")
         .code;
-    let encrypt_code = encrypt_guard(&class)
-        .expect_err("a bare CFB is not a package")
-        .code;
+    let encrypt_code = exit_code(&Error::NotAPlainPackage);
     assert_eq!(decrypt_code, EX_NOT_OFFICE);
     assert_eq!(encrypt_code, EX_REFUSED);
     assert_ne!(
@@ -854,9 +854,7 @@ fn encrypt_and_decrypt_answer_a_bare_cfb_with_different_codes() {
 
 #[test]
 fn junk_is_refused_by_encrypt_with_the_same_sentence_decrypt_uses() {
-    let why_encrypt = encrypt_guard(&classify(b"sixteen bytes!!!"))
-        .expect_err("junk is not a package")
-        .why;
+    let why_encrypt = describe(&Error::UnknownContainer);
     let why_decrypt = route_for(&classify(b"sixteen bytes!!!"), IntegrityPolicy::default())
         .expect_err("junk is not decryptable")
         .why;

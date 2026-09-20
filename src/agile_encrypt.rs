@@ -221,10 +221,16 @@ pub(crate) fn encrypt_package(
 /// Encrypt an OOXML package with a password into a complete CFB container — the whole
 /// agile write path, assembled, with the randomness injected.
 ///
-/// The seeded entry point behind [`crate::encrypt_ooxml`], which is one line over this
-/// with `rand::rngs::SysRng`. Everything a test can prove about production goes through
-/// here: a committed golden under a seeded `chacha20::ChaCha12Rng`, and the external
-/// readers in GH #8 opening what a seeded run wrote.
+/// The seeded entry point behind [`crate::encrypt_ooxml`], which is this plus the shape
+/// guard and `rand::rngs::SysRng`. Everything a test can prove about production goes
+/// through here: a committed golden under a seeded `chacha20::ChaCha12Rng`, and the
+/// external readers in GH #8 opening what a seeded run wrote.
+///
+/// **This function encrypts whatever bytes it is handed.** The check that the input is a
+/// plain OOXML package is [`crate::check_encryptable`]'s, and it lives in the public
+/// wrapper rather than here — which is why this one is `pub(crate)`. Keeping it
+/// unguarded is deliberate: it is the constructor the golden tests and the degenerate
+/// payload tests drive, and those need to reach shapes the public entry point refuses.
 ///
 /// ```text
 /// material  = generate(password, spin_count, rng)                      step 4

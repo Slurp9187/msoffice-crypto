@@ -9,16 +9,30 @@ sibling solved it before inventing something new.
 
 ---
 
-## Project Status — pre-release, nothing published
+## Project Status — release candidates published, no stable release
 
-> **This crate has never been published. Its only consumer is a private application in
+> **`0.1.0-rc.2` (2026-09-16) and `0.1.0-rc.3` (2026-09-19) are live on crates.io, neither
+> yanked. There is no stable release. The only known consumer is a private application in
 > the same hands.**
 
-That fact changes the right answer to a whole class of scoping questions, so state it rather
-than assuming either way:
+This section said "has never been published" until 2026-09-19, two weeks after it stopped
+being true. The conclusions below were right anyway, but for a reason the text did not give,
+so the reason is now written down: the latitude comes from the **release-candidate line**,
+not from nothing having shipped.
+
+An `0.1.0-rc.N` is unstable twice over. It is `0.x`, which semver puts outside its
+compatibility guarantee, and it is a pre-release, which Cargo will not resolve for anyone who
+has not explicitly named a pre-release requirement. Breaking one rc against the next is what
+an rc line is for.
 
 - **Breaking API changes are free.** No deprecation cycle, no compatibility shim, no
-  `#[deprecated]` re-export. Change the signature, fix the one caller, fix the tests.
+  `#[deprecated]` re-export. Change the signature, fix the one caller, fix the tests. What a
+  published rc does add is a duty to **say so in the changelog** — plainly, as a fact, with no
+  migration recipe. The case that earned this: `Document::OoxmlPackage` narrowed in rc.3 from
+  "any ZIP or a CFB-wrapped package" to "CFB-wrapped package only", which breaks a consumer
+  matching it with no compile error at all, because `#[non_exhaustive]` had already pushed
+  them to write the catch-all that swallows the new variant. Nothing was removed, so nothing
+  scanning for breaking changes finds it.
 - **Feature reshuffles are free.** Moving items behind `crypto-ops`, changing what `default`
   includes — all fine, and expected, in a 0.x crate with one consumer.
 - **The one real constraint is that consumer's Office handler, and it is dormant.** It is
@@ -29,8 +43,9 @@ than assuming either way:
   `IntegrityPolicy` default, and the error variants it currently flattens. That application
   is not edited from here.
 
-Revisit this section the moment `cargo publish` runs (plan slice S8) — at that point the API
-becomes a promise.
+Revisit this section the moment a **stable** `0.1.0` is cut — that, not the first
+`cargo publish`, is where the API becomes a promise. The earlier wording named the publish and
+was overtaken by it in silence; the trigger is the version number, which is checkable.
 
 ---
 

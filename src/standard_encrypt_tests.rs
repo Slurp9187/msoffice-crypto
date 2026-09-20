@@ -335,9 +335,15 @@ fn encrypt_ooxml_standard_output_classifies_as_office_2007_aes_128() {
 
 /// The degenerate package: an 8-byte `EncryptedPackage` of nothing but its prefix, and
 /// it round-trips to an empty `Vec`.
+///
+/// Driven through the seeded core rather than [`crate::encrypt_ooxml_standard`], because
+/// the public entry point now refuses an input that is not a plain package and `&[]` is
+/// not one — that refusal is `bytes_that_are_no_container_are_refused` in `lib.rs`. What
+/// is checked here is the writer's handling of a degenerate payload, which is a separate
+/// fact from whether the guard lets one through.
 #[test]
 fn an_empty_package_round_trips() {
-    let container = crate::encrypt_ooxml_standard(&[], PASSWORD).unwrap();
+    let container = encrypt(&[], PASSWORD, &mut seeded()).unwrap();
     assert_eq!(stream_of(&container, "/EncryptedPackage").len(), 8);
     let crate::Decrypted {
         package: back,
@@ -430,13 +436,35 @@ fn an_independent_implementation_reads_what_encrypt_ooxml_standard_wrote() {
 /// A package over the ceiling is refused before any key is derived or byte encrypted.
 /// The allocation is lazy on every platform this runs on, so the test costs an
 /// inequality, not a gigabyte.
+///
+/// The input must be a **plain ZIP** to reach the ceiling at all: the shape guard runs
+/// first, so a gigabyte of zeros is now `UnknownContainer` rather than a size refusal.
+/// That ordering has its own test, `the_shape_guard_runs_before_the_payload_ceiling`,
+/// and this one is its negative control.
 #[test]
 fn a_package_over_the_ceiling_is_refused_before_any_work() {
-    let big = vec![0u8; crate::limits::PAYLOAD_CEILING + 1];
+    // `vec![0u8; N]` is `alloc_zeroed`, so these are lazy zero pages. Writing the magic
+    // in place touches one of them; `resize` from a 4-byte `Vec` would memset a
+    // gigabyte and make the comment above false.
+    let mut big = vec![0u8; crate::limits::PAYLOAD_CEILING + 1];
+    big[..4].copy_from_slice(b"PK\x03\x04");
     let got = crate::encrypt_ooxml_standard(&big, PASSWORD).map(|c| c.len());
     assert!(
         matches!(&got, Err(Error::BadParameters(msg)) if msg.contains("PAYLOAD_CEILING")),
         "over the ceiling must be refused by name, got: {got:?}"
+    );
+}
+
+/// The shape guard runs before the payload ceiling, and the order is the claim. The
+/// agile mirror of this test carries the full argument; reverse the two checks in
+/// `crate::encrypt_ooxml_standard` and this fails with the ceiling message.
+#[test]
+fn the_shape_guard_runs_before_the_payload_ceiling() {
+    let big = vec![0u8; crate::limits::PAYLOAD_CEILING + 1];
+    let got = crate::encrypt_ooxml_standard(&big, PASSWORD).map(|c| c.len());
+    assert!(
+        matches!(&got, Err(Error::UnknownContainer)),
+        "oversized junk is not a package first and oversized second, got: {got:?}"
     );
 }
 

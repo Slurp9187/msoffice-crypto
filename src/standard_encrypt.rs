@@ -320,10 +320,15 @@ pub(crate) fn encrypt_package(plaintext: &[u8], key: &DerivedKey) -> Result<Vec<
 /// Encrypt an OOXML package with a password into a complete Office 2007 container — the
 /// whole standard write path, assembled, with the randomness injected.
 ///
-/// The seeded entry point behind [`crate::encrypt_ooxml_standard`], which is one line
-/// over this with `rand::rngs::SysRng`. Everything a test can prove about production
-/// goes through here: the committed golden under a seeded `chacha20::ChaCha12Rng`, and
-/// the external readers opening what a seeded run wrote.
+/// The seeded entry point behind [`crate::encrypt_ooxml_standard`], which is this plus
+/// the shape guard and `rand::rngs::SysRng`. Everything a test can prove about
+/// production goes through here: the committed golden under a seeded
+/// `chacha20::ChaCha12Rng`, and the external readers opening what a seeded run wrote.
+///
+/// **This function encrypts whatever bytes it is handed.** The check that the input is a
+/// plain OOXML package is [`crate::check_encryptable`]'s, and it lives in the public
+/// wrapper rather than here — which is why this one is `pub(crate)`. See the agile
+/// writer's note for why that placement is deliberate.
 ///
 /// ```text
 /// material  = generate(password, rng)                            §2.3.4.7-8

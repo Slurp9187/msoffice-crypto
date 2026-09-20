@@ -291,10 +291,11 @@ fn the_rng_decides_the_output_and_the_seed_decides_the_rng() {
 
 /// The public entry point works and is not accidentally deterministic.
 ///
-/// `crate::encrypt_ooxml` is one line over [`encrypt`] with the system RNG, which is the
-/// point — but "the seeded path and the real path are the same code" is a claim, and an
-/// untested wrapper is where that claim would quietly stop being true. Two calls must
-/// differ; if they ever match, the system RNG is not being consumed.
+/// `crate::encrypt_ooxml` is [`encrypt`] plus the shape guard and the system RNG, which
+/// is the point — but "the seeded path and the real path are the same code" is a claim,
+/// and an untested wrapper is where that claim would quietly stop being true. Two calls
+/// must differ; if they ever match, the system RNG is not being consumed. The four
+/// bytes of ZIP magic below are what carries the input past the guard.
 #[test]
 fn the_public_entry_point_produces_a_fresh_file_each_call() {
     let a = crate::encrypt_ooxml(b"PK\x03\x04 not really a zip", PASSWORD).unwrap();
@@ -462,9 +463,16 @@ fn encrypt_ooxml_output_classifies_as_the_tuple_office_writes() {
 
 /// The degenerate package. Zero segments, an 8-byte `EncryptedPackage` of nothing but
 /// its prefix, an HMAC over those 8 bytes — and it round-trips to an empty `Vec`.
+///
+/// Driven through the seeded core rather than [`crate::encrypt_ooxml`], because the
+/// public entry point now refuses an input that is not a plain package and `&[]` is not
+/// one — that refusal is `bytes_that_are_no_container_are_refused` in `lib.rs`. The two
+/// facts are separate: whether the guard turns an empty input away, and whether the
+/// writer handles a degenerate payload correctly if it ever reaches it. This is the
+/// second, and nothing else covers the container-and-HMAC half of it.
 #[test]
 fn an_empty_package_round_trips() {
-    let container = crate::encrypt_ooxml(&[], PASSWORD).unwrap();
+    let container = encrypt(&[], PASSWORD, SPIN_COUNT, &mut seeded()).unwrap();
     let crate::Decrypted {
         package: back,
         integrity: outcome,
@@ -495,13 +503,41 @@ fn an_independent_implementation_reads_what_encrypt_ooxml_wrote() {
 /// the same 1 GiB the decrypt side refuses, checked on the way in so that a file this
 /// crate writes is a file it can read back. The allocation is lazy on every platform
 /// this runs on, so the test costs an inequality, not a gigabyte.
+///
+/// The input must be a **plain ZIP** to reach the ceiling at all: the shape guard runs
+/// first, so a gigabyte of zeros is now `UnknownContainer` rather than a size refusal.
+/// That ordering has its own test, `the_shape_guard_runs_before_the_payload_ceiling`,
+/// and this one is its negative control — a real oversized package still answers by
+/// name.
 #[test]
 fn a_package_over_the_ceiling_is_refused_before_any_work() {
-    let big = vec![0u8; crate::limits::PAYLOAD_CEILING + 1];
+    // `vec![0u8; N]` is `alloc_zeroed`, so these are lazy zero pages. Writing the magic
+    // in place touches one of them; `resize` from a 4-byte `Vec` would memset a
+    // gigabyte and make the comment above false.
+    let mut big = vec![0u8; crate::limits::PAYLOAD_CEILING + 1];
+    big[..4].copy_from_slice(b"PK\x03\x04");
     let got = crate::encrypt_ooxml(&big, PASSWORD).map(|c| c.len());
     assert!(
         matches!(&got, Err(Error::BadParameters(msg)) if msg.contains("PAYLOAD_CEILING")),
         "over the ceiling must be refused by name, got: {got:?}"
+    );
+}
+
+/// The shape guard runs before the payload ceiling, and the order is the claim.
+///
+/// A gigabyte of zeros is over the ceiling *and* not a package. Both facts are true, and
+/// which one the caller is told decides whether the message is useful: "these bytes are
+/// not a package" is the primary one, and `BadParameters(… PAYLOAD_CEILING …)` for junk
+/// would be the worse answer. Reverse the two checks in `crate::encrypt_ooxml` and this
+/// fails with the ceiling message; `a_package_over_the_ceiling_is_refused_before_any_work`
+/// is the control that shows the ceiling is still reachable for input that is a package.
+#[test]
+fn the_shape_guard_runs_before_the_payload_ceiling() {
+    let big = vec![0u8; crate::limits::PAYLOAD_CEILING + 1];
+    let got = crate::encrypt_ooxml(&big, PASSWORD).map(|c| c.len());
+    assert!(
+        matches!(&got, Err(Error::UnknownContainer)),
+        "oversized junk is not a package first and oversized second, got: {got:?}"
     );
 }
 

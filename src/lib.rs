@@ -10,7 +10,7 @@
 //!
 //! The public surface is re-exported at the crate root. Detection types
 //! ([`Classification`], [`Family`], [`IntegrityDeclaration`]) compile into every build.
-//! `decrypt_ooxml`, `encrypt_ooxml`, `Error`, `IntegrityPolicy` and
+//! `decrypt_ooxml`, `encrypt_ooxml`, `check_encryptable`, `Error`, `IntegrityPolicy` and
 //! `IntegrityOutcome` exist only under `crypto-ops`; `decrypt_binary_office` exists
 //! only under `legacy-binary`. Those names are not linked from this page because this
 //! crate-level document renders in the detection-only build, where they are absent.
@@ -82,9 +82,10 @@
 //! all. `cargo add msoffice-crypto` installs that and nothing more.
 //!
 //! **Decryption and encryption are the `crypto-ops` feature.** `decrypt_ooxml`,
-//! `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_standard`, the
-//! `Decrypted` struct and the `IntegrityPolicy` / `IntegrityOutcome` enums live behind
-//! it, together with `aes`, `cbc`, `ecb`, `sha1`, `sha2`, `hmac`, `base64` and `rand`:
+//! `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_standard`,
+//! `check_encryptable`, the `Decrypted` struct and the `IntegrityPolicy` /
+//! `IntegrityOutcome` enums live behind it, together with `aes`, `cbc`, `ecb`, `sha1`,
+//! `sha2`, `hmac`, `base64` and `rand`:
 //!
 //! ```toml
 //! msoffice-crypto = { version = "0.1.0-rc.4", features = ["crypto-ops"] }
@@ -97,8 +98,9 @@
 //!
 //! To be exact about what is gated, because the imprecise version misleads: the error
 //! *type* compiles in every configuration — every variant payload is a `&'static str`,
-//! `String`, `u16` or `std::io::Error`, so it costs the detection build nothing but
-//! `thiserror` — and it is only the `pub use` that `crypto-ops` gates. The reason is not
+//! `String`, `u16`, `std::io::Error` or a fieldless `Copy` enum from the detection half
+//! (`Family`, `Document`), so it costs the detection build nothing but `thiserror` — and
+//! it is only the `pub use` that `crypto-ops` gates. The reason is not
 //! that the type needs a cipher. It is that once the crypto-only variants are gated, an
 //! ungated re-export would be a public type whose *shape* changes with a feature the
 //! consumer cannot see from the name, in a build where `classify()` is infallible and
@@ -127,6 +129,36 @@
 //! ```toml
 //! msoffice-crypto = { version = "0.1.0-rc.4", features = ["legacy-binary"] }
 //! ```
+//!
+//! # Bounds on untrusted input
+//!
+//! Every number below is read from a file an attacker may have written, so each one is
+//! capped. A declared size is an allocation request and an iteration count is a promise
+//! of work; neither is believed. The values are listed because a consumer sizing its own
+//! limits, or deciding whether this crate can be handed a particular document, should not
+//! have to ask. **They are internal constants (`src/limits.rs`, all `pub(crate)`), not
+//! public API** — they are quoted here for discoverability and may tighten in any
+//! release.
+//!
+//! Compiled into **every build**, because `classify` reads them before anything is
+//! authenticated: the `EncryptionInfo` stream is read to at most 1 MiB, a 97-2003 binary
+//! header to 512 bytes, the `.xls` BIFF scan to 1 MiB, `/Current User` to 256 bytes, and
+//! the PowerPoint persist directory to 8 MiB across at most 2^20 objects — that last
+//! figure being the spec's own, since `persistId` is 20 bits ([MS-PPT] § 2.3.5), not a
+//! margin this crate chose.
+//!
+//! Under **`crypto-ops`**: a package is at most **1 GiB** in either direction — the same
+//! ceiling refuses an oversized `EncryptedPackage` on read and an oversized `package` on
+//! write, so a file this crate writes is a file it can read back. `spinCount` is capped
+//! at **2^21**, deliberately far below the 10 000 000 the spec permits and about 21× the
+//! 100 000 Office writes; uncapped it is roughly fifty minutes of one core, which no
+//! `Result` can report. Agile key sizes are 128, 192 or 256 bits, salts 1..=65536 bytes,
+//! and the standard path accepts AES-128 only.
+//!
+//! Under **`legacy-binary`**: RC4 key sizes 40..=128 bits (the spec's own range,
+//! [MS-OFFCRYPTO] § 2.3.5.1) and an XOR-obfuscation password of at most 15 characters,
+//! which is structural rather than a margin — the `InitialCode` table has exactly 15
+//! entries.
 //!
 //! # Trademarks
 //!
@@ -420,6 +452,81 @@ pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, Error> {
     decrypt_ooxml_with_policy(data, password, IntegrityPolicy::default()).map(|d| d.package)
 }
 
+/// Refuse, before a password is asked for, anything [`encrypt_ooxml`] and
+/// [`encrypt_ooxml_standard`] will refuse.
+///
+/// **This is the same function those two call**, not a second copy that agrees with them:
+/// each opens with `check_encryptable(package)?`. A caller that runs it and gets `Ok(())`
+/// is not promised the encryption will succeed — the payload ceiling and the system RNG
+/// are still ahead — but it is promised that the *shape* of the input will not be what
+/// stops it.
+///
+/// It exists because the alternative is asking for a password first. Prompting for a new
+/// password, or reading one from a keychain, for a file that is about to be refused is a
+/// question the user answers for nothing, and on an interactive path it is the part of a
+/// refusal that cannot be taken back. This crate's own CLI calls it in that position; so
+/// did a consumer that had to write its own copy before this existed.
+///
+/// **Exactly one thing is encryptable: a plain OOXML package**, which [`classify()`]
+/// reports as [`Container::Zip`] for every `PK` signature it knows. Four bytes of magic
+/// are the whole test — no entry is read and no content type is examined, so a `.vsdx`, a
+/// `.jar` and a backup archive all pass here (see [`Document::ZipArchive`]). That is the
+/// honest limit of what was checked, and encrypting a ZIP that is not an Office package
+/// harms nobody: the result is a container whose payload the caller chose. What is
+/// refused is everything that would produce a *misleading* artifact — above all a second
+/// wrap around a file that is already encrypted.
+///
+/// # Errors
+///
+/// - [`Error::AlreadyEncrypted`] — a CFB container that already carries a
+///   password-to-open. The payload names the family and document kind, for a caller
+///   choosing its own words
+/// - [`Error::NotAPlainPackage`] — a CFB container that does not: a 97-2003 binary
+///   document, or one this crate could not read
+/// - [`Error::UnknownContainer`] — neither a ZIP package nor a CFB container
+///
+/// # Examples
+///
+/// ```
+/// use msoffice_crypto::{check_encryptable, encrypt_ooxml, Error};
+///
+/// // Ask before the prompt, not after.
+/// let package = include_bytes!("../tests/fixtures/plain.docx");
+/// check_encryptable(package)?;
+/// let password = "correct horse battery staple"; // …whatever asking cost you
+/// let sealed = encrypt_ooxml(package, password)?;
+///
+/// // And the answer for bytes that were never worth asking about:
+/// assert!(matches!(
+///     check_encryptable(&sealed),
+///     Err(Error::AlreadyEncrypted { .. })
+/// ));
+/// # Ok::<(), msoffice_crypto::Error>(())
+/// ```
+///
+/// # See Also
+///
+/// [`classify()`] is the full pre-flight; this is the one question the encrypt path asks
+/// of it. Every public encrypt entry point this crate gains must call this.
+// No `#[must_use]`: `Result` already carries it, and adding a second fires
+// `clippy::double_must_use`, which is `-D warnings` in all five feature columns.
+#[cfg(feature = "crypto-ops")]
+pub fn check_encryptable(package: &[u8]) -> Result<(), Error> {
+    let class = classify(package);
+    // Exhaustive without a `_` arm: `Container` is `#[non_exhaustive]` only to other
+    // crates, so a variant added later is `E0004` right here and someone has to decide
+    // what it is, rather than it defaulting into "encryptable" or into one refusal.
+    match class.container {
+        Container::Zip => Ok(()),
+        Container::Cfb if class.is_encrypted() => Err(Error::AlreadyEncrypted {
+            family: class.family,
+            document: class.document,
+        }),
+        Container::Cfb => Err(Error::NotAPlainPackage),
+        Container::Unknown => Err(Error::UnknownContainer),
+    }
+}
+
 /// Encrypt an OOXML package with a password, producing the CFB container Office writes.
 ///
 /// `package` is the plain `.docx` / `.xlsx` / `.pptx` ZIP. The result is ECMA-376 agile
@@ -431,6 +538,15 @@ pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, Error> {
 /// own random inputs could be recovered: the `EncryptionInfo` document and the two
 /// `dataIntegrity` blobs reproduce Word's, Excel's and PowerPoint's exactly.
 ///
+/// **The profile is fixed, and both halves of that are load-bearing for a caller.** The
+/// spin count is 100 000 with no parameter to change it — there is no overload, no
+/// builder and no environment variable, because the one tuple Office writes is the whole
+/// point of this function. And a `<dataIntegrity>` element is written **unconditionally**:
+/// every artifact this function produces declares one, so a consumer checking
+/// [`Classification::data_integrity`] on agile output from here may assert
+/// [`IntegrityDeclaration::Declared`] and know the assertion cannot fail. Neither
+/// guarantee extends to [`encrypt_ooxml_standard`], whose format defines no such element.
+///
 /// The session key, block keys and spin hash are held in `secure-gate` wrappers and
 /// zeroized on drop; the password is `&str` and the input and output are plain bytes, by
 /// design. Randomness comes from the operating system's CSPRNG through the same function
@@ -440,6 +556,10 @@ pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, Error> {
 ///
 /// # Errors
 ///
+/// - [`Error::AlreadyEncrypted`], [`Error::NotAPlainPackage`],
+///   [`Error::UnknownContainer`] — `package` is not a plain OOXML package. Checked by
+///   [`check_encryptable`] before anything else, so a caller can ask the same question
+///   before it pays for a password
 /// - [`Error::BadParameters`] — `package` is over the 1 GiB this crate would
 ///   read back
 /// - [`Error::RandomSource`] — the system RNG would not produce bytes
@@ -465,6 +585,7 @@ pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, Error> {
 /// open agile files. Prefer this function unless that constraint applies.
 #[cfg(feature = "crypto-ops")]
 pub fn encrypt_ooxml(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
+    check_encryptable(package)?;
     agile_encrypt::encrypt(
         package,
         password,
@@ -498,6 +619,10 @@ pub fn encrypt_ooxml(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
 ///
 /// # Errors
 ///
+/// - [`Error::AlreadyEncrypted`], [`Error::NotAPlainPackage`],
+///   [`Error::UnknownContainer`] — `package` is not a plain OOXML package. Checked by
+///   [`check_encryptable`] before anything else, so a caller can ask the same question
+///   before it pays for a password
 /// - [`Error::BadParameters`] — `package` is over the 1 GiB this crate would
 ///   read back
 /// - [`Error::RandomSource`] — the system RNG would not produce bytes
@@ -532,6 +657,7 @@ pub fn encrypt_ooxml(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
 /// Office 16 writes and what this crate recommends.
 #[cfg(feature = "crypto-ops")]
 pub fn encrypt_ooxml_standard(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
+    check_encryptable(package)?;
     standard_encrypt::encrypt(package, password, &mut rand::rngs::SysRng)
 }
 
@@ -1337,6 +1463,180 @@ mod tests {
                 assert_eq!(plain, with_policy, "{name}");
                 assert_eq!(plain, fixture("plain.docx"), "{name}");
                 assert_eq!(outcome, IntegrityOutcome::Verified, "{name}");
+            }
+        }
+
+        // ---- the encrypt shape guard -----------------------------------------------
+
+        /// The bug this guard exists for: encrypting a file that is already encrypted
+        /// used to return `Ok` and produce a CFB wrapped in a CFB, indistinguishable
+        /// from a single wrap without decrypting it. Found by a downstream consumer,
+        /// which had to reimplement the CLI's guard to avoid it.
+        ///
+        /// The first `encrypt_ooxml` succeeding is the negative control: this test
+        /// cannot pass by refusing everything.
+        #[test]
+        fn encrypt_ooxml_refuses_a_file_it_just_encrypted() {
+            let plain = fixture("plain.docx");
+            let sealed = encrypt_ooxml(&plain, "testpass").expect("a plain package encrypts");
+
+            let again = encrypt_ooxml(&sealed, "testpass");
+            assert!(
+                matches!(
+                    again,
+                    Err(Error::AlreadyEncrypted {
+                        family: Family::Agile,
+                        document: Document::OoxmlPackage,
+                    })
+                ),
+                "a second wrap must be refused, naming what it found; got: {:?}",
+                again.map(|c| c.len())
+            );
+        }
+
+        /// The standard writer's half of the same bug.
+        #[test]
+        fn encrypt_ooxml_standard_refuses_a_file_it_just_encrypted() {
+            let plain = fixture("plain.docx");
+            let sealed =
+                encrypt_ooxml_standard(&plain, "testpass").expect("a plain package encrypts");
+
+            let again = encrypt_ooxml_standard(&sealed, "testpass");
+            assert!(
+                matches!(
+                    again,
+                    Err(Error::AlreadyEncrypted {
+                        family: Family::Standard,
+                        document: Document::OoxmlPackage,
+                    })
+                ),
+                "a second wrap must be refused, naming what it found; got: {:?}",
+                again.map(|c| c.len())
+            );
+        }
+
+        /// Cross-format double-wrapping is the same defect wearing a different hat, and
+        /// nothing else here would catch it: each writer must refuse the other's output.
+        #[test]
+        fn the_two_writers_refuse_each_others_output() {
+            let plain = fixture("plain.docx");
+            let agile = encrypt_ooxml(&plain, "testpass").unwrap();
+            let standard = encrypt_ooxml_standard(&plain, "testpass").unwrap();
+
+            assert!(
+                matches!(
+                    encrypt_ooxml_standard(&agile, "testpass"),
+                    Err(Error::AlreadyEncrypted {
+                        family: Family::Agile,
+                        ..
+                    })
+                ),
+                "the standard writer must refuse an agile container"
+            );
+            assert!(
+                matches!(
+                    encrypt_ooxml(&standard, "testpass"),
+                    Err(Error::AlreadyEncrypted {
+                        family: Family::Standard,
+                        ..
+                    })
+                ),
+                "the agile writer must refuse a standard container"
+            );
+        }
+
+        /// Eight bytes of CFB magic: a container this crate recognises and will not write
+        /// into. Fixture-free on purpose — the fact is about the shape, not any document.
+        #[test]
+        fn a_bare_cfb_is_refused_as_not_a_plain_package() {
+            let magic = [0xD0u8, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+            assert!(matches!(
+                check_encryptable(&magic),
+                Err(Error::NotAPlainPackage)
+            ));
+            assert!(matches!(
+                encrypt_ooxml(&magic, "testpass"),
+                Err(Error::NotAPlainPackage)
+            ));
+            assert!(matches!(
+                encrypt_ooxml_standard(&magic, "testpass"),
+                Err(Error::NotAPlainPackage)
+            ));
+        }
+
+        /// Bytes that are no container at all, including the empty input. `&[]` is
+        /// `Container::Unknown`, so it is refused like any other non-package — the
+        /// writer's handling of a degenerate *payload* is a separate fact, checked
+        /// through the seeded cores in `agile_encrypt_tests` and `standard_encrypt_tests`.
+        #[test]
+        fn bytes_that_are_no_container_are_refused() {
+            for input in [&b"sixteen bytes!!!"[..], &[][..]] {
+                assert!(
+                    matches!(check_encryptable(input), Err(Error::UnknownContainer)),
+                    "{input:?} is not a container"
+                );
+                assert!(matches!(
+                    encrypt_ooxml(input, "testpass"),
+                    Err(Error::UnknownContainer)
+                ));
+                assert!(matches!(
+                    encrypt_ooxml_standard(input, "testpass"),
+                    Err(Error::UnknownContainer)
+                ));
+            }
+        }
+
+        /// A plain ZIP is the one thing the guard accepts, and four bytes of magic are
+        /// the whole test — which is why a bare signature passes alongside a real
+        /// package. Moved here from the CLI when the guard stopped being the CLI's.
+        #[test]
+        fn a_plain_zip_is_the_one_thing_the_guard_accepts() {
+            check_encryptable(b"PK\x03\x04").expect("four bytes of zip magic are encryptable");
+            check_encryptable(&fixture("plain.docx")).expect("a real package is encryptable");
+        }
+
+        /// The guard a caller runs before paying for a password is the guard the writer
+        /// runs at the door. Not two functions that agree — one function, called twice —
+        /// and this is what would fail if a future entry point grew its own copy.
+        ///
+        /// [`Error`] has no `PartialEq` by design, so the comparison is over a name.
+        #[test]
+        fn the_guard_a_caller_runs_is_the_guard_the_writer_runs() {
+            fn kind(e: &Error) -> &'static str {
+                match e {
+                    Error::AlreadyEncrypted { .. } => "already-encrypted",
+                    Error::NotAPlainPackage => "not-a-plain-package",
+                    Error::UnknownContainer => "unknown-container",
+                    _ => "other",
+                }
+            }
+            fn verdict(r: Result<Vec<u8>, Error>) -> String {
+                r.map_or_else(|e| kind(&e).to_string(), |_| "ok".to_string())
+            }
+
+            let plain = fixture("plain.docx");
+            let sealed = encrypt_ooxml(&plain, "testpass").unwrap();
+            let magic = [0xD0u8, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+
+            for input in [
+                &plain[..],
+                &sealed[..],
+                &magic[..],
+                &b"sixteen bytes!!!"[..],
+                &[][..],
+            ] {
+                let asked = check_encryptable(input)
+                    .map_or_else(|e| kind(&e).to_string(), |()| "ok".to_string());
+                assert_eq!(
+                    asked,
+                    verdict(encrypt_ooxml(input, "testpass")),
+                    "the agile writer disagreed with the guard a caller would have run"
+                );
+                assert_eq!(
+                    asked,
+                    verdict(encrypt_ooxml_standard(input, "testpass")),
+                    "the standard writer disagreed with the guard a caller would have run"
+                );
             }
         }
     }
