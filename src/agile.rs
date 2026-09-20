@@ -1053,8 +1053,8 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     let spin_count = spin_count.ok_or_else(|| Error::XmlParse("missing spinCount".into()))?;
     if spin_count > limits::SPIN_COUNT_MAX {
         return Err(Error::BadParameters(format!(
-            "p:encryptedKey/@spinCount is {spin_count}; this crate refuses anything above \
-             {} (Office writes 100000)",
+            "p:encryptedKey/@spinCount is {spin_count}; [MS-OFFCRYPTO] 2.3.4.10 bounds it \
+             at {} (Office writes 100000)",
             limits::SPIN_COUNT_MAX
         )));
     }
@@ -1645,7 +1645,11 @@ mod tests {
 
     /// The ceiling is inclusive, and one past it is refused by name. Testing this at
     /// the parser rather than through `decrypt_ooxml` is deliberate: accepting the
-    /// ceiling means *running* it, and two million SHA-512 rounds is not a unit test.
+    /// ceiling means *running* it, and ten million SHA-512 rounds — about 7 seconds of
+    /// one core — is not a unit test.
+    ///
+    /// One past the ceiling is `10_000_001`, which is what [MS-OFFCRYPTO] 2.3.4.10
+    /// forbids rather than what this crate declines, so this is now a conformance test.
     #[test]
     fn spin_count_ceiling_is_inclusive_and_one_past_it_is_refused() {
         let at = limits::SPIN_COUNT_MAX.to_string();

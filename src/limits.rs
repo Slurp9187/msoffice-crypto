@@ -6,6 +6,46 @@
 //! crate `odf-crypto` keeps the same list for the same reason (`odf-crypto/src/limits.rs`
 //! — `PBKDF2_MAX_ITER`, `DERIVED_KEY_MIN_LEN`/`MAX_LEN`); the shapes match deliberately.
 //!
+//! # Where each bound comes from
+//!
+//! A consumer rendering a refusal needs to know whether the file broke the format or
+//! merely asked for more than this crate does, because those are different sentences and
+//! only one of them implies the file is at fault. Until 2026-09-20 that was answerable
+//! only by reading each doc comment and inferring, which a downstream consumer did, got
+//! partly wrong, and had to ask about. So each bound is now labelled, and the three
+//! labels mean different things:
+//!
+//! | label | meaning | if a file trips it |
+//! | --- | --- | --- |
+//! | **spec** | the number [MS-OFFCRYPTO] itself states | the file is non-conforming |
+//! | **cipher** | fixed by the algorithm, not by the format | the file may be valid; this crate will not do it |
+//! | **margin** | this crate's own defence against unbounded work | the file may be valid *and* implementable; this crate declines |
+//!
+//! **spec** — [`crypto::SPIN_COUNT_MAX`] (§2.3.4.10 `ST_SpinCount`, `0..=10000000`),
+//! [`crypto::AGILE_SALT_SIZE`] (§2.3.4.10 `ST_SaltSize`, `1..=65536`),
+//! [`PPT_PERSIST_OBJECTS_MAX`] (§2.3.5, `persistId` is 20 bits),
+//! [`legacy::RC4_KEY_BITS`] and [`legacy::RC4_KEY_BITS_DEFAULT`] (§2.3.5.1),
+//! [`legacy::XOR_PASSWORD_MAX_LEN`] (§2.3.7.2, structural — the `InitialCode` table has
+//! exactly 15 entries).
+//!
+//! **cipher** — [`crypto::AGILE_KEY_BITS_ALLOWED`] (what AES defines; the schema's
+//! `ST_KeyBits` sets `minInclusive="8"` and *no maximum*, being generic across cipher
+//! algorithms) and [`crypto::STANDARD_KEY_BITS_AES128`] (§2.3.2 gives AES-192 and AES-256
+//! their own AlgIDs, which are refused by name earlier).
+//!
+//! **margin** — every read cap ([`ENCRYPTION_INFO_READ_CAP`], [`BINARY_HEADER_READ_CAP`],
+//! [`BIFF_SCAN_CAP`], [`CURRENT_USER_READ_CAP`], [`PPT_PERSIST_DIRECTORY_READ_CAP`],
+//! [`RC4_ENCRYPTION_HEADER_SIZE_MAX`], [`ENCRYPTION_HEADER_STRUCTURE_MAX`]),
+//! [`crypto::PAYLOAD_CEILING`] and its two aliases. Each names its margin over the
+//! largest real value in its own comment.
+//!
+//! Two bounds the schema states are **not** enforced as ranges here, because the check
+//! beside the code is strictly tighter: `ST_BlockSize` (`2..=4096`) is required to equal
+//! the 16-byte AES block by `agile::check_block_size`, and `ST_HashSize` (`1..=65536`) is
+//! required to equal the *named* algorithm's digest length by `agile::check_hash_size`.
+//! A schema-range check would accept values both of those reject, so adding one would
+//! weaken the parser, not strengthen it.
+//!
 //! What is deliberately *not* here: lengths fixed by the on-disk format rather than by
 //! a field in it — the 72-byte `EncryptionVerifier`, the 16-byte AES block. Those are
 //! layout facts and live beside the code that reads the layout, so a reader checking
@@ -230,24 +270,42 @@ mod crypto {
     /// no in-process defence against it: it is a hang, not a panic, so a caller's
     /// `catch_unwind` never fires and a Rust worker thread cannot be interrupted.
     ///
-    /// **Tighter than the spec's own ceiling, deliberately.** [MS-OFFCRYPTO] §2.3.4.10
-    /// bounds `ST_SpinCount` at `maxInclusive="10000000"` and says "It MUST NOT be greater
-    /// than 10,000,000" — which is ~100x what Office writes and, at ~7 µs per SHA-512
-    /// round pair, still minutes of one core per open attempt. A spec maximum that permits
-    /// a denial of service is not a bound this crate can adopt as its own; the figure below
-    /// is chosen against what writers emit, and a file between the two ceilings is
-    /// conforming and refused.
+    /// **Spec-derived, exactly.** [MS-OFFCRYPTO] §2.3.4.10 declares
+    /// `ST_SpinCount` as `<xs:restriction base="xs:unsignedInt">` with
+    /// `minInclusive="0"` and `maxInclusive="10000000"`, and the prose beside it says
+    /// "It MUST NOT be greater than 10,000,000." This constant is that number and not a
+    /// margin this crate picked.
     ///
-    /// Office writes 100 000. `1 << 21` is ~21x that and about 1.5 s of SHA-512 on a current
-    /// core — the same order of margin `odf-crypto` allows PBKDF2 (`1 << 23`, ~14x
-    /// LibreOffice's 600 000). Standard encryption does not need an entry here: its spin
-    /// count is the hardcoded `standard::SPIN_COUNT`, not a file field.
+    /// **It was `1 << 21` until 2026-09-20, and that was a defect on the read path.**
+    /// 2,097,152 is 4.8x under the spec ceiling, so a `.docx` declaring `spinCount`
+    /// anywhere between them was conforming, opened in Word, and was refused here. The
+    /// margin was defended on the grounds that the spec ceiling "permits a denial of
+    /// service" — measured against the `u32::MAX` anchor above, 10,000,000 rounds is
+    /// about **7 seconds** of one core, which is a real cost to a user and not a denial
+    /// of service. Three figures in the superseded comment were wrong in the direction
+    /// that made the margin look necessary; the arithmetic is recorded in
+    /// `CHANGELOG.md` rather than repeated here.
     ///
-    /// **No floor.** `spinCount="0"` makes a weak file, not a dangerous one: the stretching
-    /// its writer chose is the writer's decision, and refusing to decrypt a document its
-    /// owner already holds buys this crate nothing. Once the slices below are bounded, a
-    /// zero spin count just reaches a clean error faster.
-    pub(crate) const SPIN_COUNT_MAX: u32 = 1 << 21;
+    /// **Where the denial-of-service policy actually belongs: the caller, who already has
+    /// what it needs.** [`crate::classify()`] reports `spin_count` *unbounded and
+    /// unvalidated* (see its own doc) before a single round runs, so a caller that wants
+    /// Office's 100 000, or `1 << 21`, or any other threshold enforces it in one
+    /// comparison on data this crate hands it for free. A ceiling this crate imposes
+    /// instead is a policy the caller cannot loosen — and the file it refuses belongs to
+    /// the person being refused. CLAUDE.md § *Every input is hostile* is about not
+    /// trusting the file; it is not licence to lock an owner out of their own document.
+    ///
+    /// The write path uses the same constant, which keeps `encryption_info::write`'s
+    /// "could not be read back" claim true. The writer emits the hardcoded
+    /// `encryption_info::OFFICE_SPIN_COUNT` (100 000) regardless. Standard encryption
+    /// needs no entry here: its spin count is the hardcoded `standard::SPIN_COUNT`, not a
+    /// file field.
+    ///
+    /// **No floor, and that is also the spec's answer** — `minInclusive="0"`.
+    /// `spinCount="0"` makes a weak file, not a dangerous one: the stretching its writer
+    /// chose is the writer's decision, and refusing to decrypt a document its owner
+    /// already holds buys this crate nothing.
+    pub(crate) const SPIN_COUNT_MAX: u32 = 10_000_000;
 
     /// Pins the figure itself, for the same reason `PAYLOAD_CEILING` is pinned one screen
     /// away — and it was not pinned until the 2026-09-10 pre-publish audit demonstrated
@@ -256,14 +314,15 @@ mod crypto {
     /// raising this to `u32::MAX - 1` leaves all 205 tests green while the hang guard it
     /// exists to be is gone. A ceiling that its own tests cannot see move is not a ceiling.
     ///
-    /// The upper bound is the property that matters — a *lower* value only refuses files
-    /// this crate could have opened, which is a compatibility bug and loud. So the
-    /// assertion names the magnitude rather than merely a range: 2^21, about 21x the
-    /// 100 000 Office writes, and 21x under [MS-OFFCRYPTO] §2.3.4.10's own 10,000,000.
+    /// Both directions matter now, and for different reasons. A *lower* value refuses
+    /// files this crate could have opened and that the format permits — the compatibility
+    /// bug this constant used to be. A *higher* one accepts what the spec forbids and
+    /// reintroduces the unbounded-work hazard the `u32::MAX` measurement describes. The
+    /// equality assertion pins both at once, which is why it names the spec's figure
+    /// rather than a range.
     const _: () = {
-        assert!(SPIN_COUNT_MAX == 1 << 21);
+        assert!(SPIN_COUNT_MAX == 10_000_000); // [MS-OFFCRYPTO] §2.3.4.10 ST_SpinCount
         assert!(SPIN_COUNT_MAX > 100_000); // must not refuse what Office itself writes
-        assert!(SPIN_COUNT_MAX < 10_000_000); // must stay stricter than the spec ceiling
     };
 
     /// The values of agile `keyBits` this crate will act on — on **either** element.
