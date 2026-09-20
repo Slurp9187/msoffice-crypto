@@ -216,7 +216,7 @@ spec or in a permissive reference. Cite where it came from.
 ## Layout
 
 ```
-src/lib.rs             public API: classify, is_cfb_office, decrypt_ooxml, decrypt_ooxml_with_policy, encrypt_ooxml, encrypt_ooxml_standard, decrypt_binary_office
+src/lib.rs             public API: classify, is_cfb_office, decrypt_ooxml, decrypt_ooxml_with_policy, check_encryptable, encrypt_ooxml, encrypt_ooxml_standard, decrypt_binary_office
 src/classify.rs        detection; NEVER panics, returns Unknown        (+ classify_tests.rs)
 src/binary_office.rs   legacy .doc/.xls/.ppt recognition, and the FIB / BIFF / persist-directory readers both probe and decrypt share
 src/agile.rs           ECMA-376 agile decrypt: parse, KDF, verifier, package

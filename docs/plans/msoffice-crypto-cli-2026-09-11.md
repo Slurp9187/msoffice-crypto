@@ -293,6 +293,11 @@ that rather than leaving the choice to folklore.
 The input must be a plain OOXML package. An input `classify` calls `Container::Cfb` is
 refused with exit 5 — the library has no `AlreadyEncrypted` variant, so this guard is
 the CLI's, and without it a double-encrypted container is a plausible accident.
+(Superseded 2026-09-19: the library owns this guard now — `check_encryptable`, raising
+`Error::AlreadyEncrypted`, `Error::NotAPlainPackage` or `Error::UnknownContainer`, which
+the CLI renders to the same sentences and the same exit codes. The premise in this
+paragraph was never weighed; it was asserted, and a downstream consumer paid for it by
+reimplementing the guard. See CHANGELOG v0.1.0-rc.4.)
 
 The artifact a CLI `encrypt` writes is subject to **the same local four-reader gate** as
 the library's, per `CLAUDE.md` § *Build and verify* — including the private artifact

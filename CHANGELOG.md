@@ -24,6 +24,144 @@ What survives that move is in two places, deliberately:
 
 ## v0.1.0-rc.4 — unreleased
 
+### Evidence for this release
+
+The four-reader acceptance gate, run on this machine 2026-09-20 against artifact SHA-256
+`1d9c44ef565692883ca60a72f3fffda08c0b9cd5b0c646a21ef5675e4a04ff6e` (41,984 bytes), written
+into a private directory rather than shared system temp:
+
+```
+office         PASS  Word 16.0 build 16.0.19127: OPENED, content matches | WRONG PASSWORD REFUSED 0x800A1520
+libreoffice    PASS  LibreOffice 26.2.1.2: OPENED, content matches | WRONG PASSWORD REFUSED (verifier)
+msoffcrypto    PASS  msoffcrypto-tool 6.0.0: byte-identical to plain.docx | dataIntegrity HMAC verifies
+office-crypto  PASS  office-crypto 0.3: byte-identical to plain.docx
+GATE: PASS (4 of 4 readers ran; 0 not selected)
+```
+
+The standard writer's artifact was gated in the same run — SHA-256
+`dbcdf9032ee80c81a87f7a82d18b3f3760498918262d4c79418c512ffe9365c2` (40,960 bytes), also
+`GATE: PASS` 4 of 4 — and it is the direct proof of the gate fix below, because its
+`msoffcrypto` line now reads `decrypted; NO dataIntegrity element to verify
+(verify_integrity is inert here)` where every previous release printed the agile
+HMAC-verifies sentence for it.
+
+**Both artifacts are byte-identical to the committed goldens** (41,984 / `b4cc009e…` and
+40,960 / `491298746c…`), which is the claim that matters for a release whose headline change
+is a new refusal: what this crate writes did not move.
+
+Full matrix green in all five feature columns — `cargo test`, `cargo clippy -D warnings`,
+`cargo fmt --check`, both `cargo doc` runs under `RUSTDOCFLAGS="-D warnings"`, `cargo deny`
+over licences, advisories, bans and sources, and `tools/audit_claims.py`. Every column
+reported **0 ignored**, so no corpus fixture is missing.
+
+### `encrypt_ooxml` refuses input it used to accept — the already-encrypted guard is the library's now
+
+**Breaking, and it is a behaviour change rather than an addition.** `encrypt_ooxml` and
+`encrypt_ooxml_standard` now accept exactly one thing, a plain OOXML package, and return an
+error for everything else. Code that passed them an already-encrypted file, a 97-2003 binary
+document, an empty slice or arbitrary bytes got `Ok` before and gets `Err` now.
+
+What it was doing instead: **silently double-wrapping.** Handed a file that already carried a
+password-to-open, `encrypt_ooxml` returned a CFB container wrapped in a second CFB container.
+That artifact is indistinguishable from a single wrap without decrypting it, and it opens
+only by decrypting twice, with two passwords the holder believes is one.
+
+The check existed the whole time — as `encrypt_guard` in `src/bin/msoffice-crypto.rs`, tested,
+correct, and unreachable from the library. **Found by the downstream consumer**, which hit the
+defect and reimplemented that guard from the CLI's shape, leaving two copies of one rule with
+the tests on the copy library callers could not call.
+
+`check_encryptable(&[u8]) -> Result<(), Error>` is public, and is the same function both
+writers call at the door rather than a second one that agrees with them. It is public because
+the position that matters is **before a password is obtained**: prompting for a new password
+for a file about to be refused is a question answered for nothing, and on an interactive path
+it cannot be taken back. The CLI has always called it there, and `tests/cli.rs` pins the
+ordering — all 58 of those tests pass with no edit to their code, which is how the sentences
+and exit codes are known to be unchanged.
+
+Three new `crypto-ops` variants rather than one, because the CLI's exit codes were already
+evidence that the cases are different facts. `Error::AlreadyEncrypted { family, document }`
+carries `classify`'s verdict so a renderer can choose between "decrypt it first" and "there is
+no writer for the 97-2003 binary formats"; both are `Copy` enums, so no byte of the file
+reaches the error. `Error::NotAPlainPackage` deliberately carries no `document`, which turns
+"never name a document kind `classify` refused to name" from a discipline into something that
+cannot be written. `Error::UnknownContainer` is exit 3 where the other two are 5.
+
+**The shape check runs before the payload ceiling**, and the order is a claim with a test.
+For a gigabyte of junk both facts are true; "not a package" is the primary one, and
+`BadParameters(… PAYLOAD_CEILING …)` would be the worse answer. A real oversized package still
+answers by name.
+
+Evidence, per CLAUDE.md § *Evidence over intent*. Deleting the `?` from `encrypt_ooxml` makes
+`encrypt_ooxml_refuses_a_file_it_just_encrypted` fail with `Ok(47616)` — a 47,616-byte
+double-wrapped container. Reversing the guard and the ceiling makes
+`the_shape_guard_runs_before_the_payload_ceiling` fail with
+`Err(BadParameters("over PAYLOAD_CEILING"))`. Both were run, and restored.
+
+The two seeded goldens are byte-identical (41,984 / `b4cc009e…`; 40,960 / `491298746c…`), so
+no written byte moved: this release changes what is refused, never what is produced.
+
+`rc.2` recorded that "the library has no `AlreadyEncrypted` variant, so this guard is the
+CLI's". Both halves of that are now wrong. That entry stays as written — it was true when it
+shipped — and `docs/plans/msoffice-crypto-cli-2026-09-11.md` § 7 carries a dated superseded
+note beside the same claim.
+
+### `Document::OoxmlPackage` narrowed in rc.3, and a consumer matching it gets no compile error
+
+Recorded here rather than under rc.3, whose entry is released and stays as written. The
+narrowing is documented there; what that entry does not do is turn and face a caller outside
+this crate, and it should have.
+
+At rc.2, `Document::OoxmlPackage` meant "a CFB-wrapped package **or** any ZIP". At rc.3 it
+means CFB-wrapped package only, and every plain `PK` signature reports the new
+`Document::ZipArchive` instead. A consumer that wrote `matches!(class.document,
+Document::OoxmlPackage)` to mean "this is a package" **still compiles and silently stops
+matching every plain `.docx`.** Nothing was removed, so nothing scanning for breaking changes
+finds it, and `#[non_exhaustive]` makes it worse rather than better: it had already obliged
+that consumer to write the catch-all arm that now swallows the new variant.
+
+**Reported by the downstream consumer**, who checked their own dispatch rather than assuming
+and found it safe by luck — their router keys on `Container`, so `.document` is read only on
+the CFB branch, where the meaning did not change. Had they keyed on `.document` at the top,
+the bump would have broken plain-package detection with a green build and green tests.
+
+No remedy is offered and none is needed: the break happened, it stands, and this is the
+sentence that says so.
+
+### The acceptance gate no longer claims to have verified an HMAC that does not exist
+
+`tools/acceptance_gate.py`'s `msoffcrypto` leg returned `dataIntegrity HMAC verifies
+(verify_integrity=True)` for **every** artifact that decrypted — including ECMA-376 standard
+files, which define no `dataIntegrity` element at all and for which `msoffcrypto-tool`
+silently ignores the keyword. The line was byte-identical for both families, so it was
+evidence of nothing for either.
+
+The function's own docstring already described the behaviour it did not have: *"the verdict
+then says only that it decrypted."* Prose and code had drifted, and nothing caught it —
+`tools/audit_claims.py` check B only guards citations that point past end of file.
+
+`declares_data_integrity` now reads the `EncryptionInfo` version pair the way
+`corrupt_integrity` already did — 4.4 and the element present, or no claim — and a standard
+artifact reports `decrypted; NO dataIntegrity element to verify (verify_integrity is inert
+here)`.
+
+**Measured and reported by the downstream consumer** against their own 2007 artifacts, in the
+same exchange as the `Document` finding above.
+
+### The crate documentation states its bounds, its write profile and where plaintext is not zeroized
+
+Three things a consumer had to ask for rather than read.
+
+`src/lib.rs` gains a **Bounds on untrusted input** section: every cap a hostile file can
+trip, grouped by build, with the two that are the spec's own numbers rather than this crate's
+margins marked as such. They are `pub(crate)` constants quoted for discoverability, not public
+API, and the section says so.
+
+`encrypt_ooxml`'s documentation now states the two fixed properties of what it writes: the
+100 000-round spin count has **no parameter** to change it, and a `<dataIntegrity>` element is
+written **unconditionally**, so a consumer may assert `IntegrityDeclaration::Declared` on
+agile output from this crate and know the assertion cannot fail.
+
 ### The release runbook now covers the window between tagging and publishing
 
 `cargo publish` packages the working tree, not the tag, and
