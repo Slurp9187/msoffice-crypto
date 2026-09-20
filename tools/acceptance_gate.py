@@ -314,14 +314,15 @@ def leg_office_crypto(artifact: Path, pw: str, wrong: str, exp: Expectation, wor
     out = work / "office_crypto_out.bin"
     r = run(pw, out)
     if r.returncode != 0:
-        # The build already succeeded, so a non-zero exit here is the example's own: it
-        # exits 1 when office-crypto refuses. Anything else is the harness failing, not a
-        # reader refusing, and must not be worded as a refusal.
-        if r.returncode == 1:
+        # The build already succeeded, so this exit is the example's own, and its codes
+        # are a documented contract at `examples/office_crypto_check.rs:25-26`:
+        # 0 decrypted and written, EXAMPLE_REFUSED office-crypto refused the file,
+        # EXAMPLE_HARNESS usage or I/O. Only the refusal is a verdict about the artifact.
+        if r.returncode == EXAMPLE_REFUSED:
             return Verdict("office-crypto", False, f"office-crypto 0.3: right password REFUSED: {_last_line(r.stderr)}")
         raise LegCannotRun(
-            f"office-crypto: the example exited {r.returncode}, which is neither success "
-            f"nor its refusal code, so nothing was measured: {_last_line(r.stderr)}"
+            f"office-crypto: the example exited {r.returncode}, which is not its refusal "
+            f"code ({EXAMPLE_REFUSED}) — usage or I/O, so nothing was measured: {_last_line(r.stderr)}"
         )
     ok, why = exp.bytes_match(out)
     if not ok:
@@ -342,6 +343,23 @@ def leg_office_crypto(artifact: Path, pw: str, wrong: str, exp: Expectation, wor
 
 
 # ---- the two mutations, each of which the gate must fail ------------------------------------
+
+
+# `examples/office_crypto_check.rs`'s exit-status contract, stated in its own module
+# header at :25-26 and implemented at :34,:38,:44,:51 (harness) and :58 (refusal).
+#
+# **Named here because guessing them once already broke the negative control.** The
+# build/measure split below was added so a compile failure could not be reported as a
+# reader refusing a file; it was written assuming the refusal code was 1, a number that
+# appears nowhere in that example. Genuine refusals then raised `LegCannotRun`, and
+# `--expect-fail` — the run whose whole purpose is to prove this gate CAN fail — exited 2
+# instead of reaching `EXPECTED FAIL`. The fix that stopped build failures being called
+# refusals stopped refusals being called refusals. Reported by the downstream consumer
+# within the hour, on the negative control, which is the run designed to catch it.
+#
+# If these move, that example's header moves with them; it is the contract, not this file.
+EXAMPLE_REFUSED = 3
+EXAMPLE_HARNESS = 2
 
 
 def tree_state() -> str:
