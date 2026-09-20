@@ -346,9 +346,21 @@ notice was owed before publishing.
 
 ## 5. Cross-repository decisions (the downstream consumer)
 
-The consumer is private and dormant here; its Office handler is switched off until this crate
-publishes. These decisions were made in this repository's threads and must not be re-argued
-when it is switched back on.
+The consumer is private. Its Office handler was dormant when these decisions were made and
+is **live as of 2026-09-20** — pinned to `=0.1.0-rc.2` from crates.io via
+`msoffice-crypto/legacy-binary`, calling six entry points. These decisions were made in this
+repository's threads and must not be re-argued now that it is switched on; the list below is
+a record of what was settled, not a checklist of what remains.
+
+**How each one turned out**, checked against the consumer's tree rather than assumed: the
+re-enable list is complete (`legacy-binary`, `decrypt_ooxml_with_policy` for the fail-closed
+default, `decrypt_binary_office`); detection did stay this crate's job (`classify` is called
+rather than CFB sniffed); and `encrypt_ooxml` is the entry point used, with
+`encrypt_ooxml_standard` behind an explicit choice, exactly as argued below.
+
+One decision below was reversed *here* rather than there: **"Upstream's CLI owns that guard;
+the library does not, so it is EFV's"** — the consumer's own module header, and true when it
+was written. § 2.6 records why the guard moved into the library instead.
 
 - **`NativeFormat::OfficeBinary`, flat.** Microsoft's own term — `[MS-DOC]` is titled *"Word
   (.doc) Binary File Format"*. Not `MsoLegacy` (a judgement about age, and these files still
