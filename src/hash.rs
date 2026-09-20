@@ -145,6 +145,72 @@ impl HashAlgorithm {
         }
     }
 
+    /// `H(first || second)`, truncated to `out.len()` and written into `out` — the same
+    /// bytes [`Self::digest_two`] returns, without the `Vec`.
+    ///
+    /// **Why the truncating form is the one that takes a slot.** Its caller,
+    /// `agile::derive_block_key`, wants `key_len` bytes of a digest that is longer, and
+    /// the shortest way to say that in Rust builds the whole digest on the heap and then
+    /// copies a prefix out of it — two allocations, one of them holding the complete
+    /// digest of `H_final`, both freed without being wiped. Writing into a
+    /// `Dynamic::new_with` slot makes the wrapper the only place the bytes ever land.
+    /// See `docs/design/heap-residue.md` for why the abandoned block is beyond the
+    /// wrapper's reach.
+    ///
+    /// **`digest_two` is not reimplemented in terms of this, deliberately.** Its three
+    /// callers all want an owned digest of the natural length, and one of them is
+    /// `spin_hash`'s loop, which runs `spinCount` — up to 10 000 000 — times per
+    /// decrypt. Routing that through a slot it would then have to allocate anyway buys
+    /// nothing and puts a second shape in the hot path. The two share the format's
+    /// `H(a || b)` and nothing else, and a test below pins them to the same bytes.
+    ///
+    /// # Contract
+    ///
+    /// `out.len()` must not exceed [`Self::digest_len`]. It is the caller's check, not
+    /// this function's, because the caller is the one with an [`Error`] to return and a
+    /// message worth reading: `derive_block_key` asks [`Self::can_carry_key_bits`] two
+    /// lines earlier and refuses with `agile::unusable_key_bits`. A longer `out` is
+    /// filled as far as the digest goes and its tail left as the caller supplied it —
+    /// which from `Dynamic::new_with` is zero — rather than padded with `0x36` the way
+    /// [`fit_iv`] pads an IV. Neither is defensible as a *key*; the refusal upstream is,
+    /// and that is why there is one.
+    pub(crate) fn digest_two_into(self, first: &[u8], second: &[u8], out: &mut [u8]) {
+        // The contract above, made loud where it is stated. Without this, violating it
+        // is *silent*: `out` keeps whatever tail the caller allocated, which from
+        // `Dynamic::new_with` is zeros, and a short digest becomes a zero-padded key
+        // rather than an error — precisely what `derive_block_key` refuses to do one
+        // frame up, arrived at by omission instead of by decision.
+        //
+        // `debug_assert` rather than a `Result`: the caller already owns the refusal and
+        // its message, so returning a second error here would duplicate the decision
+        // without improving it. This catches a wrong call in every test run and compiles
+        // out of release, so it adds no panic to a shipped parse path.
+        debug_assert!(
+            out.len() <= self.digest_len(),
+            "digest_two_into: out is {} bytes, {} produces {} — the caller must refuse \
+             this before asking (see can_carry_key_bits)",
+            out.len(),
+            self.name(),
+            self.digest_len(),
+        );
+        macro_rules! run {
+            ($d:ty) => {{
+                let mut h = <$d>::new();
+                h.update(first);
+                h.update(second);
+                let digest = h.finalize();
+                let n = out.len().min(digest.len());
+                out[..n].copy_from_slice(&digest[..n]);
+            }};
+        }
+        match self {
+            Self::Sha1 => run!(Sha1),
+            Self::Sha256 => run!(Sha256),
+            Self::Sha384 => run!(Sha384),
+            Self::Sha512 => run!(Sha512),
+        }
+    }
+
     pub(crate) fn hmac(self, key: &[u8], message: &[u8]) -> Vec<u8> {
         macro_rules! run {
             ($d:ty) => {{
@@ -273,6 +339,62 @@ mod tests {
             assert_eq!(hash.digest(b"abc"), hash.digest_two(b"a", b"bc"));
             assert_ne!(hash.digest_two(b"a", b"bc"), hash.digest_two(b"bc", b"a"));
         }
+    }
+
+    /// `digest_two_into` must be `digest_two` truncated and nothing else.
+    ///
+    /// Two functions computing the same format step is exactly the drift the crate
+    /// avoids elsewhere by sharing one expression, and here it cannot: one returns an
+    /// owned `Vec` and the other writes a slot, which is the whole point of having both.
+    /// So the agreement is pinned by test instead — at *every* truncation length, not
+    /// only at the four `keyBits / 8` values in the wild, because a `copy_from_slice`
+    /// with the wrong endpoint is a silently wrong key rather than an error.
+    #[test]
+    fn digest_two_into_is_digest_two_truncated() {
+        for hash in [
+            HashAlgorithm::Sha1,
+            HashAlgorithm::Sha256,
+            HashAlgorithm::Sha384,
+            HashAlgorithm::Sha512,
+        ] {
+            let want = hash.digest_two(b"H_final stand-in", b"\x14\x6e\x0b\xe7\xab\xac\xd0\xd6");
+            assert_eq!(want.len(), hash.digest_len());
+            for n in 0..=hash.digest_len() {
+                let mut got = vec![0xAAu8; n];
+                hash.digest_two_into(
+                    b"H_final stand-in",
+                    b"\x14\x6e\x0b\xe7\xab\xac\xd0\xd6",
+                    &mut got,
+                );
+                assert_eq!(got, want[..n], "{hash:?} truncated to {n}");
+            }
+        }
+    }
+
+    /// Asking for more bytes than the digest has is a **contract violation**, not a
+    /// behaviour.
+    ///
+    /// This replaced a test that pinned what the over-long case *does* — fill as far as
+    /// the digest goes, leave the caller's tail, which from `Dynamic::new_with` is zeros.
+    /// That was written to stop someone "improving" it into a `0x36` pad, which is a real
+    /// hazard and the right thing to want. But pinning the behaviour of a call the
+    /// contract forbids documents it as available, and the behaviour it documented is a
+    /// silently zero-padded key — exactly what `agile::derive_block_key` refuses to
+    /// produce one frame up, reached here by omission rather than by decision.
+    ///
+    /// So the `debug_assert` in `digest_two_into` is the guard and this is its proof. The
+    /// `0x36` hazard is covered better than before: a pad of *any* byte is now
+    /// unreachable, rather than merely a different constant from the one nobody wants.
+    ///
+    /// `cfg(debug_assertions)` because that is when the assert exists — it compiles out
+    /// of release so a shipped parse path gains no panic, which means a release test run
+    /// would see the old silent behaviour and this `should_panic` would fail.
+    #[test]
+    #[should_panic(expected = "the caller must refuse this before asking")]
+    #[cfg(debug_assertions)]
+    fn digest_two_into_refuses_more_bytes_than_the_digest_holds() {
+        let mut over = vec![0u8; HashAlgorithm::Sha1.digest_len() + 1];
+        HashAlgorithm::Sha1.digest_two_into(b"H_final stand-in", b"block-key", &mut over);
     }
 
     /// [MS-OFFCRYPTO] §2.3.4.12 step 3, both directions: short pads with `0x36`, long

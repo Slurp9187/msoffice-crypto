@@ -28,7 +28,7 @@
 //! derivations written side by side can.
 use crate::error::Error;
 use crate::limits;
-use crate::sensitive::{DerivedKey, PasswordDigest, VerifierPlaintext};
+use crate::sensitive::{utf16le_password, DerivedKey, PasswordDigest, VerifierPlaintext};
 use aes::Aes128;
 use ecb::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyInit};
 use secure_gate::{ConstantTimeEq, RevealSecret};
@@ -398,8 +398,10 @@ fn require_sha1(alg_id_hash: u32) -> Result<(), Error> {
 /// because the spec defines the key as a prefix of `X1 || X2` and a reader that
 /// accepted `KeySize` up to 320 bits would need the second digest.
 ///
-/// **What is wrapped.** `H_final` — the standard path's [`PasswordDigest`], the value the
-/// secure-gate skill's table places here — and the ladder output, which is the
+/// **What is wrapped.** The UTF-16LE password buffer the first round hashes — a
+/// [`crate::sensitive::Utf16Password`], wrapped since rc.4 and a bare growing `Vec`
+/// before that — `H_final`, the standard path's [`PasswordDigest`], the value the
+/// secure-gate skill's table places here, and the ladder output, which is the
 /// [`DerivedKey`] itself. The 50 000 intermediate spin states are one reused stack array
 /// rather than a wrapper per round, per the skill's *Residual* section: they are hash
 /// states the spin count exists to make expensive to invert, and only `H_final` derives
@@ -422,17 +424,19 @@ pub(crate) fn derive_standard_key(
         )));
     }
 
-    let password_bytes: Vec<u8> = password
-        .encode_utf16()
-        .flat_map(|c| c.to_le_bytes())
-        .collect();
-
     // H_0 = SHA1(salt + password_utf16le)
-    let mut h: [u8; SHA1_LEN] = Sha1::new()
-        .chain_update(salt)
-        .chain_update(&password_bytes)
-        .finalize()
-        .into();
+    //
+    // The UTF-16LE re-encoding is wrapped and scoped to this statement — the same
+    // change, for the same reason, as `agile::spin_hash`'s first round: `collect()`
+    // into a `Vec<u8>` under-reserves and abandons unwiped blocks holding a prefix of
+    // the password. See `sensitive::utf16le_password`.
+    let mut h: [u8; SHA1_LEN] = utf16le_password(password).with_secret(|pw| {
+        Sha1::new()
+            .chain_update(salt)
+            .chain_update(pw)
+            .finalize()
+            .into()
+    });
 
     // H_i = SHA1(LE32(i) + H_{i-1})
     for i in 0u32..SPIN_COUNT {

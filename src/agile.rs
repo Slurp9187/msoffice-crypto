@@ -42,7 +42,9 @@ use crate::hash::{fit_iv, HashAlgorithm};
 use crate::integrity::{self, IntegrityMaterial, IntegrityOutcome, IntegrityPolicy};
 use crate::limits;
 use crate::segments::Segments;
-use crate::sensitive::{DerivedKey, PasswordDigest, SessionKey, VerifierPlaintext};
+use crate::sensitive::{
+    utf16le_password, DerivedKey, PasswordDigest, SessionKey, VerifierPlaintext,
+};
 use aes::{Aes128, Aes192, Aes256};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use cbc::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
@@ -583,13 +585,15 @@ pub(crate) fn spin_hash(
     salt: &[u8],
     spin_count: u32,
 ) -> PasswordDigest {
-    let password_bytes: Vec<u8> = password
-        .encode_utf16()
-        .flat_map(|c| c.to_le_bytes())
-        .collect();
-
     // H_0 = H(salt + password_utf16le)
-    let mut h = hash.digest_two(salt, &password_bytes);
+    //
+    // The UTF-16LE re-encoding is wrapped and scoped to this statement: it is the
+    // password verbatim, it is used exactly once, and the block that held it is wiped
+    // before the spin loop starts rather than at the end of the function. Built with
+    // `sensitive::utf16le_password` and not `collect()` — see that function for the
+    // reallocation the collect abandoned, and `docs/design/heap-residue.md` for why an
+    // abandoned block is unreachable to every wrapper in the crate.
+    let mut h = utf16le_password(password).with_secret(|pw| hash.digest_two(salt, pw));
 
     // H_i = H(LE32(i) + H_{i-1})  — counter PREPENDED
     for i in 0u32..spin_count {
@@ -621,7 +625,7 @@ pub(crate) fn spin_hash(
 /// `Invalid key size (160)` (`ecma376_agile.py:201`); LibreOffice truncates with no guard
 /// and admits the gap in its own comment (`AgileEngine.cxx:277-279, 499`); office-crypto
 /// truncates but never reaches the case, refusing every non-SHA-512 agile file outright
-/// (`src/lib.rs:29`). In Rust the naive form is worse than any of those — `digest[..32]`
+/// (`src/lib.rs:29`). In Rust the naive form was worse than any of those — `digest[..32]`
 /// on a 20-byte digest is a panic, i.e. a vulnerability under CLAUDE.md's first design
 /// value — so the combination is refused instead, at parse time, matching this crate's
 /// own precedent for the `derive_iv` pad branch. No shipping writer emits it: LibreOffice
@@ -644,9 +648,17 @@ pub(crate) fn derive_block_key(
     if !hash.can_carry_key_bits(key_bits) {
         return Err(unusable_key_bits(key_bits, hash));
     }
+    // `key_len <= hash.digest_len()` now holds, which is exactly `digest_two_into`'s
+    // contract — the check above is the one that discharges it.
+    //
+    // The digest is cut straight into the wrapper's own slot and never exists as a
+    // `Vec`. Written the obvious way — `let digest = hash.digest_two(hf, block_key);
+    // DerivedKey::new(digest[..key_len].to_vec())` — it existed twice over: a heap
+    // `Vec` holding the **whole** digest of `H_final`, dropped unwiped, plus a second
+    // allocation for the prefix the wrapper kept. Both went to the allocator carrying
+    // block-key material. See `docs/design/heap-residue.md`.
     Ok(h_final.with_secret(|hf| {
-        let digest = hash.digest_two(hf, block_key);
-        DerivedKey::new(digest[..key_len].to_vec())
+        DerivedKey::new_with(key_len, |slot| hash.digest_two_into(hf, block_key, slot))
     }))
 }
 
@@ -1050,9 +1062,17 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // password is checked, so neither needs a valid password to reach:
     //   * spinCount is a loop count -- see limits::SPIN_COUNT_MAX for the measurement;
     //   * keyBits/8 is a truncation length on the digest of the hash the file names, so
-    //     anything longer than that digest slices out of range inside `derive_block_key`.
-    // `aes_cbc_decrypt`'s key-length check is one call frame too late for the
-    // second: the slice panics before that function is entered.
+    //     anything longer than that digest cannot be cut from it inside `derive_block_key`.
+    // `aes_cbc_decrypt`'s key-length check is one call frame too late for the second.
+    //
+    // **The failure mode this guard prevents changed, and the guard did not.** It used
+    // to be a panic: `derive_block_key` sliced `digest[..key_len]`, and an over-long
+    // `key_len` was an out-of-range index. Since the digest is written into a wrapped
+    // slot by `hash::digest_two_into`, the same input would instead produce a key whose
+    // tail is the slot's zeros -- quieter and worse, because a zero-padded key is a key
+    // that works, on a file no writer produced. The refusal is what stops both; only the
+    // thing it stops is different now. `digest_two_into` carries a `debug_assert` saying
+    // so at the other end.
     let spin_count = spin_count.ok_or_else(|| Error::XmlParse("missing spinCount".into()))?;
     if spin_count > limits::SPIN_COUNT_MAX {
         return Err(Error::BadParameters(format!(
@@ -1515,7 +1535,11 @@ mod tests {
     /// The slice in `derive_block_key` is only in range while `keyBits / 8` fits inside
     /// the named hash's digest. SHA-1 gives 20 bytes, so `keyBits="192"` and `"256"` —
     /// both in `AGILE_KEY_BITS_ALLOWED`, both reached before any password is checked —
-    /// would slice off the end of it. In Rust that is a panic, not a short key.
+    /// would ask for more bytes than it has. That was a panic while the key was cut with
+    /// `digest[..key_len]`; since `hash::digest_two_into` writes into a pre-zeroed
+    /// wrapped slot it would instead be a zero-padded key — silent, and a key that
+    /// works. Either way the refusal below is what prevents it, which is why this test
+    /// asserts the error and not the crash.
     #[test]
     fn key_bits_longer_than_the_named_digest_is_refused_not_padded() {
         let h = PasswordDigest::new(vec![0u8; 20]);
