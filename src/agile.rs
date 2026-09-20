@@ -630,7 +630,10 @@ pub(crate) fn spin_hash(
 ///
 /// The check is repeated here rather than left to the parser. This function is reachable
 /// from three call sites with a `key_bits` the parser vouched for, and the cost of not
-/// trusting that is one comparison against a value already in a register.
+/// trusting that is one comparison against a value already in a register. Repeated, not
+/// re-expressed: both this and the parse-time check ask
+/// [`HashAlgorithm::can_carry_key_bits`], so the duplication is of the *call* and not of
+/// the bound, and the two cannot come to disagree about which pairs are refusable.
 pub(crate) fn derive_block_key(
     hash: HashAlgorithm,
     h_final: &PasswordDigest,
@@ -638,7 +641,7 @@ pub(crate) fn derive_block_key(
     key_bits: u32,
 ) -> Result<DerivedKey, Error> {
     let key_len = (key_bits / 8) as usize;
-    if key_len > hash.digest_len() {
+    if !hash.can_carry_key_bits(key_bits) {
         return Err(unusable_key_bits(key_bits, hash));
     }
     Ok(h_final.with_secret(|hf| {
@@ -1133,8 +1136,11 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // `keyBits / 8` is the block-key truncation length and `password_hash`'s digest is
     // what it truncates, so the pair has to be checked together — the `keyBits` bound
     // above cannot cover it on its own now that the digest length is the file's choice.
-    // See `derive_block_key` for why this is a refusal rather than herumi's 0x36 pad.
-    if (key_bits / 8) as usize > password_hash.digest_len() {
+    // See `derive_block_key` for why this is a refusal rather than herumi's 0x36 pad,
+    // and `HashAlgorithm::can_carry_key_bits` — the single predicate this and that
+    // second, defence-in-depth check both ask — for why the comparison is not written
+    // out here.
+    if !password_hash.can_carry_key_bits(key_bits) {
         return Err(unusable_key_bits(key_bits, password_hash));
     }
 

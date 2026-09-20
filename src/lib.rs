@@ -249,6 +249,16 @@ mod agile_encrypt;
 /// gate was the reminder that the flip was due, and it fired on schedule.
 #[cfg(feature = "crypto-ops")]
 mod dataspaces;
+/// The encryption parameters a caller may choose, and the one function that judges them.
+/// Public through the [`EncryptParams`] re-export below — the type is *to be* an input to
+/// the encrypt path rather than a decision this crate makes alone, which is why it is a
+/// module of its own and not a private struct inside `agile_encrypt`.
+///
+/// The writers do not take one yet: the type and its validator landed ahead of the
+/// threading. See `EncryptParams::validate`, which says the same thing where a caller
+/// reading the rendered docs will meet it.
+#[cfg(feature = "crypto-ops")]
+mod encrypt_params;
 /// Serialise the agile `EncryptionInfo` stream — the inverse of `agile`'s parser, and the
 /// half GH #6 step 3 added. Shaped byte-for-byte on what Word 16 writes.
 #[cfg(feature = "crypto-ops")]
@@ -256,6 +266,15 @@ mod encryption_info;
 /// The four hash algorithms an agile file may name, as operations rather than as a
 /// label. The enum itself lives in `classify`, which must report the hash in a build
 /// with no cipher crate at all; this is the `crypto-ops` half.
+///
+/// Private, but not entirely internal: two of the inherent methods it hangs on
+/// [`HashAlgorithm`] — `digest_len` and `name` — are `pub`, and reach a consumer through
+/// the enum's own re-export below rather than through this module, which is why there is
+/// no `pub use` here to add. They are facts about SHA rather than about this crate, and a
+/// caller choosing encryption parameters needs them to predict the `keyBits <= digest`
+/// coupling the agile path imposes. That makes them `crypto-ops`-only API on a type the
+/// detection build also exports — deliberate, and the same shape as [`Error`], whose
+/// re-export is gated for the same reason.
 #[cfg(feature = "crypto-ops")]
 mod hash;
 #[cfg(feature = "crypto-ops")]
@@ -289,12 +308,27 @@ pub use classify::{
     classify, AlgorithmParams, CipherAlgorithm, Classification, Container, ContainerRead, Document,
     Family, HashAlgorithm, IntegrityDeclaration,
 };
+/// The parameters of an agile encryption, as a caller chooses them — and
+/// `EncryptParams::validate`, which judges them before a password is asked for.
+///
+/// Gated with the encrypt path it parameterises. Exported from the crate root rather
+/// than from a module of its own for the same reason every other public item here is:
+/// this crate has one public surface, and `msoffice_crypto::encrypt_params::EncryptParams`
+/// would be a second path to the same type.
+#[cfg(feature = "crypto-ops")]
+pub use encrypt_params::EncryptParams;
 /// Gated with the functions that return it. In a detection-only build no public
 /// function returns a `Result`, so an ungated re-export was a public type nothing
 /// produced — and, once its crypto-only variants were gated, a type whose public shape
 /// depended on a feature the consumer could not see from the name. See the enum's doc.
 #[cfg(feature = "crypto-ops")]
 pub use error::Error;
+/// The two halves of [`Error::EncryptParams`]'s payload, gated with the variant that
+/// carries them. They are deliberately enums rather than strings so that a caller can
+/// `match` a rejected encryption parameter — which is unreachable if the types are not
+/// exported, so this re-export is part of that variant, not a convenience.
+#[cfg(feature = "crypto-ops")]
+pub use error::{EncryptParam, EncryptParamProblem};
 #[cfg(feature = "crypto-ops")]
 pub use integrity::{IntegrityOutcome, IntegrityPolicy};
 

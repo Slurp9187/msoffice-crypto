@@ -46,7 +46,12 @@ impl HashAlgorithm {
     /// prints in errors. `HashAlgorithm::parse` also accepts the hyphenated form
     /// (`SHA-1`), so a file that used it is reported back in the canonical spelling
     /// rather than in its own.
-    pub(crate) fn name(self) -> &'static str {
+    ///
+    /// `pub` rather than `pub(crate)` for the same reason as [`Self::digest_len`]: the
+    /// spelling is the one a caller has to put back into `hashAlgorithm` when it
+    /// describes its own parameters, and it is not derivable from `Debug`, which prints
+    /// the Rust variant name (`Sha512`) and not the attribute value (`SHA512`).
+    pub fn name(self) -> &'static str {
         match self {
             Self::Sha1 => "SHA1",
             Self::Sha256 => "SHA256",
@@ -57,13 +62,54 @@ impl HashAlgorithm {
 
     /// Digest length in bytes. A `hashSize` attribute is checked against this before it
     /// is trusted as a truncation length, and `keyBits / 8` before it is trusted as one.
-    pub(crate) fn digest_len(self) -> usize {
+    ///
+    /// **Why this is `pub` when everything else on this impl is internal.** It is a fact
+    /// about SHA, not about this crate — FIPS 180-4 fixes all four numbers, and no
+    /// decision of ours can move them. What is ours is the *coupling* it feeds: a caller
+    /// choosing encryption parameters meets a refusal when `keyBits / 8` exceeds the
+    /// digest of the hash it named (`can_carry_key_bits`, internal), and without this
+    /// number it cannot reason about that rule before it trips over it — it would have
+    /// to hardcode the same four constants to predict our own error. `hashSize` is not
+    /// a companion to this: [MS-OFFCRYPTO] §2.3.4.10 requires it to *equal* the named
+    /// hash's digest length, so it is derived from this value rather than chosen beside
+    /// it, which is why no setter for it exists.
+    pub fn digest_len(self) -> usize {
         match self {
             Self::Sha1 => 20,
             Self::Sha256 => 32,
             Self::Sha384 => 48,
             Self::Sha512 => 64,
         }
+    }
+
+    /// Can a block key of `key_bits` bits be cut from this hash's digest without padding
+    /// it?
+    ///
+    /// The one predicate behind three refusals, so that they cannot drift: the
+    /// `keyBits`/`hashAlgorithm` pair check in `agile::parse_encryption_info`, the
+    /// re-check inside `agile::derive_block_key` (which is reachable from three call
+    /// sites and declines to trust the parser), and the message
+    /// `agile::unusable_key_bits` builds for both. The expression was written out twice
+    /// before this function existed, and two copies of a bound are one bound and one
+    /// latent divergence.
+    ///
+    /// The bound is *not* in [MS-OFFCRYPTO]. §2.3.4.11 ends by telling an implementation
+    /// to 0x36-pad a digest shorter than `PasswordKeyEncryptor.keyBits` and to truncate
+    /// a longer one, and `ST_KeyBits` has a minimum of 8 and a multiple-of-8 constraint
+    /// but **no maximum at all**, so the combination is legal on the wire. This crate
+    /// refuses the padding half deliberately — see `agile::derive_block_key` for the
+    /// argument and for what the four references each do instead. This predicate is
+    /// therefore a house rule with a spec-shaped name, and says so rather than implying
+    /// the spec forbids what it rejects.
+    ///
+    /// The truncating divide is the right one and not a rounding hazard. Every value
+    /// that reaches here has passed `agile::check_key_bits`, whose allowlist holds only
+    /// multiples of 8, so `key_bits / 8` is exact today; and were a non-multiple ever to
+    /// arrive, `key_bits / 8` is *the same expression* the truncation downstream uses to
+    /// cut the digest, so the predicate stays a true statement about that cut rather
+    /// than an independent calculation that could disagree with it.
+    pub(crate) fn can_carry_key_bits(self, key_bits: u32) -> bool {
+        (key_bits / 8) as usize <= self.digest_len()
     }
 
     /// `H(data)`.

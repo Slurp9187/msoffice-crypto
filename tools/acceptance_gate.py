@@ -279,7 +279,34 @@ def leg_msoffcrypto(artifact: Path, pw: str, wrong: str, exp: Expectation, work:
 def leg_office_crypto(artifact: Path, pw: str, wrong: str, exp: Expectation, work: Path) -> Verdict:
     if shutil.which("cargo") is None:
         return Verdict("office-crypto", False, "cannot run: cargo not found")
-    base = ["cargo", "run", "--locked", "--quiet", "--no-default-features", "--features", "crypto-ops", "--example", "office_crypto_check", "--"]
+    common = ["--locked", "--quiet", "--no-default-features", "--features", "crypto-ops", "--example", "office_crypto_check"]
+
+    # BUILD FIRST, AND SEPARATELY, because this leg measures a third party through a
+    # binary that happens to live in this repository.
+    #
+    # `examples/office_crypto_check.rs:13` exists so the leg is not this crate marking its
+    # own homework -- it calls `office_crypto::decrypt_from_bytes`, never
+    # `msoffice_crypto::decrypt_ooxml`. But an example links the lib, so `cargo run`
+    # compiles this crate on the way to running someone else's. Folded into one
+    # invocation, a compile error in an unrelated, uncommitted edit came back as a
+    # non-zero exit and was rendered "right password REFUSED" -- a sentence about a reader
+    # and an artifact, asserted on the strength of `cargo` failing.
+    #
+    # Found by the downstream consumer, 2026-09-20: two runs minutes apart on one artifact
+    # disagreed, because the variable was a `git status` in a different repository and
+    # nothing in the output named it. They recorded no verdict for that run, which was the
+    # right call and is the outcome this split makes unnecessary.
+    build = _run(["cargo", "build", *common], cwd=REPO, timeout=1800)
+    if build.returncode != 0:
+        # NOT a Verdict: a selected reader that could not be *attempted* has proven
+        # nothing, and both PASS and FAIL would be claims about bytes nobody read. Same
+        # reasoning as MutationNotApplicable, and the same exit 2.
+        raise LegCannotRun(
+            f"office-crypto: the example did not build, so the reader was never run "
+            f"(cargo exit {build.returncode}): {_last_line(build.stderr)}"
+        )
+
+    base = ["cargo", "run", *common, "--"]
 
     def run(password: str, out: Path) -> subprocess.CompletedProcess:
         return _run(base + [str(artifact), str(out)], cwd=REPO, timeout=1800, env={**os.environ, "MSOFFICE_CRYPTO_PASSWORD": password})
@@ -287,7 +314,15 @@ def leg_office_crypto(artifact: Path, pw: str, wrong: str, exp: Expectation, wor
     out = work / "office_crypto_out.bin"
     r = run(pw, out)
     if r.returncode != 0:
-        return Verdict("office-crypto", False, f"office-crypto 0.3: right password REFUSED (exit {r.returncode}): {_last_line(r.stderr)}")
+        # The build already succeeded, so a non-zero exit here is the example's own: it
+        # exits 1 when office-crypto refuses. Anything else is the harness failing, not a
+        # reader refusing, and must not be worded as a refusal.
+        if r.returncode == 1:
+            return Verdict("office-crypto", False, f"office-crypto 0.3: right password REFUSED: {_last_line(r.stderr)}")
+        raise LegCannotRun(
+            f"office-crypto: the example exited {r.returncode}, which is neither success "
+            f"nor its refusal code, so nothing was measured: {_last_line(r.stderr)}"
+        )
     ok, why = exp.bytes_match(out)
     if not ok:
         return Verdict("office-crypto", False, f"office-crypto 0.3: decrypted, but {why}")
@@ -307,6 +342,49 @@ def leg_office_crypto(artifact: Path, pw: str, wrong: str, exp: Expectation, wor
 
 
 # ---- the two mutations, each of which the gate must fail ------------------------------------
+
+
+def tree_state() -> str:
+    """This repository's HEAD and whether it is dirty, printed beside the reader versions.
+
+    A verdict names the artifact by SHA-256 and each reader by version, and until now said
+    nothing about the tree the run happened in. That mattered twice, in two directions:
+    the office-crypto leg builds from this working directory, so an uncommitted edit can
+    decide whether it runs at all; and `CHANGELOG.md`'s evidence sections cite an artifact
+    hash, which pins the bytes measured but not the commit that produced them -- and
+    `0.1.0-rc.4` currently spans many commits. Both were reported by the downstream
+    consumer, who hit the first and then recognised the second from its shape.
+
+    Best-effort by design: a `.crate` extraction has no git metadata, and a gate that
+    refused to run outside a checkout would be worse than one that says "unknown".
+    """
+    try:
+        head = _run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO, timeout=30)
+        if head.returncode != 0:
+            return "not a git checkout"
+        status = _run(["git", "status", "--porcelain"], cwd=REPO, timeout=30)
+        dirty = bool(status.stdout.strip()) if status.returncode == 0 else None
+        sha = head.stdout.strip()
+        if dirty is None:
+            return f"{sha} (cleanliness unknown)"
+        return f"{sha}{' DIRTY -- uncommitted changes are in this measurement' if dirty else ' clean'}"
+    except Exception:  # noqa: BLE001 -- provenance is a courtesy; never fail a gate over it
+        return "unknown"
+
+
+class LegCannotRun(Exception):
+    """A selected reader could not be attempted, so this run proves nothing about it.
+
+    Distinct from a `Verdict` of either polarity, and for the reason MutationNotApplicable
+    gives: PASS and FAIL are both claims about what a reader did with an artifact, and a
+    reader that never executed did nothing with it. Rendering "could not build" as FAIL
+    puts a falsehood in a line a consumer copies into an evidence section.
+
+    The direction of the error is what makes this worth an exception rather than a softer
+    verdict. A spurious FAIL is loud and gets investigated; the same conflation could in
+    principle produce a spurious PASS, and a PASS is what gets written down as durable
+    evidence. Exit 2, so a caller testing only `exit == 0` reads it as neither.
+    """
 
 
 class MutationNotApplicable(Exception):
@@ -510,6 +588,7 @@ def main() -> int:
             print(f"mutated  : {how} -> {what}")
         print(f"expected : bytes = {exp.describe_bytes()}; text from {'--expect-text' if exp.text is not None else exp.text_file.name}")
         print(f"readers  : {', '.join(readers)}")
+        print(f"tree     : {tree_state()}")
         print()
 
         verdicts: list[Verdict] = []
@@ -517,14 +596,24 @@ def main() -> int:
             if reader not in readers:
                 verdicts.append(Verdict(reader, None, "not selected"))
                 continue
-            if reader == "office":
-                v = leg_office(artifact, args.password, args.wrong_password, exp)
-            elif reader == "libreoffice":
-                v = leg_libreoffice(artifact, args.password, args.wrong_password, exp)
-            elif reader == "msoffcrypto":
-                v = leg_msoffcrypto(artifact, args.password, args.wrong_password, exp, work)
-            else:
-                v = leg_office_crypto(artifact, args.password, args.wrong_password, exp, work)
+            try:
+                if reader == "office":
+                    v = leg_office(artifact, args.password, args.wrong_password, exp)
+                elif reader == "libreoffice":
+                    v = leg_libreoffice(artifact, args.password, args.wrong_password, exp)
+                elif reader == "msoffcrypto":
+                    v = leg_msoffcrypto(artifact, args.password, args.wrong_password, exp, work)
+                else:
+                    v = leg_office_crypto(artifact, args.password, args.wrong_password, exp, work)
+            except LegCannotRun as why:
+                # Exit 2 for the same reason MutationNotApplicable takes it: neither 0 nor
+                # 1, because this run is not a pass and not a failure. Stopping here rather
+                # than continuing is deliberate -- a partial gate printed under a GATE:
+                # line reads as a complete one, and the missing leg is the interesting part.
+                print(f"{reader:<14} NOT RUN  {why}")
+                print()
+                print(f"GATE: NOT RUN ({why}); nothing was proven")
+                return 2
             verdicts.append(v)
             print(v.line(), flush=True)
 

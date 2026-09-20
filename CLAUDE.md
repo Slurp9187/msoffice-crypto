@@ -242,6 +242,7 @@ src/error.rs           Error -- the crate's single public error type
 src/bin/msoffice-crypto.rs  the CLI: exit codes, clap wiring, classify rendering, the decrypt dispatch and the atomic write   (+ msoffice-crypto_tests.rs)
 src/malformed_input.rs hostile-input tests, containers built at runtime
 src/dataspaces.rs      the \x06DataSpaces writer and the CFB container, timestamps zeroed   (+ dataspaces_tests.rs)
+src/encrypt_params.rs  EncryptParams -- the caller's encryption tuple, per-element as the spec is, and validate()   (+ encrypt_params_tests.rs)
 src/encryption_info.rs the EncryptionInfo serialiser, byte-identical to Office's   (+ encryption_info_tests.rs)
 src/agile_encrypt.rs   the agile key schedule, the package encryptor, and the assembly behind encrypt_ooxml   (+ agile_encrypt_tests.rs)
 src/rc4.rs             RC4 over a wrapped key, the per-block loop, the verifier check   (legacy-binary, as are the seven below)

@@ -450,7 +450,14 @@ pub(crate) fn generate<R: rand::TryRng + rand::TryCryptoRng>(
 /// this is it. Both plaintexts are padded up to a `blockSize` multiple **with zeros** —
 /// a no-op for SHA-256/384/512 and load-bearing for SHA-1 (20 → 32).
 ///
-/// Zero is not a free choice. LibreOffice pads these blobs with 0x36
+/// Zero is the spec's byte, not a convention this crate settled on: §2.3.4.14 step 3 says
+/// to "pad the array with 0x00 to the next integral multiple of blockSize bytes" (and
+/// §2.3.4.13 says the same of the six encrypted blobs). That is a requirement, so it
+/// outranks the measurement below — which is kept because it is the independent
+/// corroboration, and because it is what tells you *why* a writer cannot quietly pick a
+/// different filler and still be opened.
+///
+/// LibreOffice pads these blobs with 0x36
 /// (`AgileEngine.cxx:654-656, :688-689`, behaviour only), and this crate did the same
 /// until the SHA-1 fixture was put in front of real Word 16: Word passed the verifier and
 /// then refused the file with `0x800A1066` ("Command failed"). Thirteen same-length
@@ -481,18 +488,61 @@ pub(crate) fn generate_with_key(
     let iv1 = derive_iv(hash, key_data_salt, &BLOCK_DATA_INTEGRITY_KEY, block_size)?;
     let iv2 = derive_iv(hash, key_data_salt, &BLOCK_DATA_INTEGRITY_VALUE, block_size)?;
 
-    let pad_zero = |v: &[u8]| {
-        let mut p = v.to_vec();
-        p.resize(v.len().div_ceil(block_size) * block_size, 0);
-        p
+    // The padded length of a blob: §2.3.4.14 step 3's "next integral multiple of
+    // blockSize bytes". `checked_mul` rather than `*` because a panic is a vulnerability
+    // in this crate even where the operands are this well behaved -- `block_size` is
+    // pinned to 16 four lines above and the lengths are digest lengths, so the overflow
+    // is unreachable and the error arm is there to keep it that way if either ever stops
+    // being true.
+    let padded_len = |len: usize| -> Result<usize, Error> {
+        len.div_ceil(block_size)
+            .checked_mul(block_size)
+            .ok_or_else(|| {
+                Error::BadParameters(format!(
+                    "padding {len} bytes up to a multiple of {block_size} overflows"
+                ))
+            })
     };
 
+    // Pad INTO a wrapped buffer allocated at the final length -- never draw short and
+    // resize. The obvious `v.to_vec()` followed by `resize` is wrong twice over, and both
+    // faults are the ones `standard_encrypt.rs:204-215` already documents:
+    //
+    // 1. `to_vec` allocates exactly `hashSize` bytes, and `resize` to a larger length
+    //    cannot fit, so it reallocates and frees the block holding the HMAC key -- or the
+    //    tag -- **unwiped**. Nothing in the wrapper can reach an allocation it no longer
+    //    owns. It is a no-op at SHA-512, whose 64 bytes are already a block multiple; it
+    //    goes live the moment anything writes SHA-1 (20 -> 32), which is a reachable
+    //    parameter, not a hypothetical.
+    // 2. The padded copy was a bare `Vec<u8>` holding the whole dataIntegrity HMAC key --
+    //    the value §2.3.4.14 exists to protect, the one that forges a tag for any package
+    //    this session key encrypts -- wrapped nowhere and zeroized never.
+    //
+    // `Dynamic::new_with` closes both: one allocation at the final size, and a slot
+    // secure-gate guarantees is pre-zeroed, so the 0x00 tail the spec requires is the
+    // guarantee rather than something a `resize` writes on the way to a new block. The
+    // form is the one `standard_encrypt.rs:217` and `rc4_cryptoapi.rs:310` already take.
+    // The slice bound is safe by construction: `padded_len(n) >= n`.
     let encrypted_hmac_key = hmac_key.with_secret(|k| {
-        session_key.with_secret(|sk| crate::agile::aes_cbc_encrypt(&pad_zero(k), sk, &iv1))
+        let padded = IntegrityKey::new_with(padded_len(k.len())?, |slot| {
+            slot[..k.len()].copy_from_slice(k);
+        });
+        padded.with_secret(|p| {
+            session_key.with_secret(|sk| crate::agile::aes_cbc_encrypt(p, sk, &iv1))
+        })
     })?;
+
+    // `IntegrityTag::new` takes ownership of the `Vec` the HMAC returns -- exact-sized, so
+    // nothing is abandoned on the way in -- and the padded copy is a second wrapped
+    // buffer rather than a grown first one, for the reason above.
     let tag = IntegrityTag::new(hmac_key.with_secret(|k| hash.hmac(k, encrypted_package)));
     let encrypted_hmac_value = tag.with_secret(|t| {
-        session_key.with_secret(|sk| crate::agile::aes_cbc_encrypt(&pad_zero(t), sk, &iv2))
+        let padded = IntegrityTag::new_with(padded_len(t.len())?, |slot| {
+            slot[..t.len()].copy_from_slice(t);
+        });
+        padded.with_secret(|p| {
+            session_key.with_secret(|sk| crate::agile::aes_cbc_encrypt(p, sk, &iv2))
+        })
     })?;
 
     Ok(IntegrityBlobs {

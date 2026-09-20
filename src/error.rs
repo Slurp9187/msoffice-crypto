@@ -18,7 +18,7 @@
 /// § *Project Status*), and the obligation it leaves is to name the split in the changelog
 /// as a fact.
 ///
-/// Twelve of the seventeen variants exist only under `crypto-ops`, one only under
+/// Thirteen of the eighteen variants exist only under `crypto-ops`, one only under
 /// `legacy-binary`, and so does the public re-export of the type itself. In a
 /// detection-only build no public function returns a `Result` — [`crate::classify()`]
 /// answers every input and [`crate::is_cfb_office()`] is a `bool` — so the type would be a
@@ -31,6 +31,11 @@
 /// interpolated into [`Error::BadParameters`] — it is bounded and truncated at
 /// the construction site, and the variant says so. Match with a `_` arm: the enum does
 /// not implement `PartialEq`.
+///
+/// [`Error::EncryptParams`] quotes nothing either, and for a reason none of the others
+/// can claim: it is raised before any file is opened at all. Its three numbers are the
+/// caller's own arguments and this crate's own bounds, and its two enum payloads are
+/// fieldless.
 ///
 /// The encrypt guard's three variants quote nothing at all.
 /// [`Error::AlreadyEncrypted`] carries [`crate::Family`] and [`crate::Document`], which
@@ -308,6 +313,76 @@ pub enum Error {
     #[cfg(feature = "crypto-ops")]
     RandomSource(String),
 
+    /// A caller asked an encrypt entry point for encryption parameters this crate will
+    /// not write.
+    ///
+    /// **This is a caller error, raised before a single byte of any document has been
+    /// examined.** Nothing in it describes the input, so a consumer that renders it as
+    /// "your document is damaged" tells the holder of a perfectly good file that their
+    /// file is broken. Often there is no file yet: the parameters are validated at the
+    /// top of the call, ahead of the container sniff that produces
+    /// [`Self::AlreadyEncrypted`] and its siblings. The remedy is always to change the
+    /// argument, never to change the document — which is why this variant maps to the
+    /// CLI's usage exit code and not to any of its file codes.
+    ///
+    /// Distinct from [`Self::BadParameters`], and the distinction is *whose number it
+    /// is*. `BadParameters` is a value the **file** declares about itself, arriving out
+    /// of an attacker-supplied `EncryptionInfo` stream; this is a value the **caller**
+    /// passed in. They are raised at opposite ends of the crate and acted on by different
+    /// people — one by whoever chose the file, one by whoever wrote the call — so
+    /// collapsing them would hand a programmer's mistake to an end user as a verdict on
+    /// their document.
+    ///
+    /// **No file byte can reach this variant.** `got`, `min` and `max` are `u32`s the
+    /// caller supplied or that this crate's own `limits` module holds, and `param` and
+    /// `problem` are fieldless `Copy` enums. There is deliberately no `String` field: the
+    /// free-text channel `BadParameters` needs is exactly what makes it the wrong variant
+    /// for a caller error, and opening one here would invite the same
+    /// file-content-in-a-message defect [`Self::XmlParse`] documents having had.
+    ///
+    /// # Why the problem is a second enum rather than part of the first
+    ///
+    /// [`EncryptParamProblem`] is `src/limits.rs`'s own **spec / cipher / margin**
+    /// provenance taxonomy made matchable — see the table in that module's header. A
+    /// bound this crate enforces is one of three quite different kinds of fact, and until
+    /// they were labelled a consumer had to read each doc comment and infer, which one
+    /// did, got partly wrong, and had to ask about. Reporting a *margin* as though it
+    /// were a spec violation is a typed lie, and a typed lie is worse than a vague
+    /// message: a consumer renders a typed fact as authoritative and tells its user the
+    /// format forbids something the format permits.
+    /// [`EncryptParamProblem::ExceedsImplementationLimit`] exists so that never has to
+    /// happen.
+    #[error(
+        "encryption parameter rejected before any file was read: {param} {problem} \
+        (requested {got}; this crate accepts {min}..={max})"
+    )]
+    #[cfg(feature = "crypto-ops")]
+    EncryptParams {
+        /// Which `EncryptionInfo` attribute the rejected request was setting.
+        param: EncryptParam,
+        /// Whose rule the value broke — the format's, the cipher's, or this crate's own.
+        problem: EncryptParamProblem,
+        /// The value the caller asked for. Caller-supplied; never read from a file.
+        got: u32,
+        /// The low end of an accepted value for `param`.
+        ///
+        /// For a range-valued parameter — `spinCount`, `saltSize` — this is the bound's
+        /// real floor and `min..=max` is the whole accepted set. For a **set**-valued one
+        /// it cannot be: `keyBits` accepts `{128, 192, 256}`, and printing that as
+        /// `128..=256` would name 200 as acceptable when the next call refuses it. Those
+        /// refusals therefore carry `min == max`, the single nearest accepted size, so
+        /// that every number in the message is one the caller may actually use.
+        ///
+        /// The cost, stated rather than hidden: for `keyBits` the pair is no longer the
+        /// *whole* accepted set, only a correct member of it. Completeness is the right
+        /// thing to lose — a caller who follows `192..=192` succeeds, and a caller who
+        /// follows `128..=256` may not.
+        min: u32,
+        /// The high end of an accepted value for `param`. Equal to `min` where the
+        /// accepted values are a set rather than a range — see `min`.
+        max: u32,
+    },
+
     /// The bytes handed to an encrypt entry point already carry a password-to-open.
     ///
     /// **This crate used to encrypt them anyway.** The result was a CFB container wrapped
@@ -392,11 +467,287 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
+/// Which `EncryptionInfo` attribute a rejected encryption request named.
+///
+/// Half the payload of [`Error::EncryptParams`]; the other half is
+/// [`EncryptParamProblem`]. A fieldless `Copy` enum rather than the `&'static str` the
+/// neighbouring [`Error::UnsupportedAlgorithm`] uses, because this one is a caller's
+/// mistake and a caller acts on it in code: a string forces a string comparison, which
+/// is a match nobody can make exhaustive and nobody notices going stale.
+///
+/// `Display` gives the attribute's own spelling, as [MS-OFFCRYPTO] §2.3.4.10 spells it
+/// in `CT_KeyData` and `CT_PasswordKeyEncryptor`, so the `#[error]` string interpolates
+/// it directly and a consumer with no match arm still reads the real attribute name
+/// rather than a Rust identifier.
+///
+/// `#[non_exhaustive]`: `cipherAlgorithm`, `cipherChaining` and `blockSize` are absent
+/// because this crate writes exactly one value for each and so has no caller parameter
+/// to reject — `blockSize` is 16 because AES-CBC fixes it, not because anyone chose it.
+/// If one of them ever becomes a caller's choice, it arrives here as a variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "crypto-ops")]
+#[non_exhaustive]
+pub enum EncryptParam {
+    /// `spinCount`: the iteration count of the password derivation ([MS-OFFCRYPTO]
+    /// §2.3.4.11).
+    ///
+    /// `ST_SpinCount` is `0..=10000000` (§2.3.4.10) — `minInclusive="0"`, and the prose
+    /// states only "It MUST NOT be greater than 10,000,000". **The floor is zero, and
+    /// only one end is live.**
+    ///
+    /// The single refusal is [`EncryptParamProblem::OutsideSpecRange`], for a value above
+    /// 10 000 000. Below that nothing rejects: the field is a `u32`, which already
+    /// enforces `minInclusive="0"`, so the floor needs no check and cannot be tripped,
+    /// and `limits::SPIN_COUNT_MAX` is the spec's own figure rather than a reduced one,
+    /// so there is **no margin between the two and no second refusal to report**.
+    ///
+    /// In particular this crate does **not** refuse a weak spin count.
+    /// `spinCount="0"` is conforming, this writer emits it on request, and an earlier
+    /// version of this doc claimed an
+    /// [`EncryptParamProblem::ExceedsImplementationLimit`] refusal for values "too weak
+    /// to author" that no code path has ever produced. Declining to have an opinion about
+    /// a writer's stretching is the position `EncryptParams::validate` actually takes.
+    SpinCount,
+
+    /// `hashAlgorithm`: the hash driving the key derivation and the verifier.
+    ///
+    /// **A hash algorithm is not defined by a cipher**, so a refusal here is *not*
+    /// [`EncryptParamProblem::UnsupportedByCipher`], whatever an earlier version of this
+    /// doc said. AES fixes key sizes and a block length; it has no opinion about SHA-512,
+    /// and citing it as the authority that refused a hash names an authority with no say.
+    ///
+    /// The four hashes this crate writes — SHA-1, SHA-256, SHA-384, SHA-512 — are a
+    /// **crate choice the format explicitly licenses**. [MS-OFFCRYPTO] §2.3.4.10, in the
+    /// sentence immediately after the `HashAlgorithm` table (the table that also lists
+    /// MD5, MD4, MD2, RIPEMD-128, RIPEMD-160 and WHIRLPOOL), says:
+    ///
+    /// > Values that are not defined MAY be used, and a compliant implementation is not
+    /// > required to support all defined values.
+    ///
+    /// **That is a third shape, distinct from both of the others**, and the distinction
+    /// is what a consumer needs to write refusal copy. A spec violation says the caller
+    /// asked for a file no conforming reader need accept; an implementation margin says
+    /// the format and the cipher both allow it and this crate declines. This is neither:
+    /// the format permits the value **and** permits an implementation not to support it,
+    /// so the honest sentence is "that hash is conforming, and this writer does not emit
+    /// it" — no fault on either side.
+    ///
+    /// No refusal carries this variant today. `EncryptParams::validate`'s exhaustive
+    /// match over [`crate::HashAlgorithm`] rejects nothing; it is a tripwire that turns a
+    /// fifth variant added to that enum into an `E0004` at the one place that must decide
+    /// whether the writer may emit it. Should such a refusal ever be wanted, it arrives
+    /// with an [`EncryptParamProblem`] variant that states the shape above — not by
+    /// borrowing `UnsupportedByCipher`, and not by borrowing
+    /// [`EncryptParamProblem::OutsideSpecRange`], which would assert that the format
+    /// forbids what the clause quoted here expressly allows.
+    HashAlgorithm,
+
+    /// `keyBits`: the size of a key, in bits.
+    ///
+    /// **The format has two of these and they are independent quantities.** §2.3.4.13
+    /// step 1 sizes the package and intermediate key from `Encryptor.KeyData.keyBits`,
+    /// while §2.3.4.11 sizes the password-derived key-encrypting key from
+    /// `PasswordKeyEncryptor.keyBits`. §2.3.4.10 requires `p:encryptedKey` to match
+    /// `keyData` on `hashAlgorithm` and on `cipherAlgorithm` — and on nothing else, so
+    /// no rule makes these two equal. This variant names whichever of them the rejected
+    /// call was setting.
+    ///
+    /// **Two rules refuse a `keyBits`, and they are not the same authority.**
+    /// `ST_KeyBits` sets `minInclusive="8"`, requires a multiple of 8, and states **no
+    /// maximum**, being generic across cipher algorithms. AES then defines exactly three
+    /// sizes inside that. So:
+    ///
+    /// | value | refused by | `problem` |
+    /// | --- | --- | --- |
+    /// | 7, 12 | `ST_KeyBits` — below 8, or not a multiple of 8 | [`EncryptParamProblem::OutsideSpecRange`] |
+    /// | 64, 512 | AES — legal `ST_KeyBits`, no such key size | [`EncryptParamProblem::UnsupportedByCipher`] |
+    ///
+    /// The spec test runs first, because "AES has no 7-bit key" is true and beside the
+    /// point: 7 is not a legal `keyBits` for any cipher, and naming AES would credit a
+    /// refusal to an authority that never had jurisdiction.
+    ///
+    /// This doc said for one commit that every refusal here was
+    /// `UnsupportedByCipher` — written the same day the variant that exists to prevent
+    /// exactly that mislabelling was added, and caught by an adversarial audit rather
+    /// than by a test. The prose form of the defect is the harder one to see, because
+    /// nothing compiles it.
+    KeyBits,
+
+    /// `saltSize`: the length in bytes of a salt.
+    ///
+    /// Per-element in the same way `keyBits` is: §2.3.4.10 binds each `saltSize` only to
+    /// its own element's `saltValue`, whose decoded form "MUST be" that many bytes, and
+    /// imposes no equality between `keyData`'s and `p:encryptedKey`'s.
+    ///
+    /// `ST_SaltSize` is `1..=65536`, and **this crate adopts that range whole**, so the
+    /// single refusal is [`EncryptParamProblem::OutsideSpecRange`]: zero at one end, and
+    /// anything above 65 536 at the other. A 65 536-byte salt is absurd and conforming,
+    /// and `EncryptParams::validate` writes it — an earlier version of this doc called
+    /// that an [`EncryptParamProblem::ExceedsImplementationLimit`] refusal, which no code
+    /// path produced, because `limits::AGILE_SALT_SIZE` is the schema's range and not a
+    /// reduced one.
+    SaltSize,
+
+    /// keyBits AND hashAlgorithm together — neither wrong alone.
+    ///
+    /// The case the single-attribute variants cannot express: both values are acceptable
+    /// on their own and the pair is not, so naming either one alone would send the caller
+    /// to change the parameter that was fine.
+    ///
+    /// The concrete pair is a digest shorter than the key asked for — SHA-1's 20 bytes
+    /// with `keyBits="256"`, which wants 32. [MS-OFFCRYPTO] §2.3.4.11 says such a key
+    /// "MUST be padded by appending bytes with a value of 0x36"; `agile::derive_block_key`
+    /// refuses to do it, because the pad manufactures twelve constant bytes of key that
+    /// no writer ever used. That refusal is this crate's decrypt-side property, and this
+    /// variant is the encrypt side declining to author the file that would trip it.
+    KeyBitsWithHash,
+}
+
+/// Whose rule a rejected encryption parameter broke.
+///
+/// The other half of [`Error::EncryptParams`]'s payload, and the reason that variant is
+/// shaped as two enums rather than one. It is `src/limits.rs`'s **spec / cipher /
+/// margin** provenance taxonomy — see the table in that module's header — turned into
+/// something a consumer can `match` on, plus a fourth case for two values that are each
+/// fine alone.
+///
+/// | variant | label in `limits.rs` | was the request non-conforming? |
+/// | --- | --- | --- |
+/// | [`Self::OutsideSpecRange`] | **spec** | yes |
+/// | [`Self::UnsupportedByCipher`] | **cipher** | no — AES does not define it |
+/// | [`Self::UnusableCombination`] | — | no, not value by value |
+/// | [`Self::ExceedsImplementationLimit`] | **margin** | no — this crate declines |
+///
+/// Every `Display` string names whose rule it was, so that a consumer which forwards the
+/// message instead of matching on it still says something true. That is the whole point
+/// of the fourth variant: a margin reported as a spec violation is a typed lie, and a
+/// typed lie is worse than a vague one, because a consumer renders a typed fact as
+/// authoritative.
+///
+/// The fourth is also the one nothing currently produces, because this crate currently
+/// imposes no margin on a caller's parameter. [`Self::ExceedsImplementationLimit`]'s own
+/// docs say why it is kept anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "crypto-ops")]
+#[non_exhaustive]
+pub enum EncryptParamProblem {
+    /// Outside the range [MS-OFFCRYPTO] states for the attribute.
+    ///
+    /// The **spec** row of `limits.rs`'s table: the number §2.3.4.10's simple types
+    /// state, so a request that trips it would produce a file no conforming reader need
+    /// accept. The only one of the four that says the *caller* asked for something the
+    /// format forbids.
+    OutsideSpecRange,
+
+    /// Inside the spec, outside AES as implemented here.
+    ///
+    /// The **cipher** row: fixed by the algorithm rather than by the format. `ST_KeyBits`
+    /// states no maximum precisely because it is generic across ciphers; AES defines
+    /// three sizes, and this crate writes AES. A request refused for this reason is not
+    /// non-conforming, and a message implying it was would be wrong.
+    UnsupportedByCipher,
+
+    /// Legal apart, unreadable together.
+    ///
+    /// No row in `limits.rs`'s table, because a range check cannot see it: each value is
+    /// inside its own bound and the combination is still not writable. Paired with
+    /// [`EncryptParam::KeyBitsWithHash`], whose docs give the case.
+    UnusableCombination,
+
+    /// Spec-legal, cipher-fine, and this crate declines anyway.
+    ///
+    /// The **margin** row: this crate's own defence, as the read caps and
+    /// `limits::crypto::PAYLOAD_CEILING` are. A file built to the requested value could
+    /// be perfectly valid and perfectly implementable, and this crate is choosing not to
+    /// write it. **It does not mean the format forbids the value**, and its `Display`
+    /// string says so in as many words — that distinction is why this variant exists
+    /// separately from [`Self::OutsideSpecRange`] instead of being folded into it.
+    ///
+    /// # Nothing produces it, and that is the design
+    ///
+    /// **No code path in this crate constructs this variant**, and the docs that once
+    /// said otherwise — a spin count "too weak to author", a 65 536-byte salt "this crate
+    /// declines to write" — described refusals `EncryptParams::validate` has never
+    /// emitted. They are corrected at [`EncryptParam::SpinCount`] and
+    /// [`EncryptParam::SaltSize`]. The only constructions left are the two exit-code
+    /// tables' synthetic payloads, in `src/error.rs`'s own `exit_code_canary` and in
+    /// `src/bin/msoffice-crypto_tests.rs`, which pin a number rather than report a
+    /// refusal.
+    ///
+    /// The reason is simply that **this crate presently imposes no margin on any
+    /// caller-settable parameter**. `limits::SPIN_COUNT_MAX` is the spec's own
+    /// 10 000 000, `limits::AGILE_SALT_SIZE` is `ST_SaltSize` whole, and both `keyBits`
+    /// refusals belong to the format or to AES. The margins that do exist — the read
+    /// caps, `PAYLOAD_CEILING` — bound what a *file* declares or how large a payload may
+    /// be, and are reported by [`Error::BadParameters`] and its neighbours, never by
+    /// [`Error::EncryptParams`].
+    ///
+    /// It is kept unproduced **deliberately**, as a design commitment rather than dead
+    /// code, and the commitment is this: the first margin imposed on a caller's parameter
+    /// arrives wearing this variant. Without it the cheap thing to do is to reach for
+    /// [`Self::OutsideSpecRange`], which would tell a consumer the format forbids a value
+    /// the format permits — a typed lie, and the precise failure the fourth variant was
+    /// added to prevent. An unproduced variant with a stated reason costs a consumer one
+    /// match arm that never fires; the alternative costs its users a false statement
+    /// about [MS-OFFCRYPTO], rendered as authoritative.
+    ExceedsImplementationLimit,
+}
+
+#[cfg(feature = "crypto-ops")]
+impl core::fmt::Display for EncryptParam {
+    /// The attribute's spelling in [MS-OFFCRYPTO] §2.3.4.10, not the Rust identifier.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Exhaustive, with no `_` arm, so that a variant added above is a compile error
+        // here rather than a parameter that silently prints as something else.
+        f.write_str(match self {
+            Self::SpinCount => "spinCount",
+            Self::HashAlgorithm => "hashAlgorithm",
+            Self::KeyBits => "keyBits",
+            Self::SaltSize => "saltSize",
+            Self::KeyBitsWithHash => "keyBits together with hashAlgorithm",
+        })
+    }
+}
+
+#[cfg(feature = "crypto-ops")]
+impl core::fmt::Display for EncryptParamProblem {
+    /// A predicate whose subject is the [`EncryptParam`] printed before it, naming
+    /// **whose** rule was broken.
+    ///
+    /// A consumer with no match arm forwards this sentence, so each one has to be honest
+    /// standing alone: the spec case cites [MS-OFFCRYPTO] §2.3.4.10, and the margin case
+    /// says this crate declines without implying the format agrees.
+    ///
+    /// Each is phrased "was given …" rather than "is …" so that it reads correctly after
+    /// a compound subject too — [`EncryptParam::KeyBitsWithHash`] names two attributes,
+    /// and "keyBits together with hashAlgorithm is legal on its own" is not a sentence.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::OutsideSpecRange => {
+                "was given a value outside the range [MS-OFFCRYPTO] §2.3.4.10 states \
+                 for it, so the file would not conform"
+            }
+            Self::UnsupportedByCipher => {
+                "was given a value [MS-OFFCRYPTO] permits but AES, the only cipher this \
+                 crate writes, does not define"
+            }
+            Self::UnusableCombination => {
+                "was given values that are legal apart and unusable together; the file \
+                 they describe could not be read back"
+            }
+            Self::ExceedsImplementationLimit => {
+                "was given a value [MS-OFFCRYPTO] permits and AES can use, which this \
+                 crate declines as a limit of its own — the format does not forbid it"
+            }
+        })
+    }
+}
+
 /// The coverage half of the CLI's exit-code proof.
 ///
 /// `src/bin/msoffice-crypto.rs` maps every [`Error`] to an exit code, and its `match`
 /// needs a `_` arm: the enum is `#[non_exhaustive]` and the binary is a separate crate.
-/// A `_` arm produces no diagnostic when a variant is added, so an eighteenth variant
+/// A `_` arm produces no diagnostic when a variant is added, so a nineteenth variant
 /// would silently become exit 7 with nothing red anywhere.
 ///
 /// This table duplicates that one **without** a `_` arm, inside the defining crate,
@@ -439,6 +790,8 @@ mod exit_code_canary {
             #[cfg(feature = "crypto-ops")]
             Error::RandomSource(_) => 7,
             #[cfg(feature = "crypto-ops")]
+            Error::EncryptParams { .. } => 1,
+            #[cfg(feature = "crypto-ops")]
             Error::AlreadyEncrypted { .. } => 5,
             #[cfg(feature = "crypto-ops")]
             Error::NotAPlainPackage => 5,
@@ -461,5 +814,19 @@ mod exit_code_canary {
         assert_eq!(exit_code(&Error::NotAPlainPackage), 5);
         #[cfg(feature = "crypto-ops")]
         assert_eq!(exit_code(&Error::UnknownContainer), 3);
+        // The one caller error in the table: EX_USAGE (1), which every other variant
+        // avoids because every other variant is a verdict on a file. By the time this
+        // one is raised there is often no file at all.
+        #[cfg(feature = "crypto-ops")]
+        assert_eq!(
+            exit_code(&Error::EncryptParams {
+                param: super::EncryptParam::SpinCount,
+                problem: super::EncryptParamProblem::ExceedsImplementationLimit,
+                got: 0,
+                min: 100_000,
+                max: 10_000_000,
+            }),
+            1
+        );
     }
 }

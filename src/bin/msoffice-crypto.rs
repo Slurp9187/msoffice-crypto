@@ -1192,6 +1192,24 @@ fn describe(e: &Error) -> String {
         // The same sentence `decrypt`'s `route_for` gives these bytes: one fact, one
         // wording, whether the CLI's classification or the library's guard found it.
         Error::UnknownContainer => NOT_OFFICE.to_string(),
+        // `EncryptParams` is forwarded **deliberately**, and this comment is the record
+        // of that decision rather than an omission waiting to be fixed. Its `Display`
+        // already reads as CLI copy: it names the `EncryptionInfo` attribute in
+        // [MS-OFFCRYPTO]'s own spelling, says whose rule the value broke (the format's,
+        // AES's, or this crate's margin), and prints the requested value beside the
+        // accepted range. There is no Rust path in it -- the failure mode the header
+        // above warns about -- and no remedy the CLI could word better than "pass a
+        // number in that range".
+        //
+        // It is also unreachable from today's binary: there is no `--spin-count` or
+        // `--key-bits` flag, so every encryption parameter this build uses is a
+        // constant chosen here and already inside the bounds. The arm exists in
+        // `exit_code` because a number must be returned for a variant that can arrive
+        // through the library; the sentence does not, because nothing here can produce
+        // it. When those flags arrive, this variant gets its own arm re-wording the
+        // attribute as the flag the caller actually typed (`--spin-count`, not
+        // `spinCount`), which is the one thing the library's message cannot know.
+        //
         // WrongPassword, MissingStream, BadParameters, XmlParse, CipherError,
         // RandomSource, Io and any future variant: forwarded. XmlParse, BadParameters and
         // UnsupportedAlgorithm carry bounded attacker-chosen text; it goes to stderr
@@ -1204,7 +1222,7 @@ fn describe(e: &Error) -> String {
 ///
 /// `_` is **7**, not the sibling's 6: 6 asserts a fact about the *file* that a gap in
 /// this table gives no basis for, while 7 says "this tool could not classify the
-/// failure", which is true. An eighteenth variant therefore lands on 7 with no compile
+/// failure", which is true. A nineteenth variant therefore lands on 7 with no compile
 /// error here — the enum is `#[non_exhaustive]` and this is a separate crate — so the
 /// coverage half of the proof is the exhaustive canary in `src/error.rs`'s own
 /// `#[cfg(test)]` module, and the value half is `exit_codes_map_every_error_class`.
@@ -1234,6 +1252,19 @@ fn exit_code(e: &Error) -> u8 {
         Error::AlreadyEncrypted { .. } => EX_REFUSED,
         Error::NotAPlainPackage => EX_REFUSED,
         Error::UnknownContainer => EX_NOT_OFFICE,
+        // The only **caller** error in the table, and so the only 1. Every other arm is
+        // a verdict on a file; this one is raised before a file is opened at all, from
+        // the caller's own numbers against this crate's bounds.
+        //
+        // Not 6: `EX_MALFORMED` asserts a fact about a file -- "the bytes you gave me
+        // are not a well-formed document" -- and there is frequently no file in hand
+        // when this is raised, so 6 would be a claim about something that does not
+        // exist. Not 9 either: `EX_UNSUPPORTED` means "this tool does not do that
+        // *yet*", a build or a flag away from working, and a script may reasonably
+        // retry elsewhere on it. A `spinCount` outside `0..=10_000_000` is not a
+        // feature anyone can turn on; it is an impossible request, which is a bad
+        // invocation, which is 1.
+        Error::EncryptParams { .. } => EX_USAGE,
         _ => EX_INTERNAL,
     }
 }

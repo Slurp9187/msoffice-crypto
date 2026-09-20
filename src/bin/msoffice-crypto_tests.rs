@@ -13,6 +13,11 @@
 //! directory under `std::env::temp_dir()` that they create and remove themselves.
 
 use super::*;
+/// The two halves of [`Error::EncryptParams`]'s payload. Imported here rather than at
+/// the top of the binary because the CLI itself never names them: it cannot raise that
+/// variant today (no `--spin-count`/`--key-bits` flags), and `exit_code` matches it with
+/// `..`. Only the exit-code assertion below has to build one.
+use msoffice_crypto::{EncryptParam, EncryptParamProblem};
 
 /// `AlgorithmParams` is `#[non_exhaustive]`, so from this crate it can be neither
 /// struct-literalled nor built with `..Default::default()`. Field assignment after
@@ -150,6 +155,22 @@ fn exit_codes_map_every_error_class() {
     );
     assert_eq!(exit_code(&Error::NotAPlainPackage), EX_REFUSED);
     assert_eq!(exit_code(&Error::UnknownContainer), EX_NOT_OFFICE);
+    // The one caller error in the table. It is here although today's CLI cannot raise
+    // it -- there is no `--spin-count` flag -- because the number is the contract the
+    // library's callers see through this binary's exit status, and the canary in
+    // `src/error.rs` pins the same 1 from the other side. EX_USAGE, not EX_MALFORMED:
+    // there is often no file to call malformed. The payload is a *margin* rejection
+    // deliberately, so the assertion also fails if the variant loses its shape.
+    assert_eq!(
+        exit_code(&Error::EncryptParams {
+            param: EncryptParam::SpinCount,
+            problem: EncryptParamProblem::ExceedsImplementationLimit,
+            got: 20_000_000,
+            min: 100_000,
+            max: 10_000_000,
+        }),
+        EX_USAGE
+    );
 
     // Gated with the variant itself: `cli` does not enable `legacy-binary`, and
     // `Error::NotEncrypted` does not exist in that column.
