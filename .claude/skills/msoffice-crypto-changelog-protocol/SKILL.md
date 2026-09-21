@@ -20,7 +20,7 @@ suffix included.
 **2. A version heading carries a date if and only if that tag exists.**
 
 ```
-## v0.1.0-rc.1 — unreleased      while the work is in flight
+## v0.1.0-rc.1 — Unreleased      while the work is in flight
 ## v0.1.0-rc.1 — 2026-09-10      the moment v0.1.0-rc.1 is tagged
 ```
 
