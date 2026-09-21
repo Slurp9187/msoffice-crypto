@@ -270,7 +270,7 @@ def main():
         head = re.search(r"^## +(\S+?) +[-\u2014] +(.+?)\s*$", txt, re.M)
         if head is None:
             flag("G changelog has no version heading",
-                 "CHANGELOG.md: expected a top heading like '## vX.Y.Z - unreleased'")
+                 "CHANGELOG.md: expected a top heading like '## vX.Y.Z - Unreleased'")
         else:
             heading_ver, marker = head.group(1), head.group(2).strip()
             want = "v" + pkg
@@ -299,11 +299,11 @@ def main():
                          f"CHANGELOG.md:{line_of(txt, head.start())} is dated {marker} but "
                          f"tag {heading_ver} does not exist -- the date IS the release marker")
                 if tagged and not dated:
-                    flag("G tagged version still marked unreleased",
+                    flag("G tagged version still marked Unreleased",
                          f"CHANGELOG.md:{line_of(txt, head.start())} says '{marker}' but "
                          f"tag {heading_ver} exists; date it")
-            if not dated and marker != "unreleased":
-                flag("G heading marker is neither a date nor 'unreleased'",
+            if not dated and marker != "Unreleased":
+                flag("G heading marker is neither a date nor 'Unreleased'",
                      f"CHANGELOG.md:{line_of(txt, head.start())} -> {marker!r}")
 
     # ---- report ----------------------------------------------------------------------

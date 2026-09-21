@@ -22,7 +22,7 @@ What survives that move is in two places, deliberately:
 
 ---
 
-## v0.1.0-rc.4 — unreleased
+## v0.1.0-rc.4 — Unreleased
 
 ### Evidence for this release
 
@@ -1169,7 +1169,7 @@ it in anger, and publishing `0.1.0` would make it a promise on the day it landed
 
 ### Release process
 
-Version headings, newest first: `## vX.Y.Z — unreleased` while the work is in flight, and the
+Version headings, newest first: `## vX.Y.Z — Unreleased` while the work is in flight, and the
 ISO date substituted the moment that tag is cut. **The date is the release marker**, not a
 note about when the work happened — git records that, and a typed date drifts. This crate's
 own evidence: five entries in the archived pre-publication changelog were stamped in UTC on a

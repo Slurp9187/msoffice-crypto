@@ -71,17 +71,17 @@ does not need to know which afternoon a rename happened.
 
 ## The release flow
 
-1. **Open a line.** Bump `version` in `Cargo.toml`; add `## vX.Y.Z — unreleased` at the top
+1. **Open a line.** Bump `version` in `Cargo.toml`; add `## vX.Y.Z — Unreleased` at the top
    of `CHANGELOG.md`.
 2. **Accumulate.** Entries go under that heading. No dates unless the date is evidence.
-3. **Cut.** Replace `— unreleased` with the ISO date, commit, then tag *that* commit.
+3. **Cut.** Replace `— Unreleased` with the ISO date, commit, then tag *that* commit.
 4. **Repeat.** The next bump opens a new section. Never leave a standing empty one.
 
-Pre-releases work identically: `## v0.1.0-rc.2 — unreleased` opens after `v0.1.0-rc.1` is
+Pre-releases work identically: `## v0.1.0-rc.2 — Unreleased` opens after `v0.1.0-rc.1` is
 tagged and dated.
 
 **No standing `## [Unreleased]` section.** The versioned-but-undated section *is* the
-unreleased one. Keeping both leaves a reader unable to tell which section describes the code
+Unreleased one. Keeping both leaves a reader unable to tell which section describes the code
 they have — the exact ambiguity this protocol removes. This crate always knows its next
 version, so it always names it.
 

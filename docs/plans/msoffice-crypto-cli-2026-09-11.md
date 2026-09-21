@@ -437,7 +437,7 @@ emits `b6cb4471…d32d`, msoffcrypto-tool 6.0.0 emits `4e13de26…23a7`.
 **§ 9 puts the version bump in S6; the changelog protocol forces it into S5.** S5 must record
 the gate verdicts in `CHANGELOG.md`, and `audit_claims.py` check G forbids writing under a
 heading that is dated — which `v0.1.0-rc.1` was, being tagged. So S5 bumped `Cargo.toml` to
-`0.1.0-rc.2` and opened `## v0.1.0-rc.2 — unreleased` in one commit, because check G fails on
+`0.1.0-rc.2` and opened `## v0.1.0-rc.2 — Unreleased` in one commit, because check G fails on
 whichever half lands alone, and check E dragged every version literal in the README with it.
 S6 added the remaining prose under the heading S5 opened.
 

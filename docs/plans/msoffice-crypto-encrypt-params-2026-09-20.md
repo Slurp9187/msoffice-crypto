@@ -634,7 +634,7 @@ exists to catch.
 - `src/lib.rs:541-544` — the "profile is fixed … no parameter to change it" paragraph. Scope the
   fixed half to `encrypt_ooxml` and point at the new entry point; **keep the unconditional
   `<dataIntegrity>` guarantee intact**, since it holds for every tuple.
-- `CHANGELOG.md:176` ships that guarantee as an rc.4 note — amend in place; rc.4 is unreleased.
+- `CHANGELOG.md:176` ships that guarantee as an rc.4 note — amend in place; rc.4 is Unreleased.
 - `README.md:8,57,194`, the module headers in `agile_encrypt.rs` and `encryption_info.rs`,
   `CLAUDE.md` § Layout (new module line), and a changelog entry covering the parameters, the ten
   combinations, the heap-residue fix and the interop grid.

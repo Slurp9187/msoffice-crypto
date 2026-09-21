@@ -231,7 +231,7 @@ ref to check out and re-run the suite against.
 Per `.claude/skills/msoffice-crypto-changelog-protocol/SKILL.md`, the date **is** the release marker:
 
 ```bash
-# 1. substitute the ISO date for "unreleased" in CHANGELOG.md's top heading, and commit
+# 1. substitute the ISO date for "Unreleased" in CHANGELOG.md's top heading, and commit
 # 2. tag that commit, annotated -- lightweight tags are not pushed by --follow-tags
 git tag -a v0.1.0-rc.1 -m "v0.1.0-rc.1"
 git push --follow-tags

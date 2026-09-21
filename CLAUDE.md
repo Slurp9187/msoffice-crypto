@@ -303,7 +303,7 @@ One module, one job. A module whose purpose needs an "and" to state has two.
 
 ## Conventions
 
-**Changelog.** Version headings, newest first: `## vX.Y.Z — unreleased` while the work is in
+**Changelog.** Version headings, newest first: `## vX.Y.Z — Unreleased` while the work is in
 flight, and the ISO date substituted the moment that tag is cut. **The date is the release
 marker, not a note about when the work happened** — git already records that, and a typed
 date drifts (five entries here were once stamped in UTC on a UTC-7 machine and read a day
