@@ -38,9 +38,9 @@ every push. It returns no `Result` and never panics: an unreadable file classifi
 ```rust
 use msoffice_crypto::{classify, Family, IntegrityDeclaration};
 
-let class = classify(&std::fs::read("protected.docx")?);
-if class.family == Family::Agile && class.data_integrity == IntegrityDeclaration::Declared {
-    // decryptable, and its package HMAC can be verified
+fn is_agile_with_hmac(data: &[u8]) -> bool {
+    let class = classify(data);
+    class.family == Family::Agile && class.data_integrity == IntegrityDeclaration::Declared
 }
 ```
 
@@ -51,13 +51,14 @@ msoffice-crypto = { version = "0.1.0-rc.5", features = ["crypto-ops"] }
 ```
 
 ```rust
-use msoffice_crypto::{decrypt_ooxml, encrypt_ooxml};
+use msoffice_crypto::{decrypt_ooxml, encrypt_ooxml, Error};
 
-let zip = decrypt_ooxml(&std::fs::read("protected.docx")?, "correct horse battery staple")?;
-// `zip` is the original OOXML package — a valid .docx/.xlsx/.pptx
-
-let protected = encrypt_ooxml(&zip, "correct horse battery staple")?;
-// agile, AES-256/SHA-512, 100 000 rounds, dataIntegrity HMAC — what Office 16 writes
+fn round_trip(path: &str, password: &str) -> Result<Vec<u8>, Error> {
+    // `zip` is the original OOXML package — a valid .docx/.xlsx/.pptx
+    let zip = decrypt_ooxml(&std::fs::read(path)?, password)?;
+    // agile, AES-256/SHA-512, 100 000 rounds, dataIntegrity HMAC — what Office 16 writes
+    encrypt_ooxml(&zip, password)
+}
 ```
 
 That default is a default, not a limit. `encrypt_ooxml_with_params` takes an `EncryptParams`
@@ -66,15 +67,16 @@ separately, as [MS-OFFCRYPTO] treats them — and `validate()` refuses only what
 AES actually forbids, saying which of the two it was:
 
 ```rust
-use msoffice_crypto::{encrypt_ooxml_with_params, EncryptParams, HashAlgorithm};
+use msoffice_crypto::{encrypt_ooxml_with_params, EncryptParams, Error, HashAlgorithm};
 
-let protected = encrypt_ooxml_with_params(&zip, "correct horse battery staple",
-    EncryptParams {
+fn encrypt_sha384(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
+    encrypt_ooxml_with_params(package, password, EncryptParams {
         hash: HashAlgorithm::Sha384,
         key_data_key_bits: 192,
         password_key_bits: 192,
         ..Default::default()
-    })?;
+    })
+}
 ```
 
 Ten `(hash, keyBits)` combinations are writable: SHA-1 carries 128 only, because a key cannot
@@ -91,12 +93,15 @@ that choosing it is a decision.
 which is what Word, Excel and PowerPoint open:
 
 ```rust
-use msoffice_crypto::{classify, decrypt_binary_office, Document};
+use msoffice_crypto::{classify, decrypt_binary_office, Document, Error};
 
-let data = std::fs::read("protected.doc")?;
-if classify(&data).document == Document::WordBinary {
-    let doc = decrypt_binary_office(&data, "correct horse battery staple")?;
+fn open_word_binary(path: &str, password: &str) -> Result<Option<Vec<u8>>, Error> {
+    let data = std::fs::read(path)?;
+    if classify(&data).document != Document::WordBinary {
+        return Ok(None);
+    }
     // byte for byte what msoffcrypto-tool writes
+    decrypt_binary_office(&data, password).map(Some)
 }
 ```
 

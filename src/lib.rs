@@ -1206,3 +1206,23 @@ pub fn decrypt_ooxml_with_policy(
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+// The README's examples are compiled and run by `cargo test --doc`, so they cannot silently
+// rot. They are the only examples in this repository that nothing else checks: rustdoc never
+// sees `README.md` otherwise, and a wrong field name in one of them was caught by hand twice
+// before this existed.
+//
+// `cfg(doctest)` is set only while rustdoc *collects* doctests, never while it *builds*
+// documentation, so this item reaches neither docs.rs nor `cargo doc` output and the README
+// is not duplicated onto the crate page.
+//
+// Gated on `legacy-binary` as well, because that is the superset under which every README
+// example compiles: the decrypt/encrypt pair needs `crypto-ops` and `decrypt_binary_office`
+// needs `legacy-binary`. Without the gate, CI's `--no-default-features` doctest run would
+// fail on imports the README does not feature-gate.
+//
+// It lives at the end of the file deliberately. The technique is `secure-gate`'s
+// (`~/Projects/secure-gate-workspace/src/lib.rs`), which documents the same reasoning.
+#[cfg(all(doctest, feature = "legacy-binary"))]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
