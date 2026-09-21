@@ -370,7 +370,7 @@ def tree_state() -> str:
     the office-crypto leg builds from this working directory, so an uncommitted edit can
     decide whether it runs at all; and `CHANGELOG.md`'s evidence sections cite an artifact
     hash, which pins the bytes measured but not the commit that produced them -- and
-    `0.1.0-rc.4` currently spans many commits. Both were reported by the downstream
+    a release line spans many commits. Both were reported by the downstream
     consumer, who hit the first and then recognised the second from its shape.
 
     Best-effort by design: a `.crate` extraction has no git metadata, and a gate that

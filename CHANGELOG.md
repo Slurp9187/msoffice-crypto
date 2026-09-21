@@ -22,6 +22,26 @@ What survives that move is in two places, deliberately:
 
 ---
 
+## [0.1.0-rc.5] - Unreleased
+
+### The README described a crate two releases old
+
+"Status: early, unpublished" survived three published release candidates. The write path
+was described as the Office 16 tuple with no mention that the tuple is the caller's — the
+headline change of the release the sentence sat in — and `encrypt_ooxml_standard_with_key_bits`
+still said no external reader had been measured at AES-192 or AES-256, which rc.4 measured.
+
+### Changelog headings follow Keep a Changelog 1.1.0
+
+`## [X.Y.Z] - YYYY-MM-DD`, bracketed so the link-reference definitions at the foot resolve
+to compare URLs, an ASCII hyphen, and no `v` — that belongs on the tag. The form comes from
+the global `changelog-protocol` skill rather than from this repository.
+
+`audit_claims.py` check G moved with it, and a hole closed on the way: it searched for the
+first *canonical* heading, so a malformed top section was skipped and a lower one audited in
+its place. It now takes the newest `##` heading whatever its shape and requires that one to
+be canonical.
+
 ## [0.1.0-rc.4] - 2026-09-21
 ### Evidence for this release
 
@@ -1474,3 +1494,4 @@ job is parsing bytes an attacker chose — and, as usefully, what does not.
 [0.1.0-rc.3]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.2...v0.1.0-rc.3
 [0.1.0-rc.2]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.1...v0.1.0-rc.2
 [0.1.0-rc.1]: https://github.com/Slurp9187/msoffice-crypto/tree/v0.1.0-rc.1
+[0.1.0-rc.5]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.4...main

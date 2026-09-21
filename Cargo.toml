@@ -1,6 +1,6 @@
 [package]
 name = "msoffice-crypto"
-version = "0.1.0-rc.4"
+version = "0.1.0-rc.5"
 edition = "2021"
 description = "Microsoft Office document encryption per MS-OFFCRYPTO: detect, decrypt and encrypt (agile and Office 2007 standard), with key material that zeroizes on drop and a detection build that links no cryptography. Not affiliated with Microsoft."
 rust-version = "1.85"

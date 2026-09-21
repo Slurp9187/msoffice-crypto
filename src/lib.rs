@@ -95,7 +95,7 @@
 //! `sha2`, `hmac`, `base64` and `rand`:
 //!
 //! ```toml
-//! msoffice-crypto = { version = "0.1.0-rc.4", features = ["crypto-ops"] }
+//! msoffice-crypto = { version = "0.1.0-rc.5", features = ["crypto-ops"] }
 //! ```
 //!
 //! <div class="warning">
@@ -134,7 +134,7 @@
 //! nothing modern needs — to that build alone:
 //!
 //! ```toml
-//! msoffice-crypto = { version = "0.1.0-rc.4", features = ["legacy-binary"] }
+//! msoffice-crypto = { version = "0.1.0-rc.5", features = ["legacy-binary"] }
 //! ```
 //!
 //! # Bounds on untrusted input

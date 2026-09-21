@@ -3,8 +3,9 @@
 Microsoft Office document encryption in Rust — detection, decryption and encryption of the
 formats [MS-OFFCRYPTO] defines, with **key material that zeroizes on drop**.
 
-> **Status: release candidates on crates.io, no stable release.** `0.1.0-rc.4` is current;
-> the API is still free to break between candidates. Today this crate *detects* every
+> **Status: release candidates on crates.io, no stable release.** This tree is
+> `0.1.0-rc.5` and is not released; `0.1.0-rc.4` is the newest on the registry. The API
+> is still free to break between candidates. Today this crate *detects* every
 > family below; *decrypts* ECMA-376 agile (Office 2010+) at every hash and key size
 > [MS-OFFCRYPTO] §2.3.4.10 defines for AES-CBC, and ECMA-376 standard (Office 2007) at all
 > three key sizes; *encrypts* both — agile in any of the ten writable `(hash, keyBits)`
@@ -43,7 +44,7 @@ Decryption is the `crypto-ops` feature, which adds the ciphers and hashes (`aes`
 for the encrypt half, a CSPRNG (`rand`):
 
 ```toml
-msoffice-crypto = { version = "0.1.0-rc.4", features = ["crypto-ops"] }
+msoffice-crypto = { version = "0.1.0-rc.5", features = ["crypto-ops"] }
 ```
 
 ```rust
@@ -113,7 +114,7 @@ CFB container with its encrypted streams replaced, which is what Word, Excel and
 PowerPoint open.
 
 ```toml
-msoffice-crypto = { version = "0.1.0-rc.4", features = ["legacy-binary"] }
+msoffice-crypto = { version = "0.1.0-rc.5", features = ["legacy-binary"] }
 ```
 
 ```rust
