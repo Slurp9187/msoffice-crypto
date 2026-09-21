@@ -3,15 +3,17 @@
 Microsoft Office document encryption in Rust — detection, decryption and encryption of the
 formats [MS-OFFCRYPTO] defines, with **key material that zeroizes on drop**.
 
-> **Status: early, unpublished.** Today this crate *detects* every family below;
-> *decrypts* ECMA-376 agile (Office 2010+) in all four tuples found in the wild —
-> AES-128/SHA-1, AES-128/SHA-384, AES-192/SHA-384 and Office 16's own AES-256/SHA-512 —
-> and ECMA-376 standard (Office 2007) at all three key sizes; *encrypts* both — agile in
-> the Office 16 tuple by default, and standard in the Office 2007 format — producing files real Word 16,
-> real LibreOffice, `msoffcrypto-tool` and `office-crypto` all open, the four-reader gate
-> below; and, under the `legacy-binary` feature, *decrypts* the 97-2003 binary formats —
-> `.doc`, `.xls` and `.ppt` under RC4 CryptoAPI, `.xls` under XOR obfuscation — to what
-> `msoffcrypto-tool` writes and what Word, Excel and PowerPoint 16 open with no password.
+> **Status: release candidates on crates.io, no stable release.** `0.1.0-rc.4` is current;
+> the API is still free to break between candidates. Today this crate *detects* every
+> family below; *decrypts* ECMA-376 agile (Office 2010+) at every hash and key size
+> [MS-OFFCRYPTO] §2.3.4.10 defines for AES-CBC, and ECMA-376 standard (Office 2007) at all
+> three key sizes; *encrypts* both — agile in any of the ten writable `(hash, keyBits)`
+> combinations with Office 16's AES-256/SHA-512 as the default, and standard at all three
+> `AlgID`s — the default tuple accepted by all four readers of the gate below, and the rest
+> recorded reader by reader rather than claimed; and, under the `legacy-binary` feature,
+> *decrypts* the 97-2003 binary formats — `.doc`, `.xls` and `.ppt` under RC4 CryptoAPI,
+> `.xls` under XOR obfuscation — to what `msoffcrypto-tool` writes and what Word, Excel and
+> PowerPoint 16 open with no password.
 > See
 > [`docs/plans/msoffice-crypto-foundation-2026-09-04.md`](https://github.com/Slurp9187/msoffice-crypto/blob/main/docs/plans/msoffice-crypto-foundation-2026-09-04.md)
 > and the issues it indexes.
@@ -65,13 +67,36 @@ let protected = encrypt_ooxml(&package, "correct horse battery staple")?;
 std::fs::write("report-protected.docx", protected)?;
 ```
 
+That default is a default, not a limit. `encrypt_ooxml_with_params` takes an
+`EncryptParams` — spin count, hash, and `keyBits`/`saltSize` for the package key and the
+password key separately, as [MS-OFFCRYPTO] treats them — and `validate()` refuses only what
+the format or AES actually forbids, saying which of the two it was:
+
+```rust
+use msoffice_crypto::{encrypt_ooxml_with_params, EncryptParams, HashAlgorithm};
+
+let protected = encrypt_ooxml_with_params(&package, "correct horse battery staple",
+    EncryptParams {
+        hash: HashAlgorithm::Sha384,
+        key_data_key_bits: 192,
+        password_key_bits: 192,
+        ..Default::default()
+    })?;
+```
+
+Ten `(hash, keyBits)` combinations are writable: SHA-1 carries 128 only, because a key
+cannot be longer than the digest it is derived from, and SHA-256/384/512 each carry all
+three. `EncryptParams::default()` is byte-for-byte what `encrypt_ooxml` writes.
+
 For a reader that predates agile encryption there is `encrypt_ooxml_standard`, the Office
 2007 format — AES-ECB under a SHA-1-derived key, no integrity element. It emits AES-128,
 which is what Office writes; `encrypt_ooxml_standard_with_key_bits` writes the other two
-key sizes [MS-OFFCRYPTO] §2.3.4.5 defines, which the reader has always taken but no
-external reader has been measured on. It is named for the format so that choosing it is a decision: a modified
-ciphertext decrypts silently to a modified document, which is what `dataIntegrity` exists
-to prevent.
+key sizes [MS-OFFCRYPTO] §2.3.4.5 defines, which the reader has always taken. All three
+were measured for rc.4: Word 16 and `msoffcrypto-tool` open every one, while LibreOffice
+refuses AES-192 and AES-256 outright (`Standard2007Engine.cxx:319` accepts only
+`ENCRYPT_ALGO_AES128`) and `office-crypto` panics on them. It is named for the format so
+that choosing it is a decision: a modified ciphertext decrypts silently to a modified
+document, which is what `dataIntegrity` exists to prevent.
 
 Either direction is deterministic: given the same package, password and random draws it is
 the same bytes, down to the CFB directory — which is why both encrypt paths can be pinned
@@ -194,8 +219,8 @@ encryption format Office has shipped, including the binary-era ones.
 
 | Family | Status |
 | --- | --- |
-| ECMA-376 Agile (Office 2010+) | detect ✅ · decrypt ✅ AES-128/192/256 with SHA-1/256/384/512 · encrypt ✅ AES-256/SHA-512 — accepted by all four readers of the [acceptance gate](#the-four-reader-acceptance-gate): Word 16, LibreOffice 26.2, `msoffcrypto-tool`, `office-crypto` |
-| ECMA-376 Standard (Office 2007) | detect ✅ · decrypt ✅ AES-128/192/256 (all three `AlgID`s of [MS-OFFCRYPTO] §2.3.2; SHA-1 and the 50 000 iterations are fixed by the format, not chosen by the file) · encrypt ✅ AES-128/192/256, **AES-128 by default and the only one externally accepted** — the default artifact is put through the same [acceptance gate](#the-four-reader-acceptance-gate) and accepted by all four, and no external reader has been run at AES-192 or AES-256, because Office writes AES-128 for this format and cannot produce a fixture for the other two. Those two are proved against this crate's own reader and against §2.3.4.5, and the read paths additionally against containers built at runtime |
+| ECMA-376 Agile (Office 2010+) | detect ✅ · decrypt ✅ AES-128/192/256 with SHA-1/256/384/512 · encrypt ✅ all ten `(hash, keyBits)` combinations §2.3.4.10 admits for AES-CBC, **and writable is not the same as externally accepted**: the default AES-256/SHA-512 is accepted by all four readers of the [acceptance gate](#the-four-reader-acceptance-gate) (Word 16, LibreOffice 26.2, `msoffcrypto-tool`, `office-crypto`); real Word 16 opens all ten by hand; LibreOffice opens the four its own allowlist names and reports the rest as file corruption; `CHANGELOG.md` carries the tuple × reader grid cell by cell rather than a summary |
+| ECMA-376 Standard (Office 2007) | detect ✅ · decrypt ✅ AES-128/192/256 (all three `AlgID`s of [MS-OFFCRYPTO] §2.3.2; SHA-1 and the 50 000 iterations are fixed by the format, not chosen by the file) · encrypt ✅ AES-128/192/256, **AES-128 by default and the only one externally accepted** — the default artifact is put through the same [acceptance gate](#the-four-reader-acceptance-gate) and accepted by all four, and AES-192 and AES-256 were measured for rc.4: real Word 16 opens both, `msoffcrypto-tool` reads both, LibreOffice refuses both (`Standard2007Engine.cxx:319` takes only `ENCRYPT_ALGO_AES128`) and `office-crypto` panics on them. Office cannot write a fixture for either, so they are additionally proved against §2.3.4.5 and, on the read side, against containers built at runtime |
 | RC4 CryptoAPI (Office XP/2003, and what Office 16 writes into a binary file) | detect ✅ · decrypt ✅ `.doc` / `.xls` / `.ppt` under `legacy-binary` — Word and Excel byte-identical to `msoffcrypto-tool`, PowerPoint identical but for the one directory word msoffcrypto gets wrong; all three opened by Word, Excel and PowerPoint 16 with no password |
 | Office 97/2000 RC4 (MD5, "Office 97/2000 Compatible") | detect ✅ · decrypt ✅ `.doc` / `.xls` under `legacy-binary` — pinned to msoffcrypto's known-answer vector and a synthetic container; no real fixture, because Office 16 refuses to write it |
 | XOR obfuscation | detect ✅ · decrypt ✅ `.xls` under `legacy-binary` — the generated fixture opens in Excel 16 with its password and its decryption opens without; Word's variant (Method 2) is named and refused |
@@ -331,7 +356,7 @@ A CLI that returns 1 for everything cannot be scripted.
 | Code | Meaning | Maps from |
 | --- | --- | --- |
 | 0 | success | — |
-| 1 | usage error | bad flags, missing operand, two password sources, output exists without `--force` |
+| 1 | usage error | bad flags, missing operand, two password sources, output exists without `--force`; also `Error::EncryptParams`, which no CLI flag can produce today — the arm exists so a future one cannot land without deciding |
 | 2 | I/O error | unreadable input, unwritable output, `Error::Io` |
 | 3 | not a Microsoft Office file | `Error::NotACfbFile` on an input `classify` also calls `Container::Unknown` |
 | 4 | wrong password | `Error::WrongPassword` |
