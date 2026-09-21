@@ -1038,12 +1038,16 @@ fn the_writable_tuple_matrix_is_written_to_the_durable_artifact_directory() {
              excuse for a refusal here: work case 1 first, and only report case 2 if \
              re-deriving §2.3.4.10-.14 by hand still disagrees with what this file holds."
         } else {
-            "One of the ten tuples [MS-OFFCRYPTO] §2.3.4.10 explicitly permits a writer \
-             to choose (\"values that are not defined MAY be used, and a compliant \
-             implementation is not required to support all defined values\" governs the \
-             hash; keyBits carries no upper bound at all). A refusal is never \
-             \"unsupported hash/key size\" on that basis -- apply the two-case procedure \
-             above."
+            "One of the ten tuples [MS-OFFCRYPTO] §2.3.4.10 permits a writer to choose; \
+             keyBits carries no upper bound at all. **But that same section's trailing \
+             sentence -- \"values that are not defined MAY be used, and a compliant \
+             implementation is not required to support all defined values\" -- is the \
+             clause that authorises a READER to refuse.** So \"this reader implements a \
+             subset\" is a conforming outcome here, not a defect, and there are three \
+             shapes rather than two: the file broke the format, or a reader declines what \
+             the format permits it to decline, or our bytes are wrong. Only the third is \
+             ours. **Word is the exception** -- Microsoft wrote both the format and that \
+             reader -- so a Word refusal still goes through the two-case procedure above."
         };
         let digest = record(&name, &words, &container, PLAIN_DOCX_TEXT, meaning);
         if is_default {
@@ -1078,11 +1082,15 @@ fn the_writable_tuple_matrix_is_written_to_the_durable_artifact_directory() {
         let non_multiple = salt % 16 != 0;
         let meaning = if non_multiple {
             "saltSize is not a multiple of 16, the case [MS-OFFCRYPTO] \u{a7}2.3.4.12's \
-             `fit_iv` pad/truncate step exists for. No external reader, Word included, has \
-             previously been measured on a non-multiple saltSize -- a refusal isolates to \
-             this one dimension (compare against the two multiple-of-16 salt files beside \
-             it) rather than to the tuple generally. Apply the two-case procedure above; \
-             §2.3.4.12 is the clause to re-derive from."
+             `fit_iv` pad/truncate step exists for -- and the case that has already caught \
+             one defect. **Word refused both of these files before `ff11e3e`**, with \
+             `0x800A1520` on the correct password, because this crate hashed the padded \
+             verifier array where §2.3.4.13 hashes the saltSize bytes. Fixed, and both \
+             re-opened in real Word afterwards, so a refusal here now is a NEW finding and \
+             not the known one. LibreOffice refuses saltSize 17 for an unrelated reason of \
+             its own -- `AgileEngine.cxx:260` rounds the IV up where §2.3.4.12 truncates -- \
+             which is that reader declining, not our bytes. Compare against the \
+             multiple-of-16 salt file beside this one to isolate the dimension."
         } else {
             "saltSize is a multiple of 16 but not the Office default (16) -- a control for \
              the non-multiple file beside it. If this one opens and the non-multiple one \

@@ -73,7 +73,7 @@ and a refusal there is filed as `FAIL` and blocks — the two-case procedure is 
 (the default assumption) or a documented Word divergence, decided by re-deriving the bytes
 from the cited clause, never by comparing against another program.
 
-| tuple | Office (Word / Excel / PowerPoint) | LibreOffice | msoffcrypto-tool | office-crypto |
+| tuple | Office (Word, except the two app rows) | LibreOffice | msoffcrypto-tool | office-crypto |
 | --- | --- | --- | --- | --- |
 | SHA-1 / 128 | PASS | PASS | REFUSED-BY-READER¹ | REFUSED-BY-READER² |
 | SHA-256 / 128 | PASS | REFUSED-BY-READER³ | PASS | REFUSED-BY-READER² |
@@ -82,20 +82,43 @@ from the cited clause, never by comparing against another program.
 | SHA-384 / 128 | PASS | PASS | PASS | REFUSED-BY-READER² |
 | SHA-384 / 192 | PASS | PASS | REFUSED-BY-READER⁴ | REFUSED-BY-READER² |
 | SHA-384 / 256 | PASS | REFUSED-BY-READER³ | PASS | REFUSED-BY-READER² |
-| SHA-512 / 128 | PASS | REFUSED-BY-READER³ | PASS | NOT RUN⁵ |
-| SHA-512 / 192 | PASS | REFUSED-BY-READER³ | REFUSED-BY-READER⁴ | NOT RUN⁵ |
+| SHA-512 / 128 | PASS | REFUSED-BY-READER³ | PASS | REFUSED-BY-READER⁵ |
+| SHA-512 / 192 | PASS | REFUSED-BY-READER³ | REFUSED-BY-READER⁴ | REFUSED-BY-READER⁵ |
 | SHA-512 / 256 (default) | PASS | PASS | PASS | PASS |
-| `saltSize` 8/8 | **FAIL** | **FAIL** | REFUSED-BY-READER⁶ | NOT RUN⁵ |
-| `saltSize` 17/17 (non-multiple) | **FAIL** | PASS | REFUSED-BY-READER⁶ | NOT RUN⁵ |
-| `saltSize` 32/32 | PASS | PASS | REFUSED-BY-READER⁶ | NOT RUN⁵ |
+| `saltSize` 8/8 | **FAIL** | **FAIL** | REFUSED-BY-READER⁶ | REFUSED-BY-READER⁵ |
+| `saltSize` 17/17 (non-multiple) | **FAIL** | PASS | REFUSED-BY-READER⁶ | REFUSED-BY-READER⁵ |
+| `saltSize` 32/32 | PASS | PASS | REFUSED-BY-READER⁶ | REFUSED-BY-READER⁵ |
 | default tuple, `.xlsx` | PASS | PASS | PASS | PASS |
 | default tuple, `.pptx` | PASS | PASS | PASS | PASS |
 | standard AES-128 | PASS | PASS | PASS | PASS |
-| standard AES-192 | PASS | REFUSED-BY-READER⁷ | PASS | NOT RUN⁸ |
-| standard AES-256 | PASS | REFUSED-BY-READER⁷ | PASS | NOT RUN⁸ |
+| standard AES-192 | PASS | REFUSED-BY-READER⁷ | PASS | REFUSED-BY-READER⁸ |
+| standard AES-256 | PASS | REFUSED-BY-READER⁷ | PASS | REFUSED-BY-READER⁸ |
+
+**This grid is the automated run at `ac3bce8`, and two later runs supersede it where they
+disagree.** It is kept rather than rewritten, because what the disagreements show is worth more
+than a tidy table.
+
+* **The two Office `FAIL` cells were our bug**, diagnosed and fixed in `ff11e3e` (below). Word
+  opens both now, and the owner's manual pass re-opened them by hand.
+* **The LibreOffice `saltSize` rows do not match the owner's interactive run**, and only one of
+  the three is explained by the fix. `salt8` was `FAIL` here and opens interactively — our bytes
+  changed. But `salt17` and `salt32` were `PASS` here and are refused interactively with
+  "password is incorrect", and **`salt32`'s bytes did not change in `ff11e3e` at all**, since 32
+  is a multiple of 16 and the padded and unpadded arrays coincide. Same bytes, two verdicts from
+  one reader: UNO accepts, the interactive open refuses.
+* That is the COM-versus-double-click distinction the plan makes for Word, showing up in
+  LibreOffice as UNO-versus-interactive. It is recorded as an open question rather than resolved
+  — the interactive verdict is the one that matters to a person, and the automated legs of this
+  gate measure the other path.
+
+Every `NOT RUN⁵`/`NOT RUN⁸` cell in the office-crypto column was corrected to
+`REFUSED-BY-READER` after an audit: office-crypto *ran* and panicked on our file, which is a
+cited reader defect and therefore a refusal. Calling it "not run" let a reader conclude the leg
+was never attempted, and the same program returning `Unimplemented` was already recorded as a
+refusal two columns over — the collapse the plan's own rule forbids.
 
 **Office 16/18 PASS, 2 FAIL. LibreOffice 9 PASS, 8 REFUSED-BY-READER, 1 FAIL. msoffcrypto-tool
-11 PASS, 7 REFUSED-BY-READER. office-crypto 4 PASS, 7 REFUSED-BY-READER, 7 NOT RUN.** One row —
+11 PASS, 7 REFUSED-BY-READER. office-crypto 4 PASS, 14 REFUSED-BY-READER.** One row —
 `saltSize` 8/8 — has zero passes: no reader opens it, not only Word. Recorded as a fact rather
 than a reason to stop writing that `saltSize`, per the plan's own rule for a zero-pass row —
 though see the finding below for why it should not yet be written at all.
