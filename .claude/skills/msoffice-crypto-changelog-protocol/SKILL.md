@@ -6,11 +6,16 @@ description: Keep CHANGELOG.md honest by making the release date a verifiable cl
 # Changelog protocol
 
 A changelog is a set of claims about what shipped and when. This protocol keeps each claim
-checkable, because the failure mode is silent: a section reading `## v0.1.0 — 2026-09-10`
+checkable, because the failure mode is silent: a section reading `## [0.1.0] - 2026-09-10`
 when `v0.1.0` was never tagged looks released forever and nothing complains.
 
-Adapted from the same protocol in a sibling project. The invariants are theirs; the examples
-and the enforcement below are this repository's.
+**The heading format is not this file's to set.** The global `changelog-protocol` skill
+fixes it for every repository — Keep a Changelog 1.1.0, `## [X.Y.Z] - YYYY-MM-DD` or
+`## [X.Y.Z] - Unreleased`, bracketed so the link-reference definitions at the foot of
+`CHANGELOG.md` resolve, an ASCII hyphen because an em dash does not survive a pipe, and
+no `v` because that belongs on the tag. What follows is only what is specific to this
+repository: which manifest is the version of record, what a bump touches here, and how
+check G enforces it.
 
 ## The two invariants
 
@@ -20,8 +25,8 @@ suffix included.
 **2. A version heading carries a date if and only if that tag exists.**
 
 ```
-## v0.1.0-rc.1 — Unreleased      while the work is in flight
-## v0.1.0-rc.1 — 2026-09-10      the moment v0.1.0-rc.1 is tagged
+## [0.1.0-rc.1] - Unreleased      while the work is in flight
+## [0.1.0-rc.1] - 2026-09-10      the moment v0.1.0-rc.1 is tagged
 ```
 
 One separator, two possible values. **The date is the release marker.** It is not decoration,
@@ -71,13 +76,13 @@ does not need to know which afternoon a rename happened.
 
 ## The release flow
 
-1. **Open a line.** Bump `version` in `Cargo.toml`; add `## vX.Y.Z — Unreleased` at the top
+1. **Open a line.** Bump `version` in `Cargo.toml`; add `## [X.Y.Z] - Unreleased` at the top
    of `CHANGELOG.md`.
 2. **Accumulate.** Entries go under that heading. No dates unless the date is evidence.
-3. **Cut.** Replace `— Unreleased` with the ISO date, commit, then tag *that* commit.
+3. **Cut.** Replace `- Unreleased` with the ISO date, commit, then tag *that* commit.
 4. **Repeat.** The next bump opens a new section. Never leave a standing empty one.
 
-Pre-releases work identically: `## v0.1.0-rc.2 — Unreleased` opens after `v0.1.0-rc.1` is
+Pre-releases work identically: `## [0.1.0-rc.2] - Unreleased` opens after `v0.1.0-rc.1` is
 tagged and dated.
 
 **No standing `## [Unreleased]` section.** The versioned-but-undated section *is* the

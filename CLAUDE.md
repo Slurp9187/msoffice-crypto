@@ -303,16 +303,25 @@ One module, one job. A module whose purpose needs an "and" to state has two.
 
 ## Conventions
 
-**Changelog.** Version headings, newest first: `## vX.Y.Z — Unreleased` while the work is in
-flight, and the ISO date substituted the moment that tag is cut. **The date is the release
-marker, not a note about when the work happened** — git already records that, and a typed
-date drifts (five entries here were once stamped in UTC on a UTC-7 machine and read a day
-into the future). Entries carry a date only when the date is part of the claim: a
-measurement against particular versions of external readers needs one, a rename does not.
-Full rule and the tagging step: [`.claude/skills/msoffice-crypto-changelog-protocol/SKILL.md`](.claude/skills/msoffice-crypto-changelog-protocol/SKILL.md);
-enforced as check G of `tools/audit_claims.py`. The pre-publication changelog was 3,397 lines
-of dated entries and stayed with the archived development repository — frozen, not a
-violation to tidy.
+**Changelog.** Keep a Changelog 1.1.0 headings, newest first: `## [X.Y.Z] - Unreleased`
+while the work is in flight, and the ISO date substituted the moment that tag is cut. The
+form is not this repo's to choose — the global `changelog-protocol` skill fixes it for every
+repository — and each part carries a reason: **bracketed**, so link-reference definitions at
+the foot turn every heading into a compare URL without touching the headings; an **ASCII
+hyphen**, because an em dash does not survive a pipe or a copy-paste intact; and **no `v`
+prefix**, which belongs on the tag, so tag-to-heading stays one documented rule rather than a
+guess. **The date is the release marker, not a note about when the work happened** — git
+already records that, and a typed date drifts (five entries here were once stamped in UTC on
+a UTC-7 machine and read a day into the future). Entries carry a date only when the date is
+part of the claim: a measurement against particular versions of external readers needs one, a
+rename does not. This repo's own answers — which manifest is the version of record, what a
+bump touches, the tagging step — are in
+[`.claude/skills/msoffice-crypto-changelog-protocol/SKILL.md`](.claude/skills/msoffice-crypto-changelog-protocol/SKILL.md).
+Enforced as check G of `tools/audit_claims.py`, which takes the newest `##` heading whatever
+its shape and requires *that* one to be canonical — searching for the first canonical
+heading instead would skip a malformed top section and silently audit a lower one. The
+pre-publication changelog was 3,397 lines of dated entries and stayed with the archived
+development repository — frozen, not a violation to tidy.
 
 **Plans and issues.** A plan is a dated file in `docs/plans/`. A parent issue (label `plan`)
 with one closeable sub-issue per slice (label `slice`) coordinates it. The file is the design;

@@ -261,25 +261,38 @@ def main():
               f"(expected on CI; CLAUDE.md § Provenance names the paths)")
 
     # ---- G: the changelog's top heading -----------------------------------------------
-    # `.claude/skills/changelog-protocol/SKILL.md` is the rule; this is the enforcement.
+    # `~/.claude/skills/changelog-protocol/SKILL.md` fixes the heading format (Keep a
+    # Changelog 1.1.0: bracketed version, ASCII hyphen, no `v` -- the `v` is the tag's).
+    # `.claude/skills/msoffice-crypto-changelog-protocol/SKILL.md` holds this repo's own
+    # answers. This is the enforcement of both.
     # Only the NEWEST section: historical ones are frozen, and failures nobody can act on
     # are how a whole check gets switched off.
     changelog = ROOT / "CHANGELOG.md"
     if changelog.exists():
         txt = read(changelog)
-        head = re.search(r"^## +(\S+?) +[-\u2014] +(.+?)\s*$", txt, re.M)
+        # Take the NEWEST `## ` heading whatever its shape, then require that one to be
+        # canonical. Searching for the first *canonical* heading instead would skip a
+        # malformed top section and silently audit a lower one -- which is exactly what
+        # it did when this check was converted, reporting rc.3 as the top heading.
+        head = re.search(r"^## +\S.*$", txt, re.M)
+        canon = re.fullmatch(r"## +\[([^\]]+)\] +- +(.+?)\s*", head.group(0)) if head else None
         if head is None:
             flag("G changelog has no version heading",
-                 "CHANGELOG.md: expected a top heading like '## vX.Y.Z - Unreleased'")
+                 "CHANGELOG.md: expected a top heading like '## [X.Y.Z] - Unreleased' "
+                 "-- bracketed, ASCII hyphen, no 'v' prefix")
+        elif canon is None:
+            flag("G top heading is not canonical",
+                 f"CHANGELOG.md:{line_of(txt, head.start())} -> {head.group(0).strip()!r}; "
+                 "expected '## [X.Y.Z] - Unreleased' or '## [X.Y.Z] - YYYY-MM-DD'")
         else:
-            heading_ver, marker = head.group(1), head.group(2).strip()
-            want = "v" + pkg
+            heading_ver, marker = canon.group(1), canon.group(2).strip()
+            want = pkg
 
             # Invariant 1: the top heading names the manifest version.
             if heading_ver != want:
                 flag("G top heading disagrees with Cargo.toml",
                      f"CHANGELOG.md:{line_of(txt, head.start())} says {heading_ver}, "
-                     f"Cargo.toml says {pkg} (expected {want})")
+                     f"Cargo.toml says {pkg} (expected [{want}])")
 
             # Invariant 2: dated if and only if the tag exists.
             tags = set()
@@ -293,15 +306,15 @@ def main():
 
             dated = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", marker))
             if tags is not None:
-                tagged = heading_ver in tags
+                tagged = "v" + heading_ver in tags
                 if dated and not tagged:
                     flag("G dated heading with no tag",
                          f"CHANGELOG.md:{line_of(txt, head.start())} is dated {marker} but "
-                         f"tag {heading_ver} does not exist -- the date IS the release marker")
+                         f"tag v{heading_ver} does not exist -- the date IS the release marker")
                 if tagged and not dated:
                     flag("G tagged version still marked Unreleased",
                          f"CHANGELOG.md:{line_of(txt, head.start())} says '{marker}' but "
-                         f"tag {heading_ver} exists; date it")
+                         f"tag v{heading_ver} exists; date it")
             if not dated and marker != "Unreleased":
                 flag("G heading marker is neither a date nor 'Unreleased'",
                      f"CHANGELOG.md:{line_of(txt, head.start())} -> {marker!r}")

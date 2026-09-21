@@ -22,8 +22,7 @@ What survives that move is in two places, deliberately:
 
 ---
 
-## v0.1.0-rc.4 — 2026-09-21
-
+## [0.1.0-rc.4] - 2026-09-21
 ### Evidence for this release
 
 The four-reader acceptance gate, run on this machine 2026-09-20 against artifact SHA-256
@@ -806,8 +805,7 @@ against.
 two commands for finding out what a publish actually recorded, plus the decision that
 follows: move the tag if nothing shipped changed, yank and re-cut if something did.
 
-## v0.1.0-rc.3 — 2026-09-19
-
+## [0.1.0-rc.3] - 2026-09-19
 ### Evidence for this release
 
 The four-reader acceptance gate, run on this machine 2026-09-19 against artifact SHA-256
@@ -934,8 +932,7 @@ live in the archived one — so the header now names the check instead of the nu
 **The committed fixtures were never affected.** `tests/fixture_identity.rs` has been green
 throughout; it was the generator, not the corpus, that was wrong.
 
-## v0.1.0-rc.2 — 2026-09-15
-
+## [0.1.0-rc.2] - 2026-09-15
 **This is the first release published to crates.io.** `v0.1.0-rc.1` exists as a git tag and
 as the section below, and was never published — the CLI and the pre-publish security work
 were wanted first, so the line above it is the one that ships. A reader comparing this
@@ -1231,8 +1228,7 @@ stays, via this crate's own `thiserror` — the proc-macro chain does not leave,
 crate does. The detection build still links no `secure-gate` at all, and all five feature
 configurations hold their test counts exactly, seeded encrypt goldens included.
 
-## v0.1.0-rc.1 — 2026-09-11
-
+## [0.1.0-rc.1] - 2026-09-11
 First public version. Detection, decryption and encryption of the formats [MS-OFFCRYPTO]
 defines, with key material held in `secure-gate` wrappers that zeroize on drop.
 
@@ -1474,3 +1470,7 @@ job is parsing bytes an attacker chose — and, as usefully, what does not.
 [MS-OFFCRYPTO]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-offcrypto/
 [MS-CFB]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/
 [MS-PPT]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-ppt/
+[0.1.0-rc.4]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.3...v0.1.0-rc.4
+[0.1.0-rc.3]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.2...v0.1.0-rc.3
+[0.1.0-rc.2]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.1...v0.1.0-rc.2
+[0.1.0-rc.1]: https://github.com/Slurp9187/msoffice-crypto/tree/v0.1.0-rc.1
