@@ -16,9 +16,10 @@ use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command};
 #[cfg(feature = "legacy-binary")]
 use msoffice_crypto::decrypt_binary_office;
 use msoffice_crypto::{
-    classify, decrypt_ooxml_with_policy, encrypt_ooxml, encrypt_ooxml_standard, AlgorithmParams,
-    CipherAlgorithm, Classification, Container, ContainerRead, Decrypted, Document, Error, Family,
-    HashAlgorithm, IntegrityDeclaration, IntegrityOutcome, IntegrityPolicy,
+    check_encryptable, classify, decrypt_ooxml_with_policy, encrypt_ooxml, encrypt_ooxml_standard,
+    AlgorithmParams, CipherAlgorithm, Classification, Container, ContainerRead, Decrypted,
+    Document, Error, Family, HashAlgorithm, IntegrityDeclaration, IntegrityOutcome,
+    IntegrityPolicy,
 };
 use serde_json::{json, Map, Value};
 
@@ -87,9 +88,10 @@ const FORMAT_NAMES: [&str; 2] = ["agile", "standard"];
 const NOT_ENCRYPTED: &str = "not encrypted; there is nothing to decrypt";
 
 /// The one sentence for "this crate does not recognise the container at all". Shared by
-/// `route_for` (`decrypt`) and `encrypt_guard` (`encrypt`): the same eight — or sixteen —
-/// bytes of junk get the same answer from either subcommand, and a hand-duplicated copy
-/// that drifted between the two would be a lie one of them told.
+/// `route_for` (`decrypt`, the CLI's own classification) and `describe`'s
+/// `Error::UnknownContainer` arm (`encrypt`, established by the library's guard): the same
+/// eight — or sixteen — bytes of junk get the same answer from either subcommand, and a
+/// hand-duplicated copy that drifted between the two would be a lie one of them told.
 const NOT_OFFICE: &str = "not a Microsoft Office file (container: unknown)";
 
 fn password_args() -> [Arg; 4] {
@@ -739,9 +741,14 @@ fn cmd_decrypt(m: &ArgMatches, file: &str, bytes: &[u8], source: PasswordSource)
 /// `encrypt`: choose the writer, refuse what cannot be encrypted, read the password,
 /// encrypt, write, and say what the artifact carries.
 ///
-/// The classification comes BEFORE the password for the same reason it does in
-/// `cmd_decrypt`, and the guard is the CLI's alone: the library encrypts whatever
-/// bytes it is handed and has no `AlreadyEncrypted` error to raise.
+/// The guard comes BEFORE the password for the same reason the classification does in
+/// `cmd_decrypt`: prompting for a NEW password for a file that is about to be refused
+/// would be wrong, and on an interactive path it is the part that cannot be taken back.
+///
+/// The guard itself is the library's. [`check_encryptable`] is the same function
+/// `encrypt_ooxml` calls at the door, so the CLI cannot drift from what the writer will
+/// accept — it used to be a CLI-only `encrypt_guard`, which is exactly how a consumer
+/// ended up reimplementing it.
 fn cmd_encrypt(m: &ArgMatches, file: &str, bytes: &[u8], source: PasswordSource) -> u8 {
     let name = m.get_one::<String>("format").expect("clap default");
     let Some(format) = parse_format(name) else {
@@ -752,8 +759,8 @@ fn cmd_encrypt(m: &ArgMatches, file: &str, bytes: &[u8], source: PasswordSource)
         return EX_INTERNAL;
     };
 
-    if let Err(r) = encrypt_guard(&classify(bytes)) {
-        return refused(file, &r);
+    if let Err(e) = check_encryptable(bytes) {
+        return report(file, &e);
     }
 
     let password = match read_password(source, Direction::Encrypt) {
@@ -929,53 +936,6 @@ fn reencrypt_remedy(document: Document) -> &'static str {
         // name is far likelier to be a package kind added later than a binary one: the
         // three binary documents above are the closed set [MS-OFFCRYPTO] defines.
         _ => "decrypt it first if you meant to re-encrypt it",
-    }
-}
-
-/// `route_for`'s counterpart for `encrypt`. Every branch is a fact the classification
-/// alone establishes, which is why this runs before the password is read: prompting
-/// for a NEW password for a file that is about to be refused would be wrong.
-///
-/// `encrypt` accepts exactly one thing -- a plain OOXML package, which `classify`
-/// reports as `Container::Zip` for every `PK` signature it knows (classify.rs:527).
-fn encrypt_guard(class: &Classification) -> Result<(), Refusal> {
-    match class.container {
-        Container::Zip => Ok(()),
-        // Plan §7 / CONTRACT §5. The library has no `AlreadyEncrypted` variant, so
-        // this guard is the CLI's; without it a double-encrypted container is a
-        // plausible accident. `decrypt` answers 3 for a CFB it does not recognise and
-        // this answers 5 for the same bytes, on purpose: decrypt asks "can I decrypt
-        // this", encrypt asks "is this a plain package", and 5 is "nothing to do".
-        Container::Cfb if class.is_encrypted() => Err(Refusal {
-            code: EX_REFUSED,
-            why: format!(
-                "already encrypted ({} encryption in a CFB container); {}",
-                family_name(class.family),
-                reencrypt_remedy(class.document)
-            ),
-        }),
-        // Deliberately does NOT name `class.document`: eight bytes of CFB magic are
-        // `Document::Unknown`, and calling that a 97-2003 document would be false.
-        Container::Cfb => Err(Refusal {
-            code: EX_REFUSED,
-            why: "a CFB container, not a plain OOXML package; this tool writes \
-                  encryption around a package (.docx/.xlsx/.pptx), and there is no \
-                  writer for the 97-2003 binary formats"
-                .to_string(),
-        }),
-        // The same sentence `decrypt` gives these bytes, so one fact has one code.
-        Container::Unknown => Err(Refusal {
-            code: EX_NOT_OFFICE,
-            why: NOT_OFFICE.to_string(),
-        }),
-        // T2: `Container` is `#[non_exhaustive]` and this is a separate crate.
-        _ => Err(Refusal {
-            code: EX_UNSUPPORTED,
-            why: format!(
-                "a container kind this build does not know how to encrypt ({})",
-                container_name(class.container)
-            ),
-        }),
     }
 }
 
@@ -1171,7 +1131,8 @@ fn first_line(s: &str) -> String {
 // --- error -> exit code ---------------------------------------------------
 
 /// A refusal made from the classification alone: the same sentence shape [`report`]
-/// gives an [`Error`], minus the error. Shared by `decrypt`'s and `encrypt`'s guards.
+/// gives an [`Error`], minus the error. `decrypt`'s guard only — `encrypt`'s refusals are
+/// the library's `Error`s now, and go through [`report`].
 fn refused(file: &str, r: &Refusal) -> u8 {
     eprintln!("msoffice-crypto: {file}: {}; nothing was written.", r.why);
     r.code
@@ -1213,6 +1174,42 @@ fn describe(e: &Error) -> String {
         Error::UnsupportedEncryptionVersion(..) | Error::UnsupportedAlgorithm { .. } => {
             format!("{e}; re-saving the document with a current Office writes agile encryption, which this tool reads")
         }
+        // The three encrypt-guard refusals. These sentences were `encrypt_guard`'s until
+        // the library took the guard; they are kept word for word, because `tests/cli.rs`
+        // asserts them and because the wording is the CLI's job either way. `family` and
+        // `document` come off the error rather than a second `classify` call.
+        Error::AlreadyEncrypted { family, document } => format!(
+            "already encrypted ({} encryption in a CFB container); {}",
+            family_name(*family),
+            reencrypt_remedy(*document)
+        ),
+        // Deliberately does NOT name a document kind: eight bytes of CFB magic are
+        // `Document::Unknown`, and the variant carries no field to build one from.
+        Error::NotAPlainPackage => "a CFB container, not a plain OOXML package; this \
+             tool writes encryption around a package (.docx/.xlsx/.pptx), and there is \
+             no writer for the 97-2003 binary formats"
+            .to_string(),
+        // The same sentence `decrypt`'s `route_for` gives these bytes: one fact, one
+        // wording, whether the CLI's classification or the library's guard found it.
+        Error::UnknownContainer => NOT_OFFICE.to_string(),
+        // `EncryptParams` is forwarded **deliberately**, and this comment is the record
+        // of that decision rather than an omission waiting to be fixed. Its `Display`
+        // already reads as CLI copy: it names the `EncryptionInfo` attribute in
+        // [MS-OFFCRYPTO]'s own spelling, says whose rule the value broke (the format's,
+        // AES's, or this crate's margin), and prints the requested value beside the
+        // accepted range. There is no Rust path in it -- the failure mode the header
+        // above warns about -- and no remedy the CLI could word better than "pass a
+        // number in that range".
+        //
+        // It is also unreachable from today's binary: there is no `--spin-count` or
+        // `--key-bits` flag, so every encryption parameter this build uses is a
+        // constant chosen here and already inside the bounds. The arm exists in
+        // `exit_code` because a number must be returned for a variant that can arrive
+        // through the library; the sentence does not, because nothing here can produce
+        // it. When those flags arrive, this variant gets its own arm re-wording the
+        // attribute as the flag the caller actually typed (`--spin-count`, not
+        // `spinCount`), which is the one thing the library's message cannot know.
+        //
         // WrongPassword, MissingStream, BadParameters, XmlParse, CipherError,
         // RandomSource, Io and any future variant: forwarded. XmlParse, BadParameters and
         // UnsupportedAlgorithm carry bounded attacker-chosen text; it goes to stderr
@@ -1225,7 +1222,7 @@ fn describe(e: &Error) -> String {
 ///
 /// `_` is **7**, not the sibling's 6: 6 asserts a fact about the *file* that a gap in
 /// this table gives no basis for, while 7 says "this tool could not classify the
-/// failure", which is true. A fifteenth variant therefore lands on 7 with no compile
+/// failure", which is true. A nineteenth variant therefore lands on 7 with no compile
 /// error here — the enum is `#[non_exhaustive]` and this is a separate crate — so the
 /// coverage half of the proof is the exhaustive canary in `src/error.rs`'s own
 /// `#[cfg(test)]` module, and the value half is `exit_codes_map_every_error_class`.
@@ -1248,6 +1245,26 @@ fn exit_code(e: &Error) -> u8 {
         Error::IntegrityElementMissing => EX_INTEGRITY,
         Error::IntegrityUnavailable(_) => EX_INTEGRITY,
         Error::RandomSource(_) => EX_INTERNAL,
+        // The encrypt guard. 5 and 5 and 3, not one number: `AlreadyEncrypted` and
+        // `NotAPlainPackage` are both "I recognise this and will not write into it",
+        // while `UnknownContainer` is "wrong file" and shares `decrypt`'s 3 for the
+        // same bytes. Collapsing them loses the distinction the help text promises.
+        Error::AlreadyEncrypted { .. } => EX_REFUSED,
+        Error::NotAPlainPackage => EX_REFUSED,
+        Error::UnknownContainer => EX_NOT_OFFICE,
+        // The only **caller** error in the table, and so the only 1. Every other arm is
+        // a verdict on a file; this one is raised before a file is opened at all, from
+        // the caller's own numbers against this crate's bounds.
+        //
+        // Not 6: `EX_MALFORMED` asserts a fact about a file -- "the bytes you gave me
+        // are not a well-formed document" -- and there is frequently no file in hand
+        // when this is raised, so 6 would be a claim about something that does not
+        // exist. Not 9 either: `EX_UNSUPPORTED` means "this tool does not do that
+        // *yet*", a build or a flag away from working, and a script may reasonably
+        // retry elsewhere on it. A `spinCount` outside `0..=10_000_000` is not a
+        // feature anyone can turn on; it is an impossible request, which is a bad
+        // invocation, which is 1.
+        Error::EncryptParams { .. } => EX_USAGE,
         _ => EX_INTERNAL,
     }
 }

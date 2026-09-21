@@ -1,5 +1,5 @@
-//! The two encrypt entry points through the public API alone, from outside the crate —
-//! the view a downstream consumer has when it wires the Office path up.
+//! The three encrypt entry points through the public API alone, from outside the crate
+//! — the view a downstream consumer has when it wires the Office path up.
 //!
 //! Every other test of `encrypt_ooxml` and `encrypt_ooxml_standard` is a unit test inside
 //! `src/`, with access to `pub(crate)` seams and the seeded RNG. This file is compiled as
@@ -33,7 +33,8 @@
 
 use msoffice_crypto::{
     classify, decrypt_ooxml, decrypt_ooxml_with_policy, encrypt_ooxml, encrypt_ooxml_standard,
-    is_cfb_office, Error, Family, IntegrityDeclaration, IntegrityOutcome, IntegrityPolicy,
+    encrypt_ooxml_with_params, is_cfb_office, EncryptParam, EncryptParamProblem, EncryptParams,
+    Error, Family, IntegrityDeclaration, IntegrityOutcome, IntegrityPolicy,
 };
 
 const PASSWORD: &str = "testpass";
@@ -138,4 +139,123 @@ fn an_independent_implementation_opens_what_both_entry_points_wrote() {
             "{name}: office-crypto must recover the package byte for byte"
         );
     }
+}
+
+/// A tuple that is not the default, submitted from outside the crate: it is accepted,
+/// it reaches the bytes, and the file opens again under the strictest policy.
+///
+/// **This test's first job is to compile.** `..Default::default()` is struct-expression
+/// syntax, which `#[non_exhaustive]` forbids across a crate boundary — so if
+/// `EncryptParams` ever gains that attribute "for forward compatibility", this file
+/// stops building and says so. `src/encrypt_params.rs` argues for omitting it; the
+/// argument can only be *checked* from a separate crate, which is here and not there.
+///
+/// The second job is that the parameter is not merely accepted and dropped.
+/// `classify` reads `p:encryptedKey/@keyBits` back out of the artifact, so the
+/// assertion is about the file rather than about the call returning `Ok`. Comparing two
+/// artifacts byte for byte could not do that — two encryptions differ on their random
+/// salts whatever the tuple.
+#[test]
+fn a_non_default_tuple_reaches_the_file_and_opens_again() {
+    let plain = fixture("plain.docx");
+
+    // One field moved: a 128-bit KEK wrapping the default 256-bit package key. SHA-512's
+    // 64-byte digest carries either size, so this is a tuple `validate` accepts, and it
+    // is one no seeded golden in `src/` describes.
+    let params = EncryptParams {
+        password_key_bits: 128,
+        ..Default::default()
+    };
+    params
+        .validate()
+        .expect("a 128-bit KEK under SHA-512 is a tuple this crate writes");
+
+    let sealed =
+        encrypt_ooxml_with_params(&plain, PASSWORD, params).expect("encrypt_ooxml_with_params");
+
+    assert!(is_cfb_office(&sealed));
+    let class = classify(&sealed);
+    assert_eq!(class.family, Family::Agile);
+    assert_eq!(
+        class.password_key.and_then(|p| p.key_bits),
+        Some(128),
+        "the caller's keyBits must be what the file declares"
+    );
+    assert_eq!(
+        class.key_data.and_then(|k| k.key_bits),
+        Some(256),
+        "and the other element's must be untouched — the two keyBits are separate"
+    );
+    assert_eq!(
+        class.data_integrity,
+        IntegrityDeclaration::Declared,
+        "the dataIntegrity guarantee is not scoped to the default tuple"
+    );
+
+    // `Require` is the strict read: the HMAC over this tuple's ciphertext verifies, so
+    // the key schedule agrees with the document that describes it.
+    let opened = decrypt_ooxml_with_policy(&sealed, PASSWORD, IntegrityPolicy::Require)
+        .expect("Require must accept an agile file this crate wrote, whatever the tuple");
+    assert_eq!(opened.package, plain);
+    assert_eq!(opened.integrity, IntegrityOutcome::Verified);
+
+    // The negative control: a wrong password on a non-default tuple is still reported as
+    // a wrong password, not as the parse failure a mis-sized blob would produce.
+    assert!(
+        matches!(
+            decrypt_ooxml(&sealed, "not the password"),
+            Err(Error::WrongPassword)
+        ),
+        "a non-default tuple must not turn a wrong password into another variant"
+    );
+
+    // And the default entry point still writes the default, which is what makes the
+    // assertion above evidence that the parameter travelled rather than a coincidence.
+    let default_sealed = encrypt_ooxml(&plain, PASSWORD).expect("encrypt_ooxml");
+    assert_eq!(
+        classify(&default_sealed)
+            .password_key
+            .and_then(|p| p.key_bits),
+        Some(256)
+    );
+}
+
+/// A tuple this crate will not write is refused with a typed verdict a consumer can
+/// `match` — and refused before the password is used for anything.
+///
+/// The pair of cases is the point: 200 breaks AES's rule while satisfying the format's,
+/// and 12 breaks the format's own. A consumer that renders these to a human says
+/// different things about them, which it can only do if the two variants reach it.
+#[test]
+fn a_tuple_this_crate_will_not_write_is_refused_by_name() {
+    let plain = fixture("plain.docx");
+
+    for (bits, expected) in [
+        (200, EncryptParamProblem::UnsupportedByCipher),
+        (12, EncryptParamProblem::OutsideSpecRange),
+    ] {
+        let params = EncryptParams {
+            password_key_bits: bits,
+            ..Default::default()
+        };
+        let err = encrypt_ooxml_with_params(&plain, PASSWORD, params)
+            .expect_err("keyBits this crate will not write must be refused");
+        assert!(
+            matches!(
+                err,
+                Error::EncryptParams {
+                    param: EncryptParam::KeyBits,
+                    problem,
+                    got,
+                    ..
+                } if problem == expected && got == bits
+            ),
+            "keyBits {bits} must be refused as {expected:?}, got {err:?}"
+        );
+    }
+
+    // The control: the same call with the same file and a tuple that is fine succeeds,
+    // so the refusals above are about the parameters and not about the input.
+    encrypt_ooxml_with_params(&plain, PASSWORD, EncryptParams::default())
+        .expect("the default tuple must still be written");
 }

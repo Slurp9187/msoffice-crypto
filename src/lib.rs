@@ -10,10 +10,13 @@
 //!
 //! The public surface is re-exported at the crate root. Detection types
 //! ([`Classification`], [`Family`], [`IntegrityDeclaration`]) compile into every build.
-//! `decrypt_ooxml`, `encrypt_ooxml`, `Error`, `IntegrityPolicy` and
-//! `IntegrityOutcome` exist only under `crypto-ops`; `decrypt_binary_office` exists
-//! only under `legacy-binary`. Those names are not linked from this page because this
-//! crate-level document renders in the detection-only build, where they are absent.
+//! `decrypt_ooxml`, `encrypt_ooxml`, `encrypt_ooxml_with_params`,
+//! `encrypt_ooxml_standard`, `encrypt_ooxml_standard_with_key_bits`,
+//! `check_encryptable`,
+//! `EncryptParams`, `Error`, `IntegrityPolicy` and `IntegrityOutcome` exist only under
+//! `crypto-ops`; `decrypt_binary_office` exists only under `legacy-binary`. Those names
+//! are not linked from this page because this crate-level document renders in the
+//! detection-only build, where they are absent.
 //!
 //! - **Agile encryption** (Office 2010+, `vMajor=4` `vMinor=4`): AES-CBC in the files this
 //!   crate reads and writes ([MS-OFFCRYPTO] §2.3.4.10 also names CFB and other ciphers;
@@ -26,9 +29,11 @@
 //!   password.
 //! - **Standard encryption** (Office 2007, `vMajor` 2/3/4 with `vMinor=2` and `fAES` set):
 //!   AES in ECB under a SHA-1 KDF of 50,000 iterations ([MS-OFFCRYPTO] §2.3.4.7). The
-//!   header (§2.3.4.5) declares AES-128, AES-192 or AES-256; this crate reads and writes
-//!   AES-128, which is Office's default. SHA-1, ECB and the iteration count are fixed by
-//!   the KDF; the key length is not.
+//!   header (§2.3.4.5) declares AES-128, AES-192 or AES-256; this crate **reads all
+//!   three** and writes AES-128, which is Office's default. SHA-1, ECB and the 50 000
+//!   iterations are fixed by the format (§2.3.4.7) and are not file fields; the key
+//!   length is the one parameter the header chooses, and the derivation does not branch
+//!   on it — all three keys are prefixes of the same 40-byte ladder output.
 //!
 //! Both OOXML formats use a CFB container (magic: `D0 CF 11 E0 A1 B1 1A E1`). The
 //! decrypted output of the modern path is the original OOXML ZIP.
@@ -82,9 +87,12 @@
 //! all. `cargo add msoffice-crypto` installs that and nothing more.
 //!
 //! **Decryption and encryption are the `crypto-ops` feature.** `decrypt_ooxml`,
-//! `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_standard`, the
-//! `Decrypted` struct and the `IntegrityPolicy` / `IntegrityOutcome` enums live behind
-//! it, together with `aes`, `cbc`, `ecb`, `sha1`, `sha2`, `hmac`, `base64` and `rand`:
+//! `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_with_params`,
+//! `encrypt_ooxml_standard`, `encrypt_ooxml_standard_with_key_bits`,
+//! `check_encryptable`, the `Decrypted` and `EncryptParams`
+//! structs and the `IntegrityPolicy` / `IntegrityOutcome` enums live behind it,
+//! together with `aes`, `cbc`, `ecb`, `sha1`,
+//! `sha2`, `hmac`, `base64` and `rand`:
 //!
 //! ```toml
 //! msoffice-crypto = { version = "0.1.0-rc.4", features = ["crypto-ops"] }
@@ -97,8 +105,9 @@
 //!
 //! To be exact about what is gated, because the imprecise version misleads: the error
 //! *type* compiles in every configuration — every variant payload is a `&'static str`,
-//! `String`, `u16` or `std::io::Error`, so it costs the detection build nothing but
-//! `thiserror` — and it is only the `pub use` that `crypto-ops` gates. The reason is not
+//! `String`, `u16`, `std::io::Error` or a fieldless `Copy` enum from the detection half
+//! (`Family`, `Document`), so it costs the detection build nothing but `thiserror` — and
+//! it is only the `pub use` that `crypto-ops` gates. The reason is not
 //! that the type needs a cipher. It is that once the crypto-only variants are gated, an
 //! ungated re-export would be a public type whose *shape* changes with a feature the
 //! consumer cannot see from the name, in a build where `classify()` is infallible and
@@ -127,6 +136,43 @@
 //! ```toml
 //! msoffice-crypto = { version = "0.1.0-rc.4", features = ["legacy-binary"] }
 //! ```
+//!
+//! # Bounds on untrusted input
+//!
+//! Every number below is read from a file an attacker may have written, so each one is
+//! capped. A declared size is an allocation request and an iteration count is a promise
+//! of work; neither is believed. The values are listed because a consumer sizing its own
+//! limits, or deciding whether this crate can be handed a particular document, should not
+//! have to ask. **They are internal constants (`src/limits.rs`, all `pub(crate)`), not
+//! public API** — they are quoted here for discoverability and may tighten in any
+//! release.
+//!
+//! Compiled into **every build**, because `classify` reads them before anything is
+//! authenticated: the `EncryptionInfo` stream is read to at most 1 MiB, a 97-2003 binary
+//! header to 512 bytes, the `.xls` BIFF scan to 1 MiB, `/Current User` to 256 bytes, and
+//! the PowerPoint persist directory to 8 MiB across at most 2^20 objects — that last
+//! figure being the spec's own, since `persistId` is 20 bits ([MS-PPT] § 2.3.5), not a
+//! margin this crate chose.
+//!
+//! Under **`crypto-ops`**: a package is at most **1 GiB** in either direction — the same
+//! ceiling refuses an oversized `EncryptedPackage` on read and an oversized `package` on
+//! write, so a file this crate writes is a file it can read back. `spinCount` is capped
+//! at **10 000 000**, `ST_SpinCount`'s own `maxInclusive` ([MS-OFFCRYPTO] §2.3.4.10):
+//! about seven seconds of one core, against the fifty minutes an uncapped `u32::MAX`
+//! buys, which no `Result` can report. A caller wanting a tighter rule than the
+//! format's has what it needs before a single round runs — [`classify()`] reports the
+//! declared spin count unvalidated — and that is where such a rule belongs, because a
+//! ceiling imposed here is one the caller cannot loosen for a document its owner
+//! already holds. Agile key sizes are 128, 192 or 256 bits, salts 1..=65536 bytes, and
+//! the standard path takes the same three key sizes — [MS-OFFCRYPTO] §2.3.4.5's
+//! `0x00000080` / `0x000000C0` / `0x00000100` — with the further requirement that the
+//! value agree with the `AlgID` beside it. That path refused AES-192 and AES-256 by
+//! name until 2026-09-20, which was this crate's decision and not the format's.
+//!
+//! Under **`legacy-binary`**: RC4 key sizes 40..=128 bits (the spec's own range,
+//! [MS-OFFCRYPTO] § 2.3.5.1) and an XOR-obfuscation password of at most 15 characters,
+//! which is structural rather than a margin — the `InitialCode` table has exactly 15
+//! entries.
 //!
 //! # Trademarks
 //!
@@ -217,6 +263,18 @@ mod agile_encrypt;
 /// gate was the reminder that the flip was due, and it fired on schedule.
 #[cfg(feature = "crypto-ops")]
 mod dataspaces;
+/// The encryption parameters a caller may choose, and the one function that judges them.
+/// Public through the [`EncryptParams`] re-export below — the type is an input to the
+/// encrypt path rather than a decision this crate makes alone, which is why it is a
+/// module of its own and not a private struct inside `agile_encrypt`.
+///
+/// The threading is complete: [`encrypt_ooxml_with_params`] takes one from the caller,
+/// `agile_encrypt::generate` sizes every draw from it, and `encryption_info::write`
+/// re-checks the same value and writes it out — so the document cannot describe a tuple
+/// other than the one that produced its blobs. [`encrypt_ooxml`] is that same path with
+/// [`EncryptParams::default`] supplied for the caller.
+#[cfg(feature = "crypto-ops")]
+mod encrypt_params;
 /// Serialise the agile `EncryptionInfo` stream — the inverse of `agile`'s parser, and the
 /// half GH #6 step 3 added. Shaped byte-for-byte on what Word 16 writes.
 #[cfg(feature = "crypto-ops")]
@@ -224,6 +282,15 @@ mod encryption_info;
 /// The four hash algorithms an agile file may name, as operations rather than as a
 /// label. The enum itself lives in `classify`, which must report the hash in a build
 /// with no cipher crate at all; this is the `crypto-ops` half.
+///
+/// Private, but not entirely internal: two of the inherent methods it hangs on
+/// [`HashAlgorithm`] — `digest_len` and `name` — are `pub`, and reach a consumer through
+/// the enum's own re-export below rather than through this module, which is why there is
+/// no `pub use` here to add. They are facts about SHA rather than about this crate, and a
+/// caller choosing encryption parameters needs them to predict the `keyBits <= digest`
+/// coupling the agile path imposes. That makes them `crypto-ops`-only API on a type the
+/// detection build also exports — deliberate, and the same shape as [`Error`], whose
+/// re-export is gated for the same reason.
 #[cfg(feature = "crypto-ops")]
 mod hash;
 #[cfg(feature = "crypto-ops")]
@@ -239,6 +306,13 @@ mod standard;
 /// The standard (Office 2007) write path: the salt, the derived key, the two verifier
 /// blobs, the binary header, and the assembly behind [`encrypt_ooxml_standard`]. Runs on
 /// `standard`'s own KDF and ECB helper, so the two directions share one derivation.
+///
+/// It also holds the one parameter this format has — the key size, judged by a private
+/// `AesKeySize` and reaching a caller through
+/// [`encrypt_ooxml_standard_with_key_bits`]'s plain `u32`. No type of its own is
+/// exported for it: [MS-OFFCRYPTO] fixes every other field of the header, so there is no
+/// tuple to name, and that module's own header argues the choice against the two
+/// alternatives.
 #[cfg(feature = "crypto-ops")]
 mod standard_encrypt;
 
@@ -257,12 +331,27 @@ pub use classify::{
     classify, AlgorithmParams, CipherAlgorithm, Classification, Container, ContainerRead, Document,
     Family, HashAlgorithm, IntegrityDeclaration,
 };
+/// The parameters of an agile encryption, as a caller chooses them — and
+/// `EncryptParams::validate`, which judges them before a password is asked for.
+///
+/// Gated with the encrypt path it parameterises. Exported from the crate root rather
+/// than from a module of its own for the same reason every other public item here is:
+/// this crate has one public surface, and `msoffice_crypto::encrypt_params::EncryptParams`
+/// would be a second path to the same type.
+#[cfg(feature = "crypto-ops")]
+pub use encrypt_params::EncryptParams;
 /// Gated with the functions that return it. In a detection-only build no public
 /// function returns a `Result`, so an ungated re-export was a public type nothing
 /// produced — and, once its crypto-only variants were gated, a type whose public shape
 /// depended on a feature the consumer could not see from the name. See the enum's doc.
 #[cfg(feature = "crypto-ops")]
 pub use error::Error;
+/// The two halves of [`Error::EncryptParams`]'s payload, gated with the variant that
+/// carries them. They are deliberately enums rather than strings so that a caller can
+/// `match` a rejected encryption parameter — which is unreachable if the types are not
+/// exported, so this re-export is part of that variant, not a convenience.
+#[cfg(feature = "crypto-ops")]
+pub use error::{EncryptParam, EncryptParamProblem};
 #[cfg(feature = "crypto-ops")]
 pub use integrity::{IntegrityOutcome, IntegrityPolicy};
 
@@ -420,6 +509,81 @@ pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, Error> {
     decrypt_ooxml_with_policy(data, password, IntegrityPolicy::default()).map(|d| d.package)
 }
 
+/// Refuse, before a password is asked for, anything [`encrypt_ooxml`] and
+/// [`encrypt_ooxml_standard`] will refuse.
+///
+/// **This is the same function those two call**, not a second copy that agrees with them:
+/// each opens with `check_encryptable(package)?`. A caller that runs it and gets `Ok(())`
+/// is not promised the encryption will succeed — the payload ceiling and the system RNG
+/// are still ahead — but it is promised that the *shape* of the input will not be what
+/// stops it.
+///
+/// It exists because the alternative is asking for a password first. Prompting for a new
+/// password, or reading one from a keychain, for a file that is about to be refused is a
+/// question the user answers for nothing, and on an interactive path it is the part of a
+/// refusal that cannot be taken back. This crate's own CLI calls it in that position; so
+/// did a consumer that had to write its own copy before this existed.
+///
+/// **Exactly one thing is encryptable: a plain OOXML package**, which [`classify()`]
+/// reports as [`Container::Zip`] for every `PK` signature it knows. Four bytes of magic
+/// are the whole test — no entry is read and no content type is examined, so a `.vsdx`, a
+/// `.jar` and a backup archive all pass here (see [`Document::ZipArchive`]). That is the
+/// honest limit of what was checked, and encrypting a ZIP that is not an Office package
+/// harms nobody: the result is a container whose payload the caller chose. What is
+/// refused is everything that would produce a *misleading* artifact — above all a second
+/// wrap around a file that is already encrypted.
+///
+/// # Errors
+///
+/// - [`Error::AlreadyEncrypted`] — a CFB container that already carries a
+///   password-to-open. The payload names the family and document kind, for a caller
+///   choosing its own words
+/// - [`Error::NotAPlainPackage`] — a CFB container that does not: a 97-2003 binary
+///   document, or one this crate could not read
+/// - [`Error::UnknownContainer`] — neither a ZIP package nor a CFB container
+///
+/// # Examples
+///
+/// ```
+/// use msoffice_crypto::{check_encryptable, encrypt_ooxml, Error};
+///
+/// // Ask before the prompt, not after.
+/// let package = include_bytes!("../tests/fixtures/plain.docx");
+/// check_encryptable(package)?;
+/// let password = "correct horse battery staple"; // …whatever asking cost you
+/// let sealed = encrypt_ooxml(package, password)?;
+///
+/// // And the answer for bytes that were never worth asking about:
+/// assert!(matches!(
+///     check_encryptable(&sealed),
+///     Err(Error::AlreadyEncrypted { .. })
+/// ));
+/// # Ok::<(), msoffice_crypto::Error>(())
+/// ```
+///
+/// # See Also
+///
+/// [`classify()`] is the full pre-flight; this is the one question the encrypt path asks
+/// of it. Every public encrypt entry point this crate gains must call this.
+// No `#[must_use]`: `Result` already carries it, and adding a second fires
+// `clippy::double_must_use`, which is `-D warnings` in all five feature columns.
+#[cfg(feature = "crypto-ops")]
+pub fn check_encryptable(package: &[u8]) -> Result<(), Error> {
+    let class = classify(package);
+    // Exhaustive without a `_` arm: `Container` is `#[non_exhaustive]` only to other
+    // crates, so a variant added later is `E0004` right here and someone has to decide
+    // what it is, rather than it defaulting into "encryptable" or into one refusal.
+    match class.container {
+        Container::Zip => Ok(()),
+        Container::Cfb if class.is_encrypted() => Err(Error::AlreadyEncrypted {
+            family: class.family,
+            document: class.document,
+        }),
+        Container::Cfb => Err(Error::NotAPlainPackage),
+        Container::Unknown => Err(Error::UnknownContainer),
+    }
+}
+
 /// Encrypt an OOXML package with a password, producing the CFB container Office writes.
 ///
 /// `package` is the plain `.docx` / `.xlsx` / `.pptx` ZIP. The result is ECMA-376 agile
@@ -431,6 +595,23 @@ pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, Error> {
 /// own random inputs could be recovered: the `EncryptionInfo` document and the two
 /// `dataIntegrity` blobs reproduce Word's, Excel's and PowerPoint's exactly.
 ///
+/// **This function's profile is fixed.** The spin count is 100 000 and the rest of the
+/// tuple is Office 16's, with no parameter here to change any of it — no builder, no
+/// environment variable — because the one tuple Office writes is the whole point of
+/// *this* entry point, and a caller reading this signature can predict the bytes without
+/// tracing a configuration. That is a statement about this function and not about the
+/// crate: [`encrypt_ooxml_with_params`] takes an [`EncryptParams`], and this function is
+/// one line delegating to it with [`EncryptParams::default`], so "the default path and
+/// the parameterised path are the same code" is a fact rather than a claim.
+///
+/// **A `<dataIntegrity>` element is written unconditionally, and that guarantee is *not*
+/// scoped to this function.** Every agile artifact this crate produces declares one —
+/// from here or from [`encrypt_ooxml_with_params`], under every `EncryptParams` tuple —
+/// so a consumer checking [`Classification::data_integrity`] on agile output from this
+/// crate may assert [`IntegrityDeclaration::Declared`] and know the assertion cannot
+/// fail. It does not extend to [`encrypt_ooxml_standard`], whose format defines no such
+/// element.
+///
 /// The session key, block keys and spin hash are held in `secure-gate` wrappers and
 /// zeroized on drop; the password is `&str` and the input and output are plain bytes, by
 /// design. Randomness comes from the operating system's CSPRNG through the same function
@@ -440,6 +621,10 @@ pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, Error> {
 ///
 /// # Errors
 ///
+/// - [`Error::AlreadyEncrypted`], [`Error::NotAPlainPackage`],
+///   [`Error::UnknownContainer`] — `package` is not a plain OOXML package. Checked by
+///   [`check_encryptable`] before anything else, so a caller can ask the same question
+///   before it pays for a password
 /// - [`Error::BadParameters`] — `package` is over the 1 GiB this crate would
 ///   read back
 /// - [`Error::RandomSource`] — the system RNG would not produce bytes
@@ -461,21 +646,128 @@ pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, Error> {
 ///
 /// # See Also
 ///
-/// [`encrypt_ooxml_standard`] writes the Office 2007 format for a reader that cannot
-/// open agile files. Prefer this function unless that constraint applies.
+/// [`encrypt_ooxml_with_params`] is the same write path with the tuple chosen by the
+/// caller. [`encrypt_ooxml_standard`] writes the Office 2007 format for a reader that
+/// cannot open agile files. Prefer this function unless one of those constraints
+/// applies.
 #[cfg(feature = "crypto-ops")]
 pub fn encrypt_ooxml(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
-    agile_encrypt::encrypt(
-        package,
-        password,
-        encryption_info::OFFICE_SPIN_COUNT,
-        &mut rand::rngs::SysRng,
-    )
+    // One line, deliberately. The measured Office 16 tuple is `EncryptParams::default`,
+    // and delegating rather than repeating the call is what makes "the default path is
+    // the parameterised path" checkable by reading one line instead of by comparing two
+    // argument lists that could drift.
+    encrypt_ooxml_with_params(package, password, EncryptParams::default())
+}
+
+/// Encrypt an OOXML package with a password and an [`EncryptParams`] tuple of the
+/// caller's choosing.
+///
+/// [`encrypt_ooxml`] is this function with [`EncryptParams::default`] — literally: that
+/// function's body is one call to this one. Everything [`encrypt_ooxml`] documents about
+/// the container, the `secure-gate` wrapping of the key schedule, the system CSPRNG and
+/// writing nothing on error holds here unchanged, and so does the **unconditional
+/// `<dataIntegrity>` element**: it is written for every tuple, so a consumer may assert
+/// [`IntegrityDeclaration::Declared`] on agile output from this function exactly as it
+/// may on output from that one.
+///
+/// What changes is the six values in the `EncryptionInfo` document — the spin count, the
+/// hash, the two `keyBits` and the two `saltSize` — and the lengths of the blobs those
+/// imply. [`EncryptParams`] documents each field against the [MS-OFFCRYPTO] §2.3.4.10
+/// attribute it is, including why `keyBits` and `saltSize` are two fields each while the
+/// hash is one; `hashSize` and `blockSize` are absent from the type because the format
+/// derives them.
+///
+/// **Ask first if the answer is expensive.** [`EncryptParams::validate`] is this
+/// function's own parameter check, callable on its own, and [`check_encryptable`] is the
+/// same for `package`. Between them a caller learns that a call would be refused without
+/// having prompted for a password. This function runs both itself — `package` first,
+/// then the parameters, both before the first byte is drawn from the RNG.
+///
+/// A `password_salt_size` other than 16 is **written**, not refused. §2.3.4.12 fits that
+/// salt to the block length before using it as the three password blobs' IV — padding a
+/// short one with `0x36`, truncating a long one — and this writer applies that fit, as
+/// the reader always has. At 16 the fit is the identity, which is why nothing caught its
+/// absence until the salt size became a caller's choice.
+///
+/// What [`EncryptParams::validate`] accepts is therefore what this function writes,
+/// across the spec's whole `1..=65536`. **What no external reader has been measured on
+/// is a salt size that is not a multiple of 16**, which changes the pad on
+/// `encryptedVerifierHashInput`; Word is documented rejecting wrong pad bytes elsewhere
+/// in this format. That is an evidence gap, not a refusal, and it is recorded as one.
+///
+/// # Errors
+///
+/// Every error [`encrypt_ooxml`] returns, plus:
+///
+/// - [`Error::EncryptParams`] — `params` is not a tuple this crate will write. The
+///   payload names the parameter ([`EncryptParam`]), whose rule it broke
+///   ([`EncryptParamProblem`] — the format's, the cipher's, or this crate's) and one
+///   value that would have been accepted
+///
+/// # Examples
+///
+/// A tuple that is not the default, round-tripped through the ordinary decrypt path:
+///
+/// ```
+/// use msoffice_crypto::{
+///     classify, decrypt_ooxml, encrypt_ooxml_with_params, EncryptParams, HashAlgorithm,
+///     IntegrityDeclaration,
+/// };
+///
+/// let package = include_bytes!("../tests/fixtures/plain.docx");
+/// let sealed = encrypt_ooxml_with_params(
+///     package,
+///     "testpass",
+///     EncryptParams {
+///         hash: HashAlgorithm::Sha384,
+///         key_data_key_bits: 192,
+///         spin_count: 1_000,
+///         ..Default::default()
+///     },
+/// )?;
+///
+/// // The tuple reached the file — `classify` reads the numbers back out of it — and
+/// // the integrity guarantee is not tuple-dependent.
+/// let class = classify(&sealed);
+/// let key_data = class.key_data.expect("agile files declare <keyData>");
+/// assert_eq!(key_data.key_bits, Some(192));
+/// assert_eq!(key_data.hash, Some(HashAlgorithm::Sha384));
+/// assert_eq!(
+///     class.password_key.and_then(|p| p.spin_count),
+///     Some(1_000)
+/// );
+/// assert_eq!(class.data_integrity, IntegrityDeclaration::Declared);
+/// assert_eq!(decrypt_ooxml(&sealed, "testpass")?, package);
+/// # Ok::<(), msoffice_crypto::Error>(())
+/// ```
+///
+/// # See Also
+///
+/// [`encrypt_ooxml`] for the tuple Office 16 writes, which is what any given reader is
+/// most likely to have been tested against. [`EncryptParams::validate`] to ask before
+/// paying for a password.
+#[cfg(feature = "crypto-ops")]
+pub fn encrypt_ooxml_with_params(
+    package: &[u8],
+    password: &str,
+    params: EncryptParams,
+) -> Result<Vec<u8>, Error> {
+    // `params` by value, not by reference, on the `decrypt_ooxml_with_policy` precedent
+    // above: six `Copy` scalars are no larger than the pointer to them, and a caller
+    // that built the tuple inline has nothing left to borrow it from.
+    check_encryptable(package)?;
+    // `agile_encrypt::encrypt` calls `params.validate()` itself, before the payload
+    // ceiling and before the first draw. Not repeated here: two copies of one question
+    // are two places for the answer to change.
+    agile_encrypt::encrypt(package, password, params, &mut rand::rngs::SysRng)
 }
 
 /// Encrypt an OOXML package in the Office 2007 format, ECMA-376 standard encryption.
 ///
 /// AES-128-ECB under a SHA-1-derived key, for a reader that predates agile encryption.
+/// [`encrypt_ooxml_standard_with_key_bits`] writes the other two key sizes
+/// [MS-OFFCRYPTO] §2.3.4.5 defines; this function is that one with AES-128 supplied, and
+/// AES-128 is what Office 2007 itself wrote.
 ///
 /// **Prefer [`encrypt_ooxml`].** Standard encryption defines no integrity element: a
 /// modified ciphertext decrypts, silently, to a modified document, and ECB leaks equal
@@ -498,11 +790,15 @@ pub fn encrypt_ooxml(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
 ///
 /// # Errors
 ///
+/// - [`Error::AlreadyEncrypted`], [`Error::NotAPlainPackage`],
+///   [`Error::UnknownContainer`] — `package` is not a plain OOXML package. Checked by
+///   [`check_encryptable`] before anything else, so a caller can ask the same question
+///   before it pays for a password
 /// - [`Error::BadParameters`] — `package` is over the 1 GiB this crate would
 ///   read back
 /// - [`Error::RandomSource`] — the system RNG would not produce bytes
 /// - [`Error::CipherError`] — an AES-ECB step returned a blob of the wrong
-///   length (unreachable for the fixed AES-128 tuple this function writes)
+///   length (unreachable for the AES-128 key size this function writes)
 /// - [`Error::Io`] — the in-memory container could not be written
 ///
 /// # Examples
@@ -530,9 +826,111 @@ pub fn encrypt_ooxml(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
 ///
 /// [`encrypt_ooxml`] writes agile encryption with a `dataIntegrity` HMAC, which is what
 /// Office 16 writes and what this crate recommends.
+/// [`encrypt_ooxml_standard_with_key_bits`] writes AES-192 and AES-256 in this same
+/// format.
 #[cfg(feature = "crypto-ops")]
 pub fn encrypt_ooxml_standard(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
-    standard_encrypt::encrypt(package, password, &mut rand::rngs::SysRng)
+    // One line over the parameterised entry point, for the reason `encrypt_ooxml` is one
+    // line over `encrypt_ooxml_with_params`: "the default path and the parameterised
+    // path are the same code" is then a fact anyone can check by reading it, rather than
+    // two argument lists that agree today.
+    encrypt_ooxml_standard_with_key_bits(package, password, standard_encrypt::DEFAULT_KEY_BITS)
+}
+
+/// Encrypt an OOXML package in the Office 2007 format at a key size of the caller's
+/// choosing — AES-128, AES-192 or AES-256.
+///
+/// [`encrypt_ooxml_standard`] is this function with 128 supplied, and everything it
+/// documents holds here unchanged: the container, the conforming
+/// `fCryptoAPI | fAES` header, the zero-padded verifier hash blob, the `secure-gate`
+/// wrapping, the system CSPRNG, the absence of any integrity element, and writing
+/// nothing on error. What changes is two fields of the `EncryptionHeader` and the length
+/// of the derived key.
+///
+/// **`key_bits` MUST be 128, 192 or 256** — [MS-OFFCRYPTO] §2.3.4.5 says of this header's
+/// `KeySize` that "This value MUST be 0x00000080 (AES-128), 0x000000C0 (AES-192), or
+/// 0x00000100 (AES-256)", and of its `AlgID` that it MUST be the matching one of
+/// `0x0000660E` / `0x0000660F` / `0x00006610`. The two are one statement: this function
+/// writes the pair from a single table, so the mismatched header §2.3.2 forbids — and
+/// that [`decrypt_ooxml`] refuses by name — is not expressible through it. Anything else
+/// is [`Error::EncryptParams`], raised before the password is used for anything.
+///
+/// The key size is the **only** parameter this format has. `AlgIDHash` is SHA-1 by
+/// §2.3.4.5, the 50 000 iterations are fixed by §2.3.4.7 and are not a field in the file
+/// at all, and the salt and verifier lengths are fixed by §2.3.3 — so there is no tuple
+/// here and no [`EncryptParams`]: that type is the agile format's, where five of its six
+/// fields name attributes this format does not have. `src/standard_encrypt.rs`'s header
+/// carries that argument in full, including why this is a plain `u32` and not a struct.
+///
+/// # Interoperability is measured on AES-128 only
+///
+/// The four-reader acceptance gate's verdicts in `CHANGELOG.md`, and the committed
+/// byte-for-byte golden, are all AES-128 artifacts, because that is the tuple Office 2007
+/// wrote and therefore the only one a fixture can exist for. AES-192 and AES-256 are
+/// proved here against this crate's own reader and against the spec clauses above; what
+/// external readers do with them is an evidence gap, recorded as one rather than
+/// implied away. Prefer [`encrypt_ooxml_standard`] — or, better, [`encrypt_ooxml`] —
+/// unless you have a reason to write a wider key.
+///
+/// # Errors
+///
+/// Every error [`encrypt_ooxml_standard`] returns, plus:
+///
+/// - [`Error::EncryptParams`] — `key_bits` is not one of the three sizes §2.3.4.5
+///   defines. The payload names the field ([`EncryptParam::KeySize`]), whose rule it
+///   broke ([`EncryptParamProblem::OutsideSpecRange`] — the format's, always, on this
+///   path) and, in `min` and `max` alike, the nearest size that would have been accepted
+///
+/// # Examples
+///
+/// ```
+/// use msoffice_crypto::{
+///     classify, decrypt_ooxml, encrypt_ooxml_standard_with_key_bits, CipherAlgorithm,
+///     EncryptParam, EncryptParamProblem, Error, Family,
+/// };
+///
+/// let package = include_bytes!("../tests/fixtures/plain.docx");
+/// let sealed = encrypt_ooxml_standard_with_key_bits(package, "testpass", 256)?;
+///
+/// // The header declares the key size, and the round trip is this crate's own reader.
+/// let class = classify(&sealed);
+/// assert_eq!(class.family, Family::Standard);
+/// let header = class.key_data.expect("the EncryptionHeader is present");
+/// assert_eq!(header.key_bits, Some(256));
+/// assert_eq!(header.cipher, Some(CipherAlgorithm::Aes));
+/// assert_eq!(decrypt_ooxml(&sealed, "testpass")?, package);
+///
+/// // A size the format does not define is refused, and named.
+/// let err = encrypt_ooxml_standard_with_key_bits(package, "testpass", 64).unwrap_err();
+/// assert!(matches!(
+///     err,
+///     Error::EncryptParams {
+///         param: EncryptParam::KeySize,
+///         problem: EncryptParamProblem::OutsideSpecRange,
+///         got: 64,
+///         min: 128,
+///         max: 128,
+///     }
+/// ));
+/// # Ok::<(), msoffice_crypto::Error>(())
+/// ```
+///
+/// # See Also
+///
+/// [`encrypt_ooxml_with_params`] is the agile format's parameterised entry point, and
+/// the one with an integrity element.
+#[cfg(feature = "crypto-ops")]
+pub fn encrypt_ooxml_standard_with_key_bits(
+    package: &[u8],
+    password: &str,
+    key_bits: u32,
+) -> Result<Vec<u8>, Error> {
+    check_encryptable(package)?;
+    // `standard_encrypt::encrypt` judges `key_bits` itself, before the payload ceiling
+    // and before the first draw. Not repeated here, for the reason
+    // `encrypt_ooxml_with_params` does not repeat `EncryptParams::validate`: two copies
+    // of one question are two places for the answer to change.
+    standard_encrypt::encrypt(package, password, key_bits, &mut rand::rngs::SysRng)
 }
 
 /// Decrypt a Word 97-2003, Excel 97-2003 or PowerPoint 97-2003 document in place.
@@ -806,538 +1204,5 @@ pub fn decrypt_ooxml_with_policy(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_cfb_office_magic() {
-        let cfb = [0xD0u8, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0x00];
-        assert!(is_cfb_office(&cfb));
-    }
-
-    #[test]
-    fn test_is_cfb_office_not_zip() {
-        assert!(!is_cfb_office(b"PK\x03\x04something"));
-    }
-
-    #[test]
-    fn test_is_cfb_office_not_pdf() {
-        assert!(!is_cfb_office(b"%PDF-1.4"));
-    }
-
-    #[test]
-    fn test_is_cfb_office_too_short() {
-        assert!(!is_cfb_office(&[0xD0, 0xCF, 0x11]));
-    }
-
-    /// Everything past detection. Gated as a child module rather than by tagging each
-    /// test, so `cargo test --no-default-features` still runs the four `is_cfb_office`
-    /// cases above instead of finding an empty suite.
-    #[cfg(feature = "crypto-ops")]
-    mod crypto_ops {
-        use crate::*;
-
-        #[test]
-        fn test_decrypt_non_cfb_returns_error() {
-            let result = decrypt_ooxml(b"PK\x03\x04not a cfb", "password");
-            assert!(matches!(result, Err(Error::NotACfbFile)));
-        }
-
-        /// End-to-end fixture tests. The fixtures are committed in tests/fixtures/
-        /// and are NOT optional: a missing one fails the test rather than skipping,
-        /// so the suite cannot go green while exercising nothing.
-        #[test]
-        fn test_agile_fixture_decrypts_to_zip() {
-            let fixture_path = concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/agile_encrypted.docx"
-            );
-            let data = std::fs::read(fixture_path)
-                .expect("fixture must be present -- agile tests are not optional");
-            assert!(is_cfb_office(&data));
-            let plain = decrypt_ooxml(&data, "testpass").expect("Agile decrypt must succeed");
-            assert!(
-                plain.starts_with(b"PK\x03\x04"),
-                "Decrypted output must be ZIP"
-            );
-        }
-
-        #[test]
-        fn test_agile_fixture_wrong_password() {
-            let fixture_path = concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/agile_encrypted.docx"
-            );
-            let data = std::fs::read(fixture_path)
-                .expect("fixture must be present -- agile tests are not optional");
-            let result = decrypt_ooxml(&data, "wrongpass");
-            assert!(
-                matches!(result, Err(Error::WrongPassword)),
-                "Wrong password must return WrongPassword"
-            );
-        }
-
-        // ---- non-SHA-512 agile fixtures (issue #11) ---------------------------------
-
-        /// Every agile fixture that is not AES-256/SHA-512: the two GH #11 added and the
-        /// three GH #13 added, all from `tools/gen_agile_fixtures.py`.
-        const NON_SHA512_AGILE_FIXTURES: [&str; 5] = [
-            "agile_aes256_sha384.docx",
-            "agile_aes256_sha256.docx",
-            "agile_aes128_sha1.docx",
-            "agile_aes128_sha384.docx",
-            "agile_aes192_sha384.docx",
-        ];
-
-        fn fixture(name: &str) -> Vec<u8> {
-            let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
-            std::fs::read(&path)
-                .unwrap_or_else(|e| panic!("fixture {name} must be present, not optional: {e}"))
-        }
-
-        /// An agile file may name any of four hashes on `<p:encryptedKey>`, and until
-        /// issue #11 this crate ran SHA-512 for all of them: wrong `H_final`, wrong block
-        /// keys, failed verifier, and the user told their password was wrong when it was
-        /// right.
-        ///
-        /// **What these two fixtures are.** Written by msoffcrypto-tool 6.x — an
-        /// independent MIT implementation with its own reading of [MS-OFFCRYPTO] — with
-        /// its hardcoded parameter tuple replaced and nothing else changed, by
-        /// `tools/gen_agile_fixtures.py`. Each was read back to a byte-identical
-        /// `plain.docx` by msoffcrypto's own CLI before being committed, and is asserted
-        /// here against that same known plaintext rather than against a round trip.
-        ///
-        /// **What they are not.** Evidence of agreement with Microsoft's writer. No real
-        /// Office file with these tuples exists in any local corpus and none can be
-        /// produced here; the container is the same shape as the SHA-512 fixture beside
-        /// them, and that is as far as the claim goes. That fixture is **not** an Office
-        /// artefact either: `agile_encrypted.docx` was written by msoffcrypto-tool over a
-        /// python-docx `plain.docx`, like the other two — its `/EncryptionInfo` stream is
-        /// byte-identical to msoffcrypto's `toEncryptionDescriptor()` template
-        /// (`msoffcrypto/method/ecma376_agile.py:138-152`) rendered with the fixture's own
-        /// attribute values, four-space indentation and `xmlns:c` included, where Office
-        /// writes that stream unindented. **No Office-written agile fixture exists in this
-        /// corpus, for any tuple** — the whole agile suite is one third-party writer read
-        /// back by two readers.
-        ///
-        /// **Since GH #13, the four tuples that exist in the wild are all here** — the
-        /// three LibreOffice writes besides Office 16's own, `(128, SHA1)`, `(128, SHA384)`
-        /// and `(192, SHA384)`, produced by the same independent writer with its `keyBits`
-        /// replaced. The AES-128/SHA-1 one is Word 2010's default. **Real Word 16 opens
-        /// all five** (`tools/office_com_check.ps1`, recorded in CHANGELOG.md for
-        /// 2026-09-05), which is evidence that each is a file Office recognises,
-        /// separate from the evidence that this crate reads it — and it was not free:
-        /// the SHA-1 file only opened once its `dataIntegrity` blobs were zero-padded,
-        /// and the AES-192 file is the one whose 24-byte session key travels in a 32-byte
-        /// blob. The SHA-1 fixture is also the only one whose blobs carry a `hashSize`
-        /// pad at all, so it is the one that exercises `integrity::unwrap_blob`'s
-        /// truncation on a real container.
-        #[test]
-        #[cfg_attr(
-            not(fixture_corpus),
-            ignore = "needs the fixture corpus, which the published crate does not ship"
-        )]
-        fn test_non_sha512_agile_fixtures_decrypt_to_the_known_plaintext() {
-            let plain = fixture("plain.docx");
-            for name in NON_SHA512_AGILE_FIXTURES {
-                let data = fixture(name);
-                assert!(is_cfb_office(&data));
-                let crate::Decrypted {
-                    package: out,
-                    integrity: outcome,
-                } = decrypt_ooxml_with_policy(&data, "testpass", IntegrityPolicy::Require)
-                    .unwrap_or_else(|e| panic!("{name} must decrypt: {e}"));
-                assert_eq!(out, plain, "{name} must decrypt to the known plaintext");
-                // Its dataIntegrity HMAC runs on the same non-SHA-512 algorithm, so
-                // `Require` also proves `<keyData>`'s half is honoured end to end.
-                assert_eq!(outcome, IntegrityOutcome::Verified, "{name}");
-            }
-        }
-
-        /// The negative control the hash work needs: a wrong password on a non-SHA-512
-        /// file must still be `WrongPassword`. Without it the test above cannot
-        /// distinguish "the dispatch is wired" from "this tuple always errors" — which
-        /// is exactly what the pre-#11 crate did, for every password.
-        #[test]
-        #[cfg_attr(
-            not(fixture_corpus),
-            ignore = "needs the fixture corpus, which the published crate does not ship"
-        )]
-        fn test_non_sha512_agile_fixtures_still_report_a_wrong_password() {
-            for name in NON_SHA512_AGILE_FIXTURES {
-                let result = decrypt_ooxml(&fixture(name), "wrongpass");
-                assert!(
-                    matches!(result, Err(Error::WrongPassword)),
-                    "{name} with the wrong password got {:?}",
-                    result.map(|p| p.len())
-                );
-            }
-        }
-
-        /// The SHA-512 fixtures decrypt byte-identically to the same known plaintext.
-        /// The hash work touched every derivation on the password path, so "still starts
-        /// with PK" is not a strong enough regression assertion for it.
-        #[test]
-        fn test_sha512_agile_fixture_still_decrypts_byte_identically() {
-            assert_eq!(
-                decrypt_ooxml(&fixture("agile_encrypted.docx"), "testpass").unwrap(),
-                fixture("plain.docx")
-            );
-        }
-
-        /// The standard fixture decrypts to `plain.docx`, byte for byte.
-        ///
-        /// This asserted only `starts_with(b"PK\x03\x04")` until 2026-09-05, which a
-        /// wrong-but-ZIP-shaped decrypt passes: a mis-derived key that happened to leave
-        /// the first block intact, a segment boundary off by one, a truncation a few bytes
-        /// early. The plaintext to compare against was already committed, and the
-        /// expectation is external to this crate: `msoffcrypto-tool -p testpass` decrypts
-        /// `standard_encrypted.docx` to a file whose SHA-256 is
-        /// `285ce3ad5021f04436e3…`, identical to `tests/fixtures/plain.docx` (36 678
-        /// bytes), measured before this assertion was written. The ZIP-shape check stays
-        /// first so a failure is diagnosable rather than reducing to "36 678 bytes differ".
-        #[test]
-        #[cfg_attr(
-            not(fixture_corpus),
-            ignore = "needs the fixture corpus, which the published crate does not ship"
-        )]
-        fn test_standard_fixture_decrypts_to_zip() {
-            let fixture_path = concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/standard_encrypted.docx"
-            );
-            let data = std::fs::read(fixture_path)
-                .expect("fixture must be present -- standard tests are not optional");
-            assert!(is_cfb_office(&data));
-            let plain = decrypt_ooxml(&data, "testpass").expect("Standard decrypt must succeed");
-            assert!(
-                plain.starts_with(b"PK\x03\x04"),
-                "Decrypted output must be ZIP"
-            );
-            assert_eq!(
-                plain,
-                fixture("plain.docx"),
-                "the standard fixture must decrypt to plain.docx byte for byte"
-            );
-        }
-
-        #[test]
-        #[cfg_attr(
-            not(fixture_corpus),
-            ignore = "needs the fixture corpus, which the published crate does not ship"
-        )]
-        fn test_standard_fixture_wrong_password() {
-            let fixture_path = concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/standard_encrypted.docx"
-            );
-            let data = std::fs::read(fixture_path)
-                .expect("fixture must be present -- standard tests are not optional");
-            let result = decrypt_ooxml(&data, "wrongpass");
-            assert!(
-                matches!(result, Err(Error::WrongPassword)),
-                "Wrong password must return WrongPassword"
-            );
-        }
-
-        // ---- dataIntegrity (S2 / F18) ------------------------------------------------
-
-        fn agile_fixture() -> Vec<u8> {
-            std::fs::read(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/agile_encrypted.docx"
-            ))
-            .expect("fixture must be present -- agile tests are not optional")
-        }
-
-        /// Flip one bit of ciphertext inside the CFB container's `EncryptedPackage`
-        /// stream, well past the first segment so the decrypted ZIP header survives.
-        ///
-        /// Built at runtime rather than committed as a second binary fixture: a tampered
-        /// `.docx` in the tree is indistinguishable from a corrupt one, and nothing in the
-        /// file would record *which* byte was flipped or why.
-        fn tamper_agile_fixture(offset: u64) -> Vec<u8> {
-            use std::io::{Read, Seek, SeekFrom, Write};
-
-            let mut cursor = std::io::Cursor::new(agile_fixture());
-            {
-                let mut container =
-                    cfb::CompoundFile::open(&mut cursor).expect("fixture is a CFB container");
-                let mut stream = container
-                    .open_stream("/EncryptedPackage")
-                    .expect("fixture has an EncryptedPackage stream");
-
-                stream.seek(SeekFrom::Start(offset)).unwrap();
-                let mut byte = [0u8; 1];
-                stream.read_exact(&mut byte).unwrap();
-                byte[0] ^= 0x01;
-                stream.seek(SeekFrom::Start(offset)).unwrap();
-                stream.write_all(&byte).unwrap();
-                stream.flush().unwrap();
-            }
-            cursor.into_inner()
-        }
-
-        /// Delete the whole `<dataIntegrity .../>` element from the fixture's
-        /// `EncryptionInfo` XML.
-        ///
-        /// That XML is stored in the clear, so this touches no cryptographic parameter and
-        /// needs no foreign writer: what comes back is a valid agile document that simply
-        /// declares no tag. The base64 alphabet contains `/` but not `>`, so the first
-        /// `/>` after the element name is its own terminator.
-        ///
-        /// This is not "an old file" — GH #12 found no writer that omits the element and
-        /// no corpus file lacking it. It is the downgrade attack: the ~200 bytes an
-        /// attacker deletes to turn off the integrity check, and nothing else changes.
-        fn agile_fixture_without_data_integrity() -> Vec<u8> {
-            use std::io::{Read, Seek, SeekFrom, Write};
-
-            let mut cursor = std::io::Cursor::new(agile_fixture());
-            {
-                let mut container =
-                    cfb::CompoundFile::open(&mut cursor).expect("fixture is a CFB container");
-
-                let mut info = Vec::new();
-                container
-                    .open_stream("/EncryptionInfo")
-                    .unwrap()
-                    .read_to_end(&mut info)
-                    .unwrap();
-
-                let start = info
-                    .windows(14)
-                    .position(|w| w == b"<dataIntegrity")
-                    .expect("the fixture declares a dataIntegrity tag");
-                let end = start + info[start..].windows(2).position(|w| w == b"/>").unwrap() + 2;
-                info.drain(start..end);
-
-                let mut stream = container.open_stream("/EncryptionInfo").unwrap();
-                stream.set_len(0).unwrap();
-                stream.seek(SeekFrom::Start(0)).unwrap();
-                stream.write_all(&info).unwrap();
-                stream.flush().unwrap();
-            }
-            cursor.into_inner()
-        }
-
-        /// GH #12, the downgrade attack: an attacker who can modify the file deletes the
-        /// `<dataIntegrity>` element and the tamper detection goes with it — no password,
-        /// no error. The bytes here are exactly that attack, and the default policy must
-        /// refuse them.
-        ///
-        /// This test asserted the opposite until #12 (`..._reports_not_declared`, where
-        /// the loop below ran `VerifyIfPresent` as *the default* and expected `Ok`).
-        #[test]
-        fn test_agile_without_data_integrity_is_refused_by_default() {
-            let data = agile_fixture_without_data_integrity();
-
-            // The fix. `decrypt_ooxml` is the signature the consumer calls, so the fail-closed
-            // behaviour must arrive without anyone passing a policy — asserted on the
-            // specific variant, since `is_err()` would also pass if the rewrite had
-            // simply broken the container.
-            assert!(
-                matches!(
-                    decrypt_ooxml(&data, "testpass"),
-                    Err(Error::IntegrityElementMissing)
-                ),
-                "the default policy must refuse an agile file whose tag was deleted"
-            );
-            assert!(matches!(
-                decrypt_ooxml_with_policy(&data, "testpass", IntegrityPolicy::default()),
-                Err(Error::IntegrityElementMissing)
-            ));
-            // `Require` is stricter still and refuses for the same reason, with the same
-            // variant: the file is the problem, not the request.
-            assert!(matches!(
-                decrypt_ooxml_with_policy(&data, "testpass", IntegrityPolicy::Require),
-                Err(Error::IntegrityElementMissing)
-            ));
-
-            // The negative control that makes the refusals mean something: the SAME bytes
-            // decrypt under either explicit opt-out. Without this the test cannot tell
-            // "the policy is wired" from "these bytes always fail", and the opt-out #12
-            // promises could be unreachable while every assertion above still passed.
-            for policy in [IntegrityPolicy::VerifyIfPresent, IntegrityPolicy::Skip] {
-                let crate::Decrypted {
-                    package: plain,
-                    integrity: outcome,
-                } = decrypt_ooxml_with_policy(&data, "testpass", policy).unwrap_or_else(|e| {
-                    panic!("{policy:?} must still decrypt a tag-less agile file: {e}")
-                });
-                // `Skip` reports `NotDeclared`, not `Skipped`: nothing was skipped.
-                assert_eq!(outcome, IntegrityOutcome::NotDeclared, "{policy:?}");
-                assert!(plain.starts_with(b"PK\x03\x04"), "{policy:?}");
-            }
-
-            // The second control: the same bytes with the tag still in place verify, so
-            // the refusals come from the deleted element and not from the rewrite.
-            let crate::Decrypted {
-                integrity: outcome, ..
-            } = decrypt_ooxml_with_policy(&agile_fixture(), "testpass", IntegrityPolicy::Require)
-                .unwrap();
-            assert_eq!(outcome, IntegrityOutcome::Verified);
-        }
-
-        /// The unmodified fixture verifies. This is the positive half of the guard: if the
-        /// HMAC were computed over the wrong bytes, this fails rather than the tamper test.
-        #[test]
-        fn test_agile_fixture_integrity_verifies() {
-            let crate::Decrypted {
-                package: plain,
-                integrity: outcome,
-            } = decrypt_ooxml_with_policy(&agile_fixture(), "testpass", IntegrityPolicy::Require)
-                .expect("the unmodified fixture must verify under Require");
-            assert_eq!(outcome, IntegrityOutcome::Verified);
-            assert!(plain.starts_with(b"PK\x03\x04"));
-        }
-
-        /// F18 itself: before this check existed, this input decrypted to garbage and
-        /// returned `Ok`. The flipped byte sits ~20 KB in, so the ZIP magic still appears
-        /// at the front of the plaintext — "it looks like a ZIP" is not a integrity check.
-        #[test]
-        fn test_agile_tampered_ciphertext_is_refused() {
-            let tampered = tamper_agile_fixture(8 + 20_000);
-
-            for policy in [
-                IntegrityPolicy::default(),
-                IntegrityPolicy::VerifyIfPresent,
-                IntegrityPolicy::Require,
-            ] {
-                let result = decrypt_ooxml_with_policy(&tampered, "testpass", policy);
-                assert!(
-                    matches!(result, Err(Error::IntegrityCheckFailed)),
-                    "{policy:?} must refuse a tampered package, got {:?}",
-                    result.map(|d| (d.package.len(), d.integrity))
-                );
-            }
-
-            // The policy-free entry point the consumer calls refuses too. Note the variant: the
-            // element is present and the HMAC is wrong, which is `IntegrityCheckFailed`,
-            // not the `IntegrityElementMissing` of the deleted-element case.
-            assert!(matches!(
-                decrypt_ooxml(&tampered, "testpass"),
-                Err(Error::IntegrityCheckFailed)
-            ));
-        }
-
-        /// `Skip` still decrypts the same tampered file. This is what proves the policy is
-        /// wired rather than the tamper being rejected by some unrelated check: the bytes
-        /// are identical, only the policy differs.
-        #[test]
-        fn test_agile_tampered_ciphertext_decrypts_under_skip() {
-            let tampered = tamper_agile_fixture(8 + 20_000);
-            let crate::Decrypted {
-                package: plain,
-                integrity: outcome,
-            } = decrypt_ooxml_with_policy(&tampered, "testpass", IntegrityPolicy::Skip)
-                .expect("Skip must not check the HMAC");
-            assert_eq!(outcome, IntegrityOutcome::Skipped);
-            assert!(
-                plain.starts_with(b"PK\x03\x04"),
-                "the corruption is mid-package; the ZIP header still decrypts cleanly, \
-                 which is exactly why a structural sniff is not an integrity check"
-            );
-
-            // ... and it really is corrupt: the same offset in the clean fixture differs.
-            let clean = decrypt_ooxml(&agile_fixture(), "testpass").unwrap();
-            assert_ne!(clean, plain, "the flipped byte must change the plaintext");
-        }
-
-        /// A wrong password must still be reported as a wrong password, not as corruption.
-        /// The password check runs first for exactly this reason.
-        #[test]
-        fn test_agile_wrong_password_is_not_reported_as_corruption() {
-            let result =
-                decrypt_ooxml_with_policy(&agile_fixture(), "wrongpass", IntegrityPolicy::Require);
-            assert!(matches!(result, Err(Error::WrongPassword)));
-        }
-
-        /// ECMA-376 standard encryption has no integrity element by spec. Absence is
-        /// reported, not treated as a failure.
-        ///
-        /// GH #12 item 3, and the single most likely way to break something while fixing
-        /// the agile downgrade: the fail-closed default stops at formats that *define* an
-        /// element, so `IntegrityPolicy::default()` and the bare `decrypt_ooxml` are in
-        /// the loop below explicitly rather than left to be assumed equivalent to
-        /// `VerifyIfPresent`.
-        #[test]
-        #[cfg_attr(
-            not(fixture_corpus),
-            ignore = "needs the fixture corpus, which the published crate does not ship"
-        )]
-        fn test_standard_reports_integrity_absent_not_failure() {
-            let data = std::fs::read(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/standard_encrypted.docx"
-            ))
-            .expect("fixture must be present -- standard tests are not optional");
-
-            // Byte-identity against the committed plaintext, not a ZIP-shape check: see
-            // `test_standard_fixture_decrypts_to_zip` for the provenance of that claim.
-            let known = fixture("plain.docx");
-            assert_eq!(
-                decrypt_ooxml(&data, "testpass")
-                    .expect("the default must never refuse a standard file"),
-                known,
-                "the policy-free signature the consumer calls must still decrypt Office 2007 files"
-            );
-
-            for policy in [
-                IntegrityPolicy::default(),
-                IntegrityPolicy::VerifyIfPresent,
-                IntegrityPolicy::Skip,
-            ] {
-                let crate::Decrypted {
-                    package: plain,
-                    integrity: outcome,
-                } = decrypt_ooxml_with_policy(&data, "testpass", policy)
-                    .unwrap_or_else(|e| panic!("{policy:?} must decrypt a standard file: {e}"));
-                assert_eq!(outcome, IntegrityOutcome::NotApplicable);
-                assert_eq!(plain, known, "{policy:?}");
-            }
-
-            // `Require` is the caller demanding a guarantee the format cannot give, so it
-            // is refused -- with a distinct error, never `IntegrityCheckFailed`.
-            assert!(matches!(
-                decrypt_ooxml_with_policy(&data, "testpass", IntegrityPolicy::Require),
-                Err(Error::IntegrityUnavailable(_))
-            ));
-        }
-
-        /// The no-regression half of GH #12: the policy-free signature still behaves
-        /// exactly as it did for well-formed files, so an existing caller inherits the
-        /// fail-closed default without a line changing on its side. A security fix that
-        /// also broke every good file would not be one.
-        #[test]
-        #[cfg_attr(
-            not(fixture_corpus),
-            ignore = "needs the fixture corpus, which the published crate does not ship"
-        )]
-        fn test_default_policy_requires_a_tag_and_still_decrypts_good_files() {
-            assert_eq!(
-                IntegrityPolicy::default(),
-                IntegrityPolicy::RequireWhereDefined
-            );
-
-            // Every committed agile fixture — all three carry the element — decrypts
-            // unchanged through the bare signature, and reports `Verified` rather than
-            // merely succeeding.
-            for name in [
-                "agile_encrypted.docx",
-                "agile_aes256_sha384.docx",
-                "agile_aes256_sha256.docx",
-            ] {
-                let data = fixture(name);
-                let plain = decrypt_ooxml(&data, "testpass")
-                    .unwrap_or_else(|e| panic!("{name} must decrypt under the default: {e}"));
-                let crate::Decrypted {
-                    package: with_policy,
-                    integrity: outcome,
-                } = decrypt_ooxml_with_policy(&data, "testpass", IntegrityPolicy::Require).unwrap();
-                assert_eq!(plain, with_policy, "{name}");
-                assert_eq!(plain, fixture("plain.docx"), "{name}");
-                assert_eq!(outcome, IntegrityOutcome::Verified, "{name}");
-            }
-        }
-    }
-}
+#[path = "lib_tests.rs"]
+mod tests;

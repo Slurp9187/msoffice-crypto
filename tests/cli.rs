@@ -1529,6 +1529,10 @@ fn encrypting_an_already_encrypted_file_exits_five_and_writes_nothing() {
     // here the remedy is real, because `decrypt` of this file works in every cli build
     // and yields a package `encrypt` accepts. Without this the other test could not
     // tell "the clause is chosen per document kind" from "the clause was deleted".
+    //
+    // The clause is now chosen in `describe(Error::AlreadyEncrypted { document, .. })`
+    // from the kind the library's guard put on the error, rather than from a
+    // `Classification` the CLI held. Same sentence, same pairing, one source.
     assert!(err.contains("decrypt it first"), "{err}");
     assert!(!s.join("nope.docx").exists());
     assert_eq!(entries(&s), vec!["pw.txt".to_string()], "no output leaked");
@@ -1609,6 +1613,11 @@ fn encrypt_classifies_before_it_reads_a_password() {
 
     // (a) A refused file (a bare CFB) must be refused before its password source is
     // touched -- exit 5, not the EX_IO a missing password file would give.
+    //
+    // This is the load-bearing ordering claim for the whole guard. `check_encryptable`
+    // is a library function now, and the reason it is public at all is so a caller can
+    // ask it in exactly this position: before the cost of obtaining a password, which
+    // on an interactive path cannot be taken back once paid.
     let out = run(&[
         "encrypt",
         fixture("word97_plain.doc").to_str().expect("utf-8 path"),

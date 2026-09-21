@@ -389,6 +389,69 @@ fn clearing_f_aes_turns_the_standard_fixture_into_rc4_cryptoapi() {
     );
 }
 
+/// `classify` reports **all three** of [MS-OFFCRYPTO] §2.3.2's AES `AlgID`s —
+/// `0x0000660E`, `0x0000660F`, `0x00006610` — and the `KeySize` beside each, and it
+/// always did.
+///
+/// Written because the claim was in dispute while the decrypt path was being taught to
+/// read AES-192 and AES-256: `classify_standard` matches all three onto
+/// `CipherAlgorithm::Aes` and passes `KeySize` straight through, so no change was needed
+/// there and none was made. This is that check, run rather than asserted in prose.
+///
+/// It also records the asymmetry the decrypt work closed. Before 2026-09-20 `classify`
+/// reported an AES-256 standard file as supported AES-256 and `decrypt_ooxml` then
+/// refused it by name — the detector and the decryptor disagreeing about the same bytes,
+/// which is the failure the `fAES`-before-`AlgID` precedence exists to prevent.
+#[test]
+#[cfg_attr(
+    not(fixture_corpus),
+    ignore = "needs the fixture corpus, which the published crate does not ship"
+)]
+fn classify_reports_all_three_aes_alg_ids_and_their_key_sizes() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    // stream[8..12] = EncryptionHeaderSize, stream[12..] = EncryptionHeader:
+    // Flags at 12, SizeExtra at 16, AlgID at 20, AlgIDHash at 24, KeySize at 28.
+    for (alg_id, key_bits) in [
+        (0x0000_660Eu32, 128u32),
+        (0x0000_660F, 192),
+        (0x0000_6610, 256),
+    ] {
+        let mut cursor = std::io::Cursor::new(fixture("standard_encrypted.docx"));
+        {
+            let mut container = cfb::CompoundFile::open(&mut cursor).expect("fixture is a CFB");
+            let mut info = Vec::new();
+            container
+                .open_stream("/EncryptionInfo")
+                .unwrap()
+                .read_to_end(&mut info)
+                .unwrap();
+            info[20..24].copy_from_slice(&alg_id.to_le_bytes());
+            info[28..32].copy_from_slice(&key_bits.to_le_bytes());
+
+            let mut stream = container.open_stream("/EncryptionInfo").unwrap();
+            stream.seek(SeekFrom::Start(0)).unwrap();
+            stream.write_all(&info).unwrap();
+            stream.flush().unwrap();
+        }
+        let class = classify(&cursor.into_inner());
+
+        assert_eq!(class.family, Family::Standard, "AlgID {alg_id:#010x}");
+        let params = class.key_data.expect("the EncryptionHeader is present");
+        assert_eq!(
+            params.cipher,
+            Some(CipherAlgorithm::Aes),
+            "AlgID {alg_id:#010x}"
+        );
+        assert_eq!(
+            params.key_bits,
+            Some(key_bits),
+            "AlgID {alg_id:#010x}: KeySize is reported as the file declares it"
+        );
+        assert!(class.is_supported(), "AlgID {alg_id:#010x}");
+    }
+}
+
 // ---- it must never panic -------------------------------------------------------------
 
 /// Every prefix of every fixture. This is the fuzz-shaped half of the suite: a truncated

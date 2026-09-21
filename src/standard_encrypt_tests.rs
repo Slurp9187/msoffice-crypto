@@ -14,12 +14,25 @@ use std::io::Read;
 
 const PASSWORD: &str = "testpass";
 
+/// The three key sizes [MS-OFFCRYPTO] §2.3.4.5 defines for this header, with the `AlgID`
+/// §2.3.2 pairs with each — **typed literally from the specification**, never read back
+/// from `standard_encrypt::AES_ROWS`. A table computed from the implementation proves
+/// only that the implementation agrees with itself; these are the numbers the PDF gives,
+/// so a table that changed would fail here rather than move silently.
+const SPEC_ROWS: [(u32, u32); 3] = [(128, 0x0000_660E), (192, 0x0000_660F), (256, 0x0000_6610)];
+
 /// The seed every golden below is measured under. All-zero, so it is obviously arbitrary
 /// and obviously not chosen to make an assertion pass.
 const SEED: [u8; 32] = [0u8; 32];
 
 fn seeded() -> chacha20::ChaCha12Rng {
     chacha20::ChaCha12Rng::from_seed(SEED)
+}
+
+/// The key size every test that is not about the parameter uses — the default, so that
+/// those tests keep measuring the path `encrypt_ooxml_standard` takes.
+fn aes128() -> AesKeySize {
+    AesKeySize::new(DEFAULT_KEY_BITS).expect("the default must be a size this writer accepts")
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -58,7 +71,7 @@ fn stream_of(data: &[u8], path: &str) -> Vec<u8> {
 /// the commit what moved and why.
 #[test]
 fn the_material_is_byte_exact_under_a_seeded_rng() {
-    let m = generate(PASSWORD, &mut seeded()).unwrap();
+    let m = generate(PASSWORD, aes128(), &mut seeded()).unwrap();
     // One tuple, so a failure reports every value at once rather than the first.
     assert_eq!(
         (
@@ -92,8 +105,13 @@ fn the_material_is_byte_exact_under_a_seeded_rng() {
 /// `verify_password` that accepted everything.
 #[test]
 fn the_generated_encryptor_verifies_through_the_real_path() {
-    let m = generate(PASSWORD, &mut seeded()).unwrap();
-    let stream = write_encryption_info(&m.salt, &m.encrypted_verifier, &m.encrypted_verifier_hash);
+    let m = generate(PASSWORD, aes128(), &mut seeded()).unwrap();
+    let stream = write_encryption_info(
+        m.key_size,
+        &m.salt,
+        &m.encrypted_verifier,
+        &m.encrypted_verifier_hash,
+    );
 
     let params = standard::parse_encryption_info(&stream[8..])
         .expect("the writer's output must parse -- that is the writer's contract");
@@ -128,14 +146,14 @@ fn the_generated_encryptor_verifies_through_the_real_path() {
 /// catches it.
 #[test]
 fn the_verifier_hash_blob_is_sha1_of_the_verifier_zero_padded_to_the_whole_blob() {
-    let m = generate(PASSWORD, &mut seeded()).unwrap();
+    let m = generate(PASSWORD, aes128(), &mut seeded()).unwrap();
     let verifier = m
         .key
-        .with_secret(|k| standard::aes128_ecb_decrypt(k, &m.encrypted_verifier))
+        .with_secret(|k| standard::aes_ecb_decrypt(k, &m.encrypted_verifier))
         .unwrap();
     let hash_blob = m
         .key
-        .with_secret(|k| standard::aes128_ecb_decrypt(k, &m.encrypted_verifier_hash))
+        .with_secret(|k| standard::aes_ecb_decrypt(k, &m.encrypted_verifier_hash))
         .unwrap();
 
     let mut expected = Sha1::digest(&verifier).to_vec();
@@ -170,8 +188,13 @@ fn the_verifier_hash_blob_is_sha1_of_the_verifier_zero_padded_to_the_whole_blob(
     ignore = "needs the fixture corpus, which the published crate does not ship"
 )]
 fn the_encryption_info_is_the_fixtures_layout_with_the_spec_values_where_it_deviates() {
-    let m = generate(PASSWORD, &mut seeded()).unwrap();
-    let ours = write_encryption_info(&m.salt, &m.encrypted_verifier, &m.encrypted_verifier_hash);
+    let m = generate(PASSWORD, aes128(), &mut seeded()).unwrap();
+    let ours = write_encryption_info(
+        m.key_size,
+        &m.salt,
+        &m.encrypted_verifier,
+        &m.encrypted_verifier_hash,
+    );
 
     let mut expected = stream_of(&fixture("standard_encrypted.docx"), "/EncryptionInfo");
     assert_eq!(expected.len(), 224, "the fixture's stream length");
@@ -224,7 +247,7 @@ fn the_encrypted_package_is_the_length_prefix_and_a_block_padded_body() {
         // Chunk-independence: one ECB pass over the zero-padded whole is the same bytes.
         let mut padded = plain.clone();
         padded.resize(len.div_ceil(16) * 16, 0);
-        let whole = key.with_secret(|k| aes128_ecb_encrypt(k, &padded)).unwrap();
+        let whole = key.with_secret(|k| aes_ecb_encrypt(k, &padded)).unwrap();
         assert_eq!(&stream[8..], &whole[..], "len={len}");
     }
 }
@@ -335,9 +358,15 @@ fn encrypt_ooxml_standard_output_classifies_as_office_2007_aes_128() {
 
 /// The degenerate package: an 8-byte `EncryptedPackage` of nothing but its prefix, and
 /// it round-trips to an empty `Vec`.
+///
+/// Driven through the seeded core rather than [`crate::encrypt_ooxml_standard`], because
+/// the public entry point now refuses an input that is not a plain package and `&[]` is
+/// not one — that refusal is `bytes_that_are_no_container_are_refused` in `lib.rs`. What
+/// is checked here is the writer's handling of a degenerate payload, which is a separate
+/// fact from whether the guard lets one through.
 #[test]
 fn an_empty_package_round_trips() {
-    let container = crate::encrypt_ooxml_standard(&[], PASSWORD).unwrap();
+    let container = encrypt(&[], PASSWORD, DEFAULT_KEY_BITS, &mut seeded()).unwrap();
     assert_eq!(stream_of(&container, "/EncryptedPackage").len(), 8);
     let crate::Decrypted {
         package: back,
@@ -361,7 +390,7 @@ fn an_empty_package_round_trips() {
 fn the_whole_container_is_byte_exact_under_a_seeded_rng() {
     use sha2::{Digest as _, Sha256};
     let plain = plain_docx();
-    let container = encrypt(&plain, PASSWORD, &mut seeded()).unwrap();
+    let container = encrypt(&plain, PASSWORD, DEFAULT_KEY_BITS, &mut seeded()).unwrap();
     let digest = hex(&Sha256::digest(&container));
     assert_eq!(
         (container.len(), digest.as_str()),
@@ -370,7 +399,7 @@ fn the_whole_container_is_byte_exact_under_a_seeded_rng() {
     );
 
     // And the same seed reproduces it exactly; a golden that only held once is a fluke.
-    let again = encrypt(&plain, PASSWORD, &mut seeded()).unwrap();
+    let again = encrypt(&plain, PASSWORD, DEFAULT_KEY_BITS, &mut seeded()).unwrap();
     assert_eq!(container, again);
 }
 
@@ -383,14 +412,19 @@ const GOLDEN_SHA256: &str = "491298746ce1e46aed2c98b7bc9c061d97ccedf578062a901aa
 /// would hand every document written with one password the same salt and key.
 #[test]
 fn the_rng_decides_the_output_and_the_seed_decides_the_rng() {
-    let a = generate(PASSWORD, &mut seeded()).unwrap();
-    let b = generate(PASSWORD, &mut seeded()).unwrap();
+    let a = generate(PASSWORD, aes128(), &mut seeded()).unwrap();
+    let b = generate(PASSWORD, aes128(), &mut seeded()).unwrap();
     assert_eq!(a.salt, b.salt);
     assert_eq!(a.encrypted_verifier, b.encrypted_verifier);
     assert_eq!(a.encrypted_verifier_hash, b.encrypted_verifier_hash);
     assert!(a.key.with_secret(|x| b.key.with_secret(|y| x == y)));
 
-    let c = generate(PASSWORD, &mut chacha20::ChaCha12Rng::from_seed([1u8; 32])).unwrap();
+    let c = generate(
+        PASSWORD,
+        aes128(),
+        &mut chacha20::ChaCha12Rng::from_seed([1u8; 32]),
+    )
+    .unwrap();
     assert_ne!(a.salt, c.salt);
     assert_ne!(a.encrypted_verifier, c.encrypted_verifier);
     assert_ne!(a.encrypted_verifier_hash, c.encrypted_verifier_hash);
@@ -430,13 +464,35 @@ fn an_independent_implementation_reads_what_encrypt_ooxml_standard_wrote() {
 /// A package over the ceiling is refused before any key is derived or byte encrypted.
 /// The allocation is lazy on every platform this runs on, so the test costs an
 /// inequality, not a gigabyte.
+///
+/// The input must be a **plain ZIP** to reach the ceiling at all: the shape guard runs
+/// first, so a gigabyte of zeros is now `UnknownContainer` rather than a size refusal.
+/// That ordering has its own test, `the_shape_guard_runs_before_the_payload_ceiling`,
+/// and this one is its negative control.
 #[test]
 fn a_package_over_the_ceiling_is_refused_before_any_work() {
-    let big = vec![0u8; crate::limits::PAYLOAD_CEILING + 1];
+    // `vec![0u8; N]` is `alloc_zeroed`, so these are lazy zero pages. Writing the magic
+    // in place touches one of them; `resize` from a 4-byte `Vec` would memset a
+    // gigabyte and make the comment above false.
+    let mut big = vec![0u8; crate::limits::PAYLOAD_CEILING + 1];
+    big[..4].copy_from_slice(b"PK\x03\x04");
     let got = crate::encrypt_ooxml_standard(&big, PASSWORD).map(|c| c.len());
     assert!(
         matches!(&got, Err(Error::BadParameters(msg)) if msg.contains("PAYLOAD_CEILING")),
         "over the ceiling must be refused by name, got: {got:?}"
+    );
+}
+
+/// The shape guard runs before the payload ceiling, and the order is the claim. The
+/// agile mirror of this test carries the full argument; reverse the two checks in
+/// `crate::encrypt_ooxml_standard` and this fails with the ceiling message.
+#[test]
+fn the_shape_guard_runs_before_the_payload_ceiling() {
+    let big = vec![0u8; crate::limits::PAYLOAD_CEILING + 1];
+    let got = crate::encrypt_ooxml_standard(&big, PASSWORD).map(|c| c.len());
+    assert!(
+        matches!(&got, Err(Error::UnknownContainer)),
+        "oversized junk is not a package first and oversized second, got: {got:?}"
     );
 }
 
@@ -478,4 +534,292 @@ fn encrypt_ooxml_standard_writes_the_artifact_the_external_readers_are_run_on() 
         path.display(),
         written.len()
     );
+}
+
+/// **The default has not moved, and this is the assertion that says so by name.**
+///
+/// The golden above is byte-for-byte evidence for one key size; it would still hold if
+/// `encrypt_ooxml_standard` stopped going through the parameterised entry point. This
+/// pins the two facts that make the golden mean what it claims: the default key size is
+/// AES-128, and the public no-parameter function writes exactly what the parameterised
+/// one writes when handed it.
+#[test]
+fn the_default_key_size_is_aes_128_and_both_entry_points_write_it() {
+    assert_eq!(
+        DEFAULT_KEY_BITS, 128,
+        "Office 2007 wrote AES-128; every acceptance-gate verdict and the committed \
+         golden were measured on it"
+    );
+    assert_eq!(
+        DEFAULT_KEY_BITS, SPEC_ROWS[0].0,
+        "the default is the first row of [MS-OFFCRYPTO] 2.3.4.5's table"
+    );
+
+    // Not a byte comparison of two containers -- each call draws its own salt -- but a
+    // comparison of what the two paths declare, which is what the parameter decides.
+    let plain = plain_docx();
+    let default = crate::classify(&crate::encrypt_ooxml_standard(&plain, PASSWORD).unwrap());
+    let explicit = crate::classify(
+        &crate::encrypt_ooxml_standard_with_key_bits(&plain, PASSWORD, DEFAULT_KEY_BITS).unwrap(),
+    );
+    assert_eq!(default.key_data, explicit.key_data);
+    assert_eq!(default.family, explicit.family);
+    assert_eq!(default.version, explicit.version);
+}
+
+/// **All three key sizes round-trip through the public read path, each with its own
+/// wrong-password control.**
+///
+/// `decrypt_ooxml_with_policy` under the fail-closed default policy rather than a direct
+/// call to `standard::decrypt`, so what is proved is the path a consumer takes: the
+/// container, the header parse, the KDF at the declared key length, the verifier, the
+/// package. The control is what makes it evidence: without it the test would pass on a
+/// `verify_password` that accepted anything, and on a reader that ignored `KeySize` and
+/// derived 16 bytes whatever the file said.
+#[test]
+fn every_key_size_round_trips_and_a_wrong_password_is_still_refused() {
+    let plain = plain_docx();
+    for (bits, _) in SPEC_ROWS {
+        let container = crate::encrypt_ooxml_standard_with_key_bits(&plain, PASSWORD, bits)
+            .unwrap_or_else(|e| panic!("AES-{bits} must be writable: {e}"));
+        assert!(crate::is_cfb_office(&container));
+
+        let crate::Decrypted {
+            package: back,
+            integrity: outcome,
+        } = crate::decrypt_ooxml_with_policy(
+            &container,
+            PASSWORD,
+            crate::IntegrityPolicy::default(),
+        )
+        .unwrap_or_else(|e| panic!("what this crate wrote at AES-{bits}, it must read: {e}"));
+        assert_eq!(outcome, crate::IntegrityOutcome::NotApplicable);
+        assert_eq!(back, plain, "AES-{bits} must survive the round trip");
+
+        // The control, per key size.
+        assert!(
+            matches!(
+                crate::decrypt_ooxml(&container, "not the password"),
+                Err(Error::WrongPassword)
+            ),
+            "a wrong password must be refused at AES-{bits}, and by name"
+        );
+    }
+}
+
+/// `classify` reads the `AlgID` and the `KeySize` back out of each artifact, and they are
+/// the pair [MS-OFFCRYPTO] §2.3.2 requires.
+///
+/// Two readings, because `classify` reports only one of the two fields: `key_bits` comes
+/// from the classifier, and the `AlgID` is read out of the `\EncryptionInfo` stream at
+/// the offset §2.3.4.5's layout puts it. The expectations are [`SPEC_ROWS`], typed from
+/// the specification rather than from this module's own table — the point is that the
+/// bytes on disk match the document, not that two of our constants match each other.
+#[test]
+fn classify_reads_back_the_key_size_and_the_alg_id_of_every_artifact() {
+    let plain = plain_docx();
+    for (bits, alg_id) in SPEC_ROWS {
+        let container =
+            crate::encrypt_ooxml_standard_with_key_bits(&plain, PASSWORD, bits).unwrap();
+
+        let c = crate::classify(&container);
+        assert_eq!(c.family, crate::Family::Standard, "AES-{bits}");
+        assert_eq!(c.version, Some(STANDARD_VERSION));
+        assert_eq!(c.data_integrity, crate::IntegrityDeclaration::NotApplicable);
+        assert_eq!(
+            c.key_data.expect("the EncryptionHeader is present"),
+            crate::AlgorithmParams {
+                cipher: Some(crate::CipherAlgorithm::Aes),
+                // SHA-1 and the 16-byte salt do not move with the key size: 2.3.4.5
+                // fixes AlgIDHash and 2.3.3 fixes SaltSize.
+                hash: Some(crate::HashAlgorithm::Sha1),
+                key_bits: Some(bits),
+                block_size: None,
+                salt_size: Some(16),
+                spin_count: None,
+            },
+            "classify must report AES-{bits}"
+        );
+
+        // The stream itself. Offsets from 2.3.4.5: vMajor(2) vMinor(2) Flags-copy(4)
+        // EncryptionHeaderSize(4), then the header -- Flags(4) SizeExtra(4) AlgID(4)
+        // AlgIDHash(4) KeySize(4) -- so AlgID is at 20 and KeySize at 28.
+        let stream = stream_of(&container, "/EncryptionInfo");
+        let u32_at = |at: usize| u32::from_le_bytes(stream[at..at + 4].try_into().unwrap());
+        assert_eq!(u32_at(20), alg_id, "AlgID for AES-{bits}");
+        assert_eq!(u32_at(28), bits, "KeySize for AES-{bits}");
+        assert_eq!(
+            u32_at(12),
+            FLAGS,
+            "fCryptoAPI | fAES, whatever the key size"
+        );
+        assert_eq!(
+            u32_at(8),
+            140,
+            "EncryptionHeaderSize does not move with the key"
+        );
+        assert_eq!(stream.len(), 224, "nor does the stream's length");
+    }
+}
+
+/// The writer's output at every key size goes through `standard`'s own reader, and the
+/// key it declares is the key it was encrypted under — `KeySize / 8` bytes, cut from the
+/// same ladder.
+///
+/// The failure this catches is the quiet one: a writer that declared AES-256 and
+/// encrypted under a 16-byte key would still round-trip through *this crate* if the
+/// reader made the same mistake. Here the length is asserted against the arithmetic
+/// §2.3.4.7 states, not against what either side chose.
+#[test]
+fn the_declared_key_size_is_the_key_length_the_verifier_was_built_under() {
+    for (bits, _) in SPEC_ROWS {
+        let key_size = AesKeySize::new(bits).unwrap();
+        let m = generate(PASSWORD, key_size, &mut seeded()).unwrap();
+        assert_eq!(m.key.with_secret(|k| k.len()), (bits / 8) as usize);
+
+        let stream = write_encryption_info(
+            m.key_size,
+            &m.salt,
+            &m.encrypted_verifier,
+            &m.encrypted_verifier_hash,
+        );
+        let params = standard::parse_encryption_info(&stream[8..])
+            .unwrap_or_else(|e| panic!("AES-{bits}: the writer's output must parse: {e}"));
+        assert_eq!(params.key_size_bytes, (bits / 8) as usize);
+
+        let key = derive_standard_key(PASSWORD, params.salt, params.key_size_bytes).unwrap();
+        standard::verify_password(&key, &params)
+            .unwrap_or_else(|e| panic!("AES-{bits}: the password must verify: {e}"));
+
+        // The control: the same file read at the wrong key length must not verify --
+        // which is why declaring the size correctly matters.
+        if params.key_size_bytes != AES128_KEY_LEN {
+            let short = derive_standard_key(PASSWORD, params.salt, AES128_KEY_LEN).unwrap();
+            assert!(
+                matches!(
+                    standard::verify_password(&short, &params),
+                    Err(Error::WrongPassword)
+                ),
+                "AES-{bits} must not verify under a 128-bit key"
+            );
+        }
+    }
+}
+
+/// **The guard.** A key size [MS-OFFCRYPTO] §2.3.4.5 does not define is refused by name,
+/// with both payload halves asserted and the nearest accepted size in `min` and `max`.
+///
+/// Delete the `Err` arm of `AesKeySize::new` — fall through to
+/// `Self { bits: key_bits, alg_id: ALG_ID_AES_128 }` for an unrecognised size — and this
+/// test fails on the first case, an `Ok` arriving where an error was demanded. The
+/// failure that was actually observed is recorded in the report for this change.
+///
+/// The cases cover each way a value can be wrong: zero, below the smallest size, a legal
+/// RC4 `KeySize` under §2.3.2's other row, values between two AES sizes, above them all,
+/// and the `u32` ceiling. None of them is `UnsupportedByCipher`: on this path §2.3.4.5
+/// enumerates AES's own three sizes, so the format refuses first and there is no value it
+/// permits that AES cannot key. `AesKeySize::new` carries that argument.
+#[test]
+fn a_key_size_the_format_does_not_define_is_refused_before_the_password() {
+    // (asked for, the nearest accepted size the refusal must name)
+    for (got, nearest) in [
+        (0u32, 128u32),
+        (7, 128),
+        (8, 128),
+        (64, 128),
+        (127, 128),
+        (129, 128),
+        // 160 is 32 from both 128 and 192: the tie resolves upwards, to the stronger key.
+        (160, 192),
+        (200, 192),
+        (255, 256),
+        (257, 256),
+        (320, 256),
+        (512, 256),
+        (u32::MAX, 256),
+    ] {
+        let err = crate::encrypt_ooxml_standard_with_key_bits(&plain_docx(), PASSWORD, got)
+            .expect_err("only 128, 192 and 256 are writable");
+        assert!(
+            matches!(
+                err,
+                Error::EncryptParams {
+                    param: crate::EncryptParam::KeySize,
+                    problem: crate::EncryptParamProblem::OutsideSpecRange,
+                    got: g,
+                    min,
+                    max,
+                } if g == got && min == nearest && max == nearest
+            ),
+            "{got} must be (KeySize, OutsideSpecRange) naming {nearest}, got: {err:?}"
+        );
+
+        // The rendered sentence, which a consumer with no match arm forwards: it must
+        // name the field of the file being written, not the agile attribute.
+        let text = err.to_string();
+        assert!(
+            text.contains("EncryptionHeader.KeySize") && !text.contains("keyBits"),
+            "the message must name this format's field: {text}"
+        );
+    }
+
+    // The negative control: the three the format does define are accepted, so the loop
+    // above cannot be passing on a writer that refuses everything.
+    for (bits, _) in SPEC_ROWS {
+        AesKeySize::new(bits).unwrap_or_else(|e| panic!("AES-{bits} must be accepted: {e}"));
+    }
+}
+
+/// The refusal costs no randomness and no key derivation — it happens before the first
+/// draw, which is the `agile_encrypt::encrypt` ordering and the reason a caller can ask
+/// the question cheaply.
+///
+/// Proved by consuming the RNG afterwards: if `encrypt` had drawn from it, the next 16
+/// bytes would differ from a fresh generator's first 16.
+#[test]
+fn a_refused_key_size_consumes_no_rng_draw() {
+    let mut used = seeded();
+    let err = encrypt(&plain_docx(), PASSWORD, 200, &mut used)
+        .expect_err("200 bits is not a key size this format defines");
+    assert!(matches!(err, Error::EncryptParams { .. }));
+
+    let (mut after, mut fresh_bytes) = ([0u8; 16], [0u8; 16]);
+    fill(&mut used, &mut after).unwrap();
+    fill(&mut seeded(), &mut fresh_bytes).unwrap();
+    assert_eq!(
+        after, fresh_bytes,
+        "the generator must be untouched: the refusal precedes the first draw"
+    );
+}
+
+/// The two other key sizes, written where the owner can double-click them, beside the
+/// AES-128 artifact.
+///
+/// Word is the reference for this format and the only reader that can settle whether a
+/// standard-encryption file at AES-192 or AES-256 opens; `cargo test` cannot drive it, so
+/// this writes the files and prints their digests and the verdict is collected by hand.
+/// **No assertion about an external reader is made here** — that would be a claim this
+/// test cannot support.
+#[test]
+fn the_other_two_key_sizes_are_written_where_the_owner_can_open_them() {
+    let dir = std::env::var_os("MSOFFICE_CRYPTO_ARTIFACT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    for (bits, _) in SPEC_ROWS.iter().skip(1) {
+        let path = dir.join(format!(
+            "msoffice_crypto_encrypt_ooxml_standard_aes{bits}.docx"
+        ));
+        std::fs::write(
+            &path,
+            crate::encrypt_ooxml_standard_with_key_bits(&plain_docx(), PASSWORD, *bits).unwrap(),
+        )
+        .unwrap();
+        let written = std::fs::read(&path).unwrap();
+        let digest = hex(&crate::hash::HashAlgorithm::Sha256.digest(&written));
+        println!(
+            "standard AES-{bits} artifact written to {} ({} bytes, SHA-256 {digest})",
+            path.display(),
+            written.len()
+        );
+    }
 }

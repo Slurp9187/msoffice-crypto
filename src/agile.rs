@@ -42,7 +42,9 @@ use crate::hash::{fit_iv, HashAlgorithm};
 use crate::integrity::{self, IntegrityMaterial, IntegrityOutcome, IntegrityPolicy};
 use crate::limits;
 use crate::segments::Segments;
-use crate::sensitive::{DerivedKey, PasswordDigest, SessionKey, VerifierPlaintext};
+use crate::sensitive::{
+    utf16le_password, DerivedKey, PasswordDigest, SessionKey, VerifierPlaintext,
+};
 use aes::{Aes128, Aes192, Aes256};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use cbc::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
@@ -461,8 +463,34 @@ pub(crate) fn verify_password(params: &AgileParams, h_final: &PasswordDigest) ->
     // Cargo.toml. The channel here is much weaker (both sides derive from the password
     // being guessed), but two comparisons that look identical should not have been
     // reasoned about differently.
+    // **Over `saltSize` bytes, not the whole decrypted blob**, and the difference is only
+    // visible when `saltSize` is not a multiple of `blockSize`.
+    //
+    // [MS-OFFCRYPTO] §2.3.4.13, `encryptedVerifierHashValue` step 1: "Obtain the hash
+    // value of the random array of bytes generated in step 1 of the steps for
+    // encryptedVerifierHashInput" — and that step 1 is "Generate a random array of bytes
+    // with the number of bytes used specified by the saltSize attribute". The `0x00`
+    // padding to a block multiple arrives in step 3, at *encryption* time, after the hash
+    // has been taken. So the hashed array is `saltSize` bytes and the blob it travels in
+    // is `roundUp(saltSize, blockSize)`.
+    //
+    // This digested the whole blob until 2026-09-21, and `agile_encrypt` hashed the
+    // padded buffer to match. The two agreed with each other and disagreed with the
+    // format, so every round trip in this crate passed and every file it wrote at a
+    // non-block-multiple `saltSize` was refused by real Word 16 with `0x800A1520` — the
+    // wrong-password code, on a correct password. Found by running the artifact set past
+    // Word rather than by any test here, which is the argument for that gate.
+    //
+    // The read half was the shipped defect: a *conforming* file from another writer with
+    // `saltSize = 8` would have been refused as a wrong password. That is the same class
+    // as the `spinCount` ceiling — an owner locked out of their own document by our
+    // choice, not the format's.
+    //
+    // The slice is in range because `input_len` above is `roundUp(salt_len, block_size)`,
+    // which is `>= salt_len`, and the blob's length was checked equal to it.
+    let salt_len = params.password_salt_size as usize;
     let matches = verifier_input.with_secret(|vi| {
-        let computed = hash.digest(vi);
+        let computed = hash.digest(&vi[..salt_len]);
         verifier_hash.with_secret(|vh| computed.as_slice().ct_eq(&vh[..digest_len]))
     });
     if !matches {
@@ -583,13 +611,15 @@ pub(crate) fn spin_hash(
     salt: &[u8],
     spin_count: u32,
 ) -> PasswordDigest {
-    let password_bytes: Vec<u8> = password
-        .encode_utf16()
-        .flat_map(|c| c.to_le_bytes())
-        .collect();
-
     // H_0 = H(salt + password_utf16le)
-    let mut h = hash.digest_two(salt, &password_bytes);
+    //
+    // The UTF-16LE re-encoding is wrapped and scoped to this statement: it is the
+    // password verbatim, it is used exactly once, and the block that held it is wiped
+    // before the spin loop starts rather than at the end of the function. Built with
+    // `sensitive::utf16le_password` and not `collect()` — see that function for the
+    // reallocation the collect abandoned, and `docs/design/heap-residue.md` for why an
+    // abandoned block is unreachable to every wrapper in the crate.
+    let mut h = utf16le_password(password).with_secret(|pw| hash.digest_two(salt, pw));
 
     // H_i = H(LE32(i) + H_{i-1})  — counter PREPENDED
     for i in 0u32..spin_count {
@@ -621,7 +651,7 @@ pub(crate) fn spin_hash(
 /// `Invalid key size (160)` (`ecma376_agile.py:201`); LibreOffice truncates with no guard
 /// and admits the gap in its own comment (`AgileEngine.cxx:277-279, 499`); office-crypto
 /// truncates but never reaches the case, refusing every non-SHA-512 agile file outright
-/// (`src/lib.rs:29`). In Rust the naive form is worse than any of those — `digest[..32]`
+/// (`src/lib.rs:29`). In Rust the naive form was worse than any of those — `digest[..32]`
 /// on a 20-byte digest is a panic, i.e. a vulnerability under CLAUDE.md's first design
 /// value — so the combination is refused instead, at parse time, matching this crate's
 /// own precedent for the `derive_iv` pad branch. No shipping writer emits it: LibreOffice
@@ -630,7 +660,10 @@ pub(crate) fn spin_hash(
 ///
 /// The check is repeated here rather than left to the parser. This function is reachable
 /// from three call sites with a `key_bits` the parser vouched for, and the cost of not
-/// trusting that is one comparison against a value already in a register.
+/// trusting that is one comparison against a value already in a register. Repeated, not
+/// re-expressed: both this and the parse-time check ask
+/// [`HashAlgorithm::can_carry_key_bits`], so the duplication is of the *call* and not of
+/// the bound, and the two cannot come to disagree about which pairs are refusable.
 pub(crate) fn derive_block_key(
     hash: HashAlgorithm,
     h_final: &PasswordDigest,
@@ -638,12 +671,20 @@ pub(crate) fn derive_block_key(
     key_bits: u32,
 ) -> Result<DerivedKey, Error> {
     let key_len = (key_bits / 8) as usize;
-    if key_len > hash.digest_len() {
+    if !hash.can_carry_key_bits(key_bits) {
         return Err(unusable_key_bits(key_bits, hash));
     }
+    // `key_len <= hash.digest_len()` now holds, which is exactly `digest_two_into`'s
+    // contract — the check above is the one that discharges it.
+    //
+    // The digest is cut straight into the wrapper's own slot and never exists as a
+    // `Vec`. Written the obvious way — `let digest = hash.digest_two(hf, block_key);
+    // DerivedKey::new(digest[..key_len].to_vec())` — it existed twice over: a heap
+    // `Vec` holding the **whole** digest of `H_final`, dropped unwiped, plus a second
+    // allocation for the prefix the wrapper kept. Both went to the allocator carrying
+    // block-key material. See `docs/design/heap-residue.md`.
     Ok(h_final.with_secret(|hf| {
-        let digest = hash.digest_two(hf, block_key);
-        DerivedKey::new(digest[..key_len].to_vec())
+        DerivedKey::new_with(key_len, |slot| hash.digest_two_into(hf, block_key, slot))
     }))
 }
 
@@ -1047,14 +1088,22 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // password is checked, so neither needs a valid password to reach:
     //   * spinCount is a loop count -- see limits::SPIN_COUNT_MAX for the measurement;
     //   * keyBits/8 is a truncation length on the digest of the hash the file names, so
-    //     anything longer than that digest slices out of range inside `derive_block_key`.
-    // `aes_cbc_decrypt`'s key-length check is one call frame too late for the
-    // second: the slice panics before that function is entered.
+    //     anything longer than that digest cannot be cut from it inside `derive_block_key`.
+    // `aes_cbc_decrypt`'s key-length check is one call frame too late for the second.
+    //
+    // **The failure mode this guard prevents changed, and the guard did not.** It used
+    // to be a panic: `derive_block_key` sliced `digest[..key_len]`, and an over-long
+    // `key_len` was an out-of-range index. Since the digest is written into a wrapped
+    // slot by `hash::digest_two_into`, the same input would instead produce a key whose
+    // tail is the slot's zeros -- quieter and worse, because a zero-padded key is a key
+    // that works, on a file no writer produced. The refusal is what stops both; only the
+    // thing it stops is different now. `digest_two_into` carries a `debug_assert` saying
+    // so at the other end.
     let spin_count = spin_count.ok_or_else(|| Error::XmlParse("missing spinCount".into()))?;
     if spin_count > limits::SPIN_COUNT_MAX {
         return Err(Error::BadParameters(format!(
-            "p:encryptedKey/@spinCount is {spin_count}; this crate refuses anything above \
-             {} (Office writes 100000)",
+            "p:encryptedKey/@spinCount is {spin_count}; [MS-OFFCRYPTO] 2.3.4.10 bounds it \
+             at {} (Office writes 100000)",
             limits::SPIN_COUNT_MAX
         )));
     }
@@ -1133,8 +1182,11 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // `keyBits / 8` is the block-key truncation length and `password_hash`'s digest is
     // what it truncates, so the pair has to be checked together — the `keyBits` bound
     // above cannot cover it on its own now that the digest length is the file's choice.
-    // See `derive_block_key` for why this is a refusal rather than herumi's 0x36 pad.
-    if (key_bits / 8) as usize > password_hash.digest_len() {
+    // See `derive_block_key` for why this is a refusal rather than herumi's 0x36 pad,
+    // and `HashAlgorithm::can_carry_key_bits` — the single predicate this and that
+    // second, defence-in-depth check both ask — for why the comparison is not written
+    // out here.
+    if !password_hash.can_carry_key_bits(key_bits) {
         return Err(unusable_key_bits(key_bits, password_hash));
     }
 
@@ -1509,7 +1561,11 @@ mod tests {
     /// The slice in `derive_block_key` is only in range while `keyBits / 8` fits inside
     /// the named hash's digest. SHA-1 gives 20 bytes, so `keyBits="192"` and `"256"` —
     /// both in `AGILE_KEY_BITS_ALLOWED`, both reached before any password is checked —
-    /// would slice off the end of it. In Rust that is a panic, not a short key.
+    /// would ask for more bytes than it has. That was a panic while the key was cut with
+    /// `digest[..key_len]`; since `hash::digest_two_into` writes into a pre-zeroed
+    /// wrapped slot it would instead be a zero-padded key — silent, and a key that
+    /// works. Either way the refusal below is what prevents it, which is why this test
+    /// asserts the error and not the crash.
     #[test]
     fn key_bits_longer_than_the_named_digest_is_refused_not_padded() {
         let h = PasswordDigest::new(vec![0u8; 20]);
@@ -1645,7 +1701,11 @@ mod tests {
 
     /// The ceiling is inclusive, and one past it is refused by name. Testing this at
     /// the parser rather than through `decrypt_ooxml` is deliberate: accepting the
-    /// ceiling means *running* it, and two million SHA-512 rounds is not a unit test.
+    /// ceiling means *running* it, and ten million SHA-512 rounds — about 7 seconds of
+    /// one core — is not a unit test.
+    ///
+    /// One past the ceiling is `10_000_001`, which is what [MS-OFFCRYPTO] 2.3.4.10
+    /// forbids rather than what this crate declines, so this is now a conformance test.
     #[test]
     fn spin_count_ceiling_is_inclusive_and_one_past_it_is_refused() {
         let at = limits::SPIN_COUNT_MAX.to_string();
@@ -2378,7 +2438,20 @@ mod tests {
         };
         let h_final = spin_hash(hash, password, salt, 0);
         let input = pad(&vec![0xA5u8; salt.len()]);
-        let value = pad(&hash.digest(&input));
+        // H(the `saltSize` bytes), not H(the padded blob) — §2.3.4.13's
+        // `encryptedVerifierHashValue` step 1 hashes the array step 1 *generated*, which
+        // is `saltSize` bytes, and the pad arrives a step later when it is encrypted.
+        //
+        // This helper hashed `&input` until 2026-09-21, which is the same error the
+        // reader and the writer both carried. Three places agreeing is why no test could
+        // see it: this one built files that matched the reader's mistake, so a salt of 1,
+        // 8 or 15 round-tripped here while real Word refused the equivalent file.
+        //
+        // The `0x36` pad above is deliberately left as it is and is now irrelevant to
+        // this value: the hash no longer covers the padding, so the byte cannot change
+        // the digest. It stays because a non-conforming pad is a useful thing for these
+        // synthetic files to carry — the reader must not care what is in the tail.
+        let value = pad(&hash.digest(&input[..salt.len()]));
         // The IV is the salt fitted to `blockSize` ([MS-OFFCRYPTO] §2.3.4.12), which is
         // the salt itself for every length a real writer emits.
         let iv = fit_iv(salt, AES_BLOCK_LEN);

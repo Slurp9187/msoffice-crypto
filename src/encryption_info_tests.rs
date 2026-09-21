@@ -11,6 +11,8 @@
 //! only because the repository already carries real-Office fixtures.
 
 use super::*;
+use crate::error::{EncryptParam, EncryptParamProblem};
+use crate::limits;
 use std::io::Read;
 
 /// The three real-Office fixtures, all of which carry a 1 289-byte `EncryptionInfo`.
@@ -99,10 +101,17 @@ fn the_writer_reproduces_real_offices_stream_byte_for_byte() {
         let (key_data_salt, password_salt) = salt_values(xml);
 
         let got = write(&EncryptionInfoParams {
+            // Office 16's tuple *is* `EncryptParams::default` — that default was read
+            // off these same three fixtures — so the only value taken from the document
+            // here is the spin count, and this test is therefore also the proof that the
+            // default path still writes the bytes Word writes.
+            params: EncryptParams {
+                spin_count: attr(xml, "spinCount").parse().expect("an integer"),
+                ..Default::default()
+            },
             key_data_salt: &b64(key_data_salt),
             encrypted_hmac_key: &b64(attr(xml, "encryptedHmacKey")),
             encrypted_hmac_value: &b64(attr(xml, "encryptedHmacValue")),
-            spin_count: attr(xml, "spinCount").parse().expect("an integer"),
             password_salt: &b64(password_salt),
             encrypted_verifier_hash_input: &b64(attr(xml, "encryptedVerifierHashInput")),
             encrypted_verifier_hash_value: &b64(attr(xml, "encryptedVerifierHashValue")),
@@ -137,6 +146,10 @@ fn the_header_is_agile_four_four_with_the_reserved_word_office_requires() {
 }
 
 /// A synthetic parameter set — distinct byte patterns so a crossed field is visible.
+///
+/// The tuple is [`EncryptParams::default`] with the spin count moved, so every blob
+/// length below is the default path's: 16-byte salts, a 16-byte verifier input,
+/// 64-byte SHA-512 blobs and a 32-byte wrapped AES-256 key.
 fn params(spin_count: u32) -> EncryptionInfoParams<'static> {
     const KEY_DATA_SALT: [u8; 16] = [0x11; 16];
     const PASSWORD_SALT: [u8; 16] = [0x22; 16];
@@ -146,10 +159,13 @@ fn params(spin_count: u32) -> EncryptionInfoParams<'static> {
     const VERIFIER_VALUE: [u8; 64] = [0x66; 64];
     const KEY_VALUE: [u8; 32] = [0x77; 32];
     EncryptionInfoParams {
+        params: EncryptParams {
+            spin_count,
+            ..Default::default()
+        },
         key_data_salt: &KEY_DATA_SALT,
         encrypted_hmac_key: &HMAC_KEY,
         encrypted_hmac_value: &HMAC_VALUE,
-        spin_count,
         password_salt: &PASSWORD_SALT,
         encrypted_verifier_hash_input: &VERIFIER_INPUT,
         encrypted_verifier_hash_value: &VERIFIER_VALUE,
@@ -272,18 +288,105 @@ fn a_blob_of_the_wrong_length_is_refused_by_the_writer() {
     }
 }
 
+/// `encryptedKeyValue` is `roundUp(keyData/@keyBits / 8, blockSize)`, not `keyBits / 8`.
+///
+/// The direct guard on the one length that was wrong: the deleted `lengths` module fixed
+/// this blob at the 32-byte session key, which is right for AES-256 by coincidence and
+/// wrong for AES-192. [MS-OFFCRYPTO] §2.3.4.13 step 1 sizes the package key from
+/// `Encryptor.KeyData.keyBits` and every blob in the document is padded to `blockSize`,
+/// so a 24-byte AES-192 key is wrapped into **32** bytes — which is what
+/// `agile::parse_encryption_info` requires on the way back in and what real Word 16
+/// wrote in `tests/fixtures/agile_aes192_sha384.docx`.
+///
+/// Both directions are asserted, because either alone is weak: the refusal of 24 would
+/// pass on a writer that refused every AES-192 file, and the acceptance of 32 would pass
+/// on a writer that had stopped checking this blob at all.
+///
+/// The per-element wiring is checked in the same test. `keyBits` is the attribute most
+/// easily crossed — it appears on both elements and §2.3.4.10 does **not** require the
+/// two to be equal — so a writer that sized the blob from `p:encryptedKey/@keyBits`
+/// would be measuring 256 here and would accept the 32-byte value for the wrong reason.
+/// Parting the two in the parameters is what makes that visible.
+#[test]
+fn the_wrapped_key_is_sized_from_key_datas_key_bits_rounded_up_to_the_block() {
+    const KEY_VALUE_24: [u8; 24] = [0x77; 24];
+    const KEY_VALUE_32: [u8; 32] = [0x77; 32];
+
+    let aes192 = EncryptParams {
+        // AES-192 package key under an AES-256 password key: the spec joins neither to
+        // the other, and the asymmetry is what makes the wiring testable.
+        key_data_key_bits: 192,
+        ..Default::default()
+    };
+    aes192
+        .validate()
+        .expect("AES-192 keyData under an AES-256 SHA-512 KEK is a conforming tuple");
+
+    let mut short = params(OFFICE_SPIN_COUNT);
+    short.params = aes192;
+    short.encrypted_key_value = &KEY_VALUE_24;
+    let got = write(&short).map(|s| s.len());
+    assert!(
+        matches!(
+            &got,
+            Err(Error::BadParameters(msg))
+                if msg.contains("p:encryptedKey/@encryptedKeyValue")
+                    && msg.contains("is 24 bytes")
+                    && msg.contains("at 32")
+        ),
+        "a bare 24-byte AES-192 key must be refused: the blob is roundUp(24, 16) = 32, \
+         got: {got:?}"
+    );
+
+    let mut padded = params(OFFICE_SPIN_COUNT);
+    padded.params = aes192;
+    padded.encrypted_key_value = &KEY_VALUE_32;
+    let stream = write(&padded).expect("the padded 32-byte blob is the conforming length");
+    let xml = std::str::from_utf8(&stream[8..]).unwrap();
+    let (key_data, password) = xml
+        .split_once("<p:encryptedKey ")
+        .expect("the document has both elements");
+    assert!(
+        key_data.contains("keyBits=\"192\""),
+        "keyData must carry the keyData keyBits: {key_data}"
+    );
+    assert!(
+        password.contains("keyBits=\"256\""),
+        "p:encryptedKey must carry the password keyBits: {password}"
+    );
+    crate::agile::parse_encryption_info(&stream[8..])
+        .expect("this crate's own reader must accept the AES-192 document it writes");
+}
+
 /// A spin count past this crate's own ceiling is refused rather than written.
 ///
 /// The ceiling exists to bound a hostile *file*, and the failure this prevents is the
 /// crate writing one it would then refuse to open. The control is the value one below,
 /// which is accepted — without it this would pass on a writer that refused every spin
 /// count.
+///
+/// **The refusal now comes from `EncryptParams::validate`, not from `write`'s own
+/// check**, and the whole payload is asserted rather than a substring of the message:
+/// `write` used to test `SPIN_COUNT_MAX` itself and report `BadParameters`, which was one
+/// fact checked in two places. The single check is the caller-facing one, so what this
+/// test pins is the typed verdict a consumer would render — a message-substring
+/// assertion would have passed unchanged through that swap of variants.
 #[test]
 fn a_spin_count_past_the_ceiling_is_refused_rather_than_written() {
     let got = write(&params(limits::SPIN_COUNT_MAX + 1)).map(|s| s.len());
     assert!(
-        matches!(&got, Err(Error::BadParameters(msg)) if msg.contains("spinCount")),
-        "a spin count over the ceiling must be refused, got: {got:?}"
+        matches!(
+            &got,
+            Err(Error::EncryptParams {
+                param: EncryptParam::SpinCount,
+                problem: EncryptParamProblem::OutsideSpecRange,
+                got: value,
+                min: 0,
+                max,
+            }) if *value == limits::SPIN_COUNT_MAX + 1 && *max == limits::SPIN_COUNT_MAX
+        ),
+        "a spin count over the ceiling must be refused by the parameter validator with \
+         the whole payload, got: {got:?}"
     );
 
     assert!(

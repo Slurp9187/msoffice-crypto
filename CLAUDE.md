@@ -9,28 +9,53 @@ sibling solved it before inventing something new.
 
 ---
 
-## Project Status — pre-release, nothing published
+## Project Status — release candidates published, no stable release
 
-> **This crate has never been published. Its only consumer is a private application in
+> **`0.1.0-rc.2` (2026-09-16) and `0.1.0-rc.3` (2026-09-19) are live on crates.io, neither
+> yanked. There is no stable release. The only known consumer is a private application in
 > the same hands.**
 
-That fact changes the right answer to a whole class of scoping questions, so state it rather
-than assuming either way:
+This section said "has never been published" until 2026-09-19, two weeks after it stopped
+being true. The conclusions below were right anyway, but for a reason the text did not give,
+so the reason is now written down: the latitude comes from the **release-candidate line**,
+not from nothing having shipped.
+
+An `0.1.0-rc.N` is unstable twice over. It is `0.x`, which semver puts outside its
+compatibility guarantee, and it is a pre-release, which Cargo will not resolve for anyone who
+has not explicitly named a pre-release requirement. Breaking one rc against the next is what
+an rc line is for.
 
 - **Breaking API changes are free.** No deprecation cycle, no compatibility shim, no
-  `#[deprecated]` re-export. Change the signature, fix the one caller, fix the tests.
+  `#[deprecated]` re-export. Change the signature, fix the one caller, fix the tests. What a
+  published rc does add is a duty to **say so in the changelog** — plainly, as a fact, with no
+  migration recipe. The case that earned this: `Document::OoxmlPackage` narrowed in rc.3 from
+  "any ZIP or a CFB-wrapped package" to "CFB-wrapped package only", which breaks a consumer
+  matching it with no compile error at all, because `#[non_exhaustive]` had already pushed
+  them to write the catch-all that swallows the new variant. Nothing was removed, so nothing
+  scanning for breaking changes finds it.
 - **Feature reshuffles are free.** Moving items behind `crypto-ops`, changing what `default`
   includes — all fine, and expected, in a 0.x crate with one consumer.
-- **The one real constraint is that consumer's Office handler, and it is dormant.** It is
-  switched off until this crate publishes, and its own header carries the list for switching
-  it back on. When you change the API, say in your report exactly what that re-enable must do
-  differently — it will need `features = ["crypto-ops"]` (or `["legacy-binary"]`, its
-  superset, to open `.doc`/`.xls`/`.ppt` through `decrypt_binary_office`), the fail-closed
-  `IntegrityPolicy` default, and the error variants it currently flattens. That application
-  is not edited from here.
+- **The one real constraint is that consumer's Office handler, and it is live.** It was
+  dormant until rc.2 published and this file said so for four days after it stopped being
+  true. Verified 2026-09-20 in the consumer's own tree rather than taken on report: it takes
+  this crate from crates.io pinned at exactly `0.1.0-rc.2` with default features off, enables
+  it through `msoffice-crypto/legacy-binary` (the superset, for
+  `decrypt_binary_office`), and calls six entry points — `encrypt_ooxml`, `classify`,
+  `is_cfb_office`, `decrypt_ooxml_with_policy`, `decrypt_binary_office` and
+  `encrypt_ooxml_standard`. **Every item on the old re-enable list is done**, so that list is
+  history rather than a to-do.
 
-Revisit this section the moment `cargo publish` runs (plan slice S8) — at that point the API
-becomes a promise.
+  What replaces it: **the pin is two releases back, and a bump is the event to write for.**
+  An API change here reaches nobody until someone moves that `=` pin, so when you change the
+  API, say in your report what the bump lands — not what a re-enable would need. Both kinds
+  of change count, and they are not equally visible: a refusal that did not exist before
+  announces itself, while a narrowed meaning compiles silently (see the rc.3
+  `Document::OoxmlPackage` case above). **That application is still not edited from here** —
+  read it to check a claim, never to fix one.
+
+Revisit this section the moment a **stable** `0.1.0` is cut — that, not the first
+`cargo publish`, is where the API becomes a promise. The earlier wording named the publish and
+was overtaken by it in silence; the trigger is the version number, which is checkable.
 
 ---
 
@@ -55,9 +80,18 @@ Consequences, all non-negotiable:
 - **`classify` must never fail loudly.** It is the first thing a caller runs on an unknown
   file. Return "unknown", never panic.
 
-Bounds live in one module with MIN and MAX for every field, each carrying a doc comment
-citing its provenance and justifying its margin. See `odf-crypto/src/limits.rs` for the shape
-and plan slice S9 for the numbers.
+Bounds live in one module, each carrying a doc comment citing its provenance. **The spec's
+range is the rule — not a MIN-and-MAX template applied to every field.** Where
+[MS-OFFCRYPTO] states a range, that range is the bound, floor included: `ST_SpinCount`'s
+own schema facet is `minInclusive="0"`, so `SPIN_COUNT_MAX` has no floor, deliberately,
+against a template that would have given it one. A MIN exists only where the format or the
+arithmetic needs one — never invented to fill a shape borrowed before the spec was checked.
+`SPIN_COUNT_MAX` is the worked example: a margin taken from the sibling's methodology
+(pick two figures, because the sibling's spec does not bound this) overrode
+[MS-OFFCRYPTO]'s own number, and the resulting `1 << 21` refused conforming files on the
+read path until `ad64424` restored the spec's `10000000`. See `src/limits.rs` for the shape
+of that module — never for a number, which does not cross between the two crates — and plan
+slice S9 for what it holds.
 
 ### 2. Key material is wrapped — it is why this crate exists
 
@@ -201,7 +235,7 @@ spec or in a permissive reference. Cite where it came from.
 ## Layout
 
 ```
-src/lib.rs             public API: classify, is_cfb_office, decrypt_ooxml, decrypt_ooxml_with_policy, encrypt_ooxml, encrypt_ooxml_standard, decrypt_binary_office
+src/lib.rs             public API: classify, is_cfb_office, decrypt_ooxml, decrypt_ooxml_with_policy, check_encryptable, encrypt_ooxml, encrypt_ooxml_with_params, encrypt_ooxml_standard, decrypt_binary_office   (+ lib_tests.rs)
 src/classify.rs        detection; NEVER panics, returns Unknown        (+ classify_tests.rs)
 src/binary_office.rs   legacy .doc/.xls/.ppt recognition, and the FIB / BIFF / persist-directory readers both probe and decrypt share
 src/agile.rs           ECMA-376 agile decrypt: parse, KDF, verifier, package
@@ -212,11 +246,12 @@ src/hash.rs            HashAlgorithm dispatch and IV derivation           (crypt
 src/segments.rs        the 4096-byte segment iterator both directions share (D4)   (+ segments_tests.rs)
 src/cfb_reader.rs      capped stream reads
 src/limits.rs          every bound, each with cited provenance
-src/sensitive.rs       secure-gate aliases — the only place they are declared
+src/sensitive.rs       secure-gate aliases — the only place they are declared   (+ sensitive_tests.rs)
 src/error.rs           Error -- the crate's single public error type
 src/bin/msoffice-crypto.rs  the CLI: exit codes, clap wiring, classify rendering, the decrypt dispatch and the atomic write   (+ msoffice-crypto_tests.rs)
 src/malformed_input.rs hostile-input tests, containers built at runtime
 src/dataspaces.rs      the \x06DataSpaces writer and the CFB container, timestamps zeroed   (+ dataspaces_tests.rs)
+src/encrypt_params.rs  EncryptParams -- the caller's encryption tuple, per-element as the spec is, and validate()   (+ encrypt_params_tests.rs)
 src/encryption_info.rs the EncryptionInfo serialiser, byte-identical to Office's   (+ encryption_info_tests.rs)
 src/agile_encrypt.rs   the agile key schedule, the package encryptor, and the assembly behind encrypt_ooxml   (+ agile_encrypt_tests.rs)
 src/rc4.rs             RC4 over a wrapped key, the per-block loop, the verifier check   (legacy-binary, as are the seven below)
@@ -269,7 +304,7 @@ marker, not a note about when the work happened** — git already records that, 
 date drifts (five entries here were once stamped in UTC on a UTC-7 machine and read a day
 into the future). Entries carry a date only when the date is part of the claim: a
 measurement against particular versions of external readers needs one, a rename does not.
-Full rule and the tagging step: [`.claude/skills/changelog-protocol/SKILL.md`](.claude/skills/changelog-protocol/SKILL.md);
+Full rule and the tagging step: [`.claude/skills/msoffice-crypto-changelog-protocol/SKILL.md`](.claude/skills/msoffice-crypto-changelog-protocol/SKILL.md);
 enforced as check G of `tools/audit_claims.py`. The pre-publication changelog was 3,397 lines
 of dated entries and stayed with the archived development repository — frozen, not a
 violation to tidy.

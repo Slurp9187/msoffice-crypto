@@ -172,6 +172,32 @@ are pulled in by `classify`'s doc examples with `include_bytes!`. Measured: with
 unpacked crate does not compile. Both are python-docx output rather than Office's, so unlike
 the other seventeen they never carried document metadata naming whoever generated them.
 
+### 2.6 The encrypt guard belonged in the library, and nothing had ever decided otherwise
+
+`encrypt_guard` lived in `src/bin/msoffice-crypto.rs` from the CLI's first release until
+2026-09-19. The library encrypted whatever bytes it was handed, so `encrypt_ooxml` on an
+already-encrypted file returned `Ok` and produced a CFB wrapped in a CFB — indistinguishable
+from a single wrap by inspection, and openable only by decrypting twice.
+
+**What makes this a reversal rather than a fix is that the placement was never weighed.**
+`docs/plans/msoffice-crypto-cli-2026-09-11.md` § 7 states it as a premise — *"the library has
+no `AlreadyEncrypted` variant, so this guard is the CLI's"* — and the source comments and the
+rc.2 changelog repeat it. Searching this record for a decision behind it finds nothing,
+because the sentence is a description of the library's shape at the time, promoted to a
+reason by being written down three times. A missing error variant had become an architecture.
+
+**The cost was paid by someone else.** The downstream consumer integrated the crate, hit the
+double-wrap, and reimplemented the guard from the CLI's shape — so there were two copies, and
+the one with tests was the one library callers could not reach. That is the argument in its
+strongest form: a guard only the CLI can run is a guard every other caller writes again.
+
+`check_encryptable` is now public and is the same function both writers call, rather than a
+second copy that agrees with them. It is public because the position that matters is before a
+password is obtained. Three variants rather than one, because the CLI's three distinct exit
+codes were already evidence that the cases are different facts; `NotAPlainPackage` carries no
+`Document` so that "never name a kind `classify` refused to name" cannot be written by
+accident.
+
 ---
 
 ## 3. Negative results — recorded so nobody repeats the experiment
@@ -320,9 +346,21 @@ notice was owed before publishing.
 
 ## 5. Cross-repository decisions (the downstream consumer)
 
-The consumer is private and dormant here; its Office handler is switched off until this crate
-publishes. These decisions were made in this repository's threads and must not be re-argued
-when it is switched back on.
+The consumer is private. Its Office handler was dormant when these decisions were made and
+is **live as of 2026-09-20** — pinned to `=0.1.0-rc.2` from crates.io via
+`msoffice-crypto/legacy-binary`, calling six entry points. These decisions were made in this
+repository's threads and must not be re-argued now that it is switched on; the list below is
+a record of what was settled, not a checklist of what remains.
+
+**How each one turned out**, checked against the consumer's tree rather than assumed: the
+re-enable list is complete (`legacy-binary`, `decrypt_ooxml_with_policy` for the fail-closed
+default, `decrypt_binary_office`); detection did stay this crate's job (`classify` is called
+rather than CFB sniffed); and `encrypt_ooxml` is the entry point used, with
+`encrypt_ooxml_standard` behind an explicit choice, exactly as argued below.
+
+One decision below was reversed *here* rather than there: **"Upstream's CLI owns that guard;
+the library does not, so it is EFV's"** — the consumer's own module header, and true when it
+was written. § 2.6 records why the guard moved into the library instead.
 
 - **`NativeFormat::OfficeBinary`, flat.** Microsoft's own term — `[MS-DOC]` is titled *"Word
   (.doc) Binary File Format"*. Not `MsoLegacy` (a judgement about age, and these files still
