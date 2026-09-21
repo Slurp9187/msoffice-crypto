@@ -32,6 +32,11 @@ crate emits. What other readers do with it is measured, not claimed: the default
 and standard AES-128 open in all four readers of the [acceptance gate](#how-its-verified);
 the rest are recorded reader by reader, cell by cell, in [`CHANGELOG.md`][changelog].
 
+**The three ❌ are a refusal, not a backlog.** RC4 and XOR obfuscation are broken by any
+modern standard — XOR is not encryption at all. They are implemented so that a file written
+in 1997 can still be *opened*; writing them would make this a tool for producing newly
+weak documents, which is a different thing to be. See [Security](#security).
+
 **Out of scope, permanently:** password recovery and cracking.
 
 ## Why this one
