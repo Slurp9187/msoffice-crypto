@@ -295,7 +295,9 @@ docs/design/           why the crate is shaped as it is -- development-record.md
 docs/audits/           external audit reports; deltas only, dated, not revised after filing
 docs/plans/            dated plan files; the arc lives in msoffice-crypto-foundation-2026-09-04.md
 .claude/skills/        msoffice-crypto-secure-gate (policy), file-plan-issues (protocol),
-                       changelog-protocol (version headings, dates and tags)
+                       msoffice-crypto-changelog-protocol (version headings, dates and tags),
+                       msoffice-crypto-readme-spine (README structure, the slots it shares
+                       with odf-crypto, and the four CI checks that read it)
 ```
 
 One module, one job. A module whose purpose needs an "and" to state has two.
