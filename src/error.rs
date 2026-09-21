@@ -220,6 +220,34 @@ pub enum Error {
     /// this cannot become a second free-text channel. `name` is the file's own spelling,
     /// truncated: it is attacker-chosen XML attribute text, bounded only by
     /// `limits::ENCRYPTION_INFO_READ_CAP` (1 MiB) before it reaches here.
+    ///
+    /// # This refusal is authorised by the format, which is a third thing
+    ///
+    /// Not a spec violation and not merely an implementation limit. [MS-OFFCRYPTO]
+    /// §2.3.4.10, immediately after the `HashAlgorithm` table that lists MD5, MD4, MD2,
+    /// RIPEMD-128, RIPEMD-160 and WHIRLPOOL alongside the SHA family: **"Values that are
+    /// not defined MAY be used, and a compliant implementation is not required to support
+    /// all defined values."**
+    ///
+    /// So a document naming WHIRLPOOL is conforming, this crate refusing it is
+    /// conforming, and both are true at once. A consumer rendering this has three
+    /// sentences available and should not collapse them:
+    ///
+    /// | | what the format says |
+    /// | --- | --- |
+    /// | a spec violation | the file is wrong |
+    /// | an implementation limit | the format permits it; *we could* and chose not to, so an override is coherent |
+    /// | **this** | the format permits the value **and permits us not to support it** |
+    ///
+    /// The third is not a weaker form of the second. An override is not a coherent thing
+    /// to offer, because there is nothing to override — the format contemplated the
+    /// refusal.
+    ///
+    /// Worth contrasting with the `spinCount` ceiling, which looked like the same shape
+    /// and was not: the spec states a maximum there and carries no clause permitting a
+    /// narrower one, so this crate's tighter bound was a defect and was removed. Here the
+    /// clause exists. Whether to add the older hashes is a support decision; it is not a
+    /// conformance one, and the difference is this sentence.
     #[error("{what} names an algorithm this crate does not implement: {name}")]
     #[cfg(feature = "crypto-ops")]
     UnsupportedAlgorithm {

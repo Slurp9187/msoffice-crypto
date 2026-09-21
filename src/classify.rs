@@ -201,12 +201,54 @@ pub enum Family {
     /// weak RC4. The Excel form is decrypted under `legacy-binary`; the Word form
     /// (Method 2) is named and refused.
     XorObfuscation,
-    /// An `EncryptionInfo` stream whose version pair names a family this crate does not
-    /// implement — reached by extensible encryption (`vMinor = 3`) and by any pair the
-    /// spec does not define at all — or a `vMinor = 2` stream whose `AlgID` names no
-    /// cipher this crate recognises with `fAES` clear, or whose `EncryptionHeader` is too
-    /// short to read at all, or a binary document that declares encryption without a
-    /// header this crate can read. The file *is* encrypted.
+    /// The file **is** encrypted and this crate will not open it. Four unrelated
+    /// conditions arrive here, and they do not share a remedy.
+    ///
+    /// Reached by: an `EncryptionInfo` whose version pair names a family this crate does
+    /// not implement — extensible encryption, and equally any pair the spec never
+    /// defined; a `vMinor = 2` stream whose `AlgID` names no cipher this crate
+    /// recognises with `fAES` clear, or whose `EncryptionHeader` is too short to read;
+    /// and a binary document that declares encryption without a header this crate can
+    /// read.
+    ///
+    /// # What [`Classification::version`] does and does not tell you
+    ///
+    /// Written as properties of the field rather than as a list of cases, because a
+    /// fifth condition would invalidate a list and these three survive it.
+    ///
+    /// **Presence carries no information about readability.** It is tempting to read
+    /// `version.is_none()` as "the header could not be read", and it is wrong in both
+    /// directions. An unrecognised `AlgID` is reached *after* a well-formed header has
+    /// been parsed, so `version` is reliably `Some` there — the very case that reading
+    /// would be looking for. And a binary document that declares encryption reaches this
+    /// variant through a catch-all that takes `Some(pair)` as readily as `None`, so a
+    /// `FILEPASS` naming `(5, 5)` arrives with a version present.
+    ///
+    /// **The agile/standard path's catch-all swallows every pair but two.** Anything that
+    /// is not `(4, 4)` or `(2..=4, 2)` lands here, so extensible encryption and a
+    /// corrupted version field are *indistinguishable by having reached this variant*.
+    /// They are distinguishable by the pair itself.
+    ///
+    /// **Extensible encryption is `(3, 3)` and `(4, 3)`, both halves pinned.**
+    /// [MS-OFFCRYPTO] §2.3.4.6: "Version.vMajor MUST be 0x0003 or 0x0004 and
+    /// Version.vMinor MUST be 0x0003." Match the pairs, not `minor == 3` — a file
+    /// declaring `(7, 3)` is non-conforming, and calling it rights-managed tells its
+    /// holder that no tool will ever open it, which is a confident claim about a
+    /// malformed header. This matters because the remedy differs more than the cause
+    /// does: extensible encryption keeps its key on a rights server, so *no* offline
+    /// implementation opens it, ever, and that is a property of the format rather than a
+    /// gap here.
+    ///
+    /// **An unrecognised `AlgID` has no marker of its own.** Its signature is this
+    /// variant, a recognised version pair, and `key_data`'s `cipher` being `None` — an
+    /// inference across two fields rather than a discriminator. Stated as a limitation
+    /// rather than dressed up: if telling it apart matters to a caller, the honest fix is
+    /// a distinction in this enum, and that case should be made rather than worked
+    /// around.
+    ///
+    /// Written because two readers have now needed this decomposition and derived it from
+    /// the source: this crate's own CLI, and a downstream consumer writing refusal copy
+    /// who reached for `version.is_none()` and would have shipped two wrong sentences.
     Unsupported,
     /// Nothing could be determined — not a container this crate reads, or one whose
     /// `EncryptionInfo` stream is missing, truncated or unparsable.
