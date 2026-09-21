@@ -45,9 +45,29 @@ The standard writer's artifact was gated in the same run — SHA-256
 (verify_integrity is inert here)` where every previous release printed the agile
 HMAC-verifies sentence for it.
 
-**Both artifacts are byte-identical to the committed goldens** (41,984 / `b4cc009e…` and
-40,960 / `491298746c…`), which is the claim that matters for a release whose headline change
-is a new refusal: what this crate writes did not move.
+**Neither committed golden moved** — 41,984 / `b4cc009e…` and 40,960 / `491298746c…`,
+both asserted in the suite under the all-zero `SEED` — which is the claim that matters for a
+release whose headline change is a new refusal: what this crate writes did not move.
+
+**Those goldens are not the gated artifacts, and cannot be.** The gate drives `encrypt_ooxml`
+and `encrypt_ooxml_standard` through the system RNG, so its artifact carries a fresh salt and
+a different SHA-256 on every run. That is why a gate verdict is re-earned at each release
+rather than carried forward, and why the artifact SHA-256 above differs from the golden. An
+earlier version of this section printed the gate's SHA-256 and then called that same artifact
+byte-identical to the golden, three lines apart; both could not be true.
+
+**Re-run at release.** 2026-09-21, tree `fea6d9e` clean, artifact SHA-256
+`9ac58410f50b0b3857e4e9ed0cbb4abaa1bdc1cf856a56408d0fbc00225ead5f` (41,984 bytes). The
+commits after `fea6d9e` touch prose only — no `src/` — so the bytes this verdict was earned
+on are the bytes the tag carries:
+
+```
+office         PASS  Word 16.0 build 16.0.19127: OPENED, content matches | WRONG PASSWORD REFUSED 0x800A1520
+libreoffice    PASS  LibreOffice 26.2.1.2: OPENED, content matches | WRONG PASSWORD REFUSED (verifier)
+msoffcrypto    PASS  msoffcrypto-tool 6.0.0: byte-identical to plain.docx | dataIntegrity HMAC verifies
+office-crypto  PASS  office-crypto 0.3: byte-identical to plain.docx
+GATE: PASS (4 of 4 readers ran; 0 not selected)
+```
 
 Full matrix green in all five feature columns — `cargo test`, `cargo clippy -D warnings`,
 `cargo fmt --check`, both `cargo doc` runs under `RUSTDOCFLAGS="-D warnings"`, `cargo deny`

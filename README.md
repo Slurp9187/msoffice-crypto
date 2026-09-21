@@ -13,7 +13,7 @@ formats [MS-OFFCRYPTO] defines, with **key material that zeroizes on drop**.
 > `.doc`, `.xls` and `.ppt` under RC4 CryptoAPI, `.xls` under XOR obfuscation — to what
 > `msoffcrypto-tool` writes and what Word, Excel and PowerPoint 16 open with no password.
 > See
-> [`docs/plans/msoffice-crypto-foundation-2026-09-04.md`](docs/plans/msoffice-crypto-foundation-2026-09-04.md)
+> [`docs/plans/msoffice-crypto-foundation-2026-09-04.md`](https://github.com/Slurp9187/msoffice-crypto/blob/main/docs/plans/msoffice-crypto-foundation-2026-09-04.md)
 > and the issues it indexes.
 
 ## Two builds: detection is free
