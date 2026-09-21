@@ -1,5 +1,11 @@
 # msoffice-crypto
 
+[![crates.io](https://img.shields.io/crates/v/msoffice-crypto.svg?include_prereleases)](https://crates.io/crates/msoffice-crypto)
+[![docs.rs](https://img.shields.io/docsrs/msoffice-crypto)](https://docs.rs/msoffice-crypto)
+[![CI](https://github.com/Slurp9187/msoffice-crypto/actions/workflows/ci.yml/badge.svg)](https://github.com/Slurp9187/msoffice-crypto/actions/workflows/ci.yml)
+[![MSRV](https://img.shields.io/crates/msrv/msoffice-crypto)](https://github.com/Slurp9187/msoffice-crypto#msrv)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 Microsoft Office document encryption in Rust — detection, decryption and encryption of the
 formats [MS-OFFCRYPTO] defines, with **key material that zeroizes on drop**.
 
@@ -35,29 +41,44 @@ no cipher, hash, MAC, RNG or key-wrapping crate in the graph at all, a property 
 every push. It returns no `Result` and never panics: an unreadable file classifies as
 `Unknown`, and a malformed one is never called unencrypted.
 
-```rust
+```rust,no_run
 use msoffice_crypto::{classify, Family, IntegrityDeclaration};
 
-fn is_agile_with_hmac(data: &[u8]) -> bool {
-    let class = classify(data);
-    class.family == Family::Agile && class.data_integrity == IntegrityDeclaration::Declared
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let class = classify(&std::fs::read("protected.docx")?);
+    if class.family == Family::Agile && class.data_integrity == IntegrityDeclaration::Declared {
+        println!("agile, and its package HMAC can be verified");
+    }
+    Ok(())
 }
 ```
 
 **`crypto-ops`** adds the ciphers, hashes, `secure-gate` and a CSPRNG:
 
 ```toml
+[dependencies]
+# Detection only — no cryptographic dependency.
+msoffice-crypto = "0.1.0-rc.5"
+
+# Detection, decryption and encryption.
 msoffice-crypto = { version = "0.1.0-rc.5", features = ["crypto-ops"] }
 ```
 
-```rust
-use msoffice_crypto::{decrypt_ooxml, encrypt_ooxml, Error};
+Pre-release versions are not matched by ordinary requirements — name the full version as
+above; `"0.1"` will not resolve to it.
 
-fn round_trip(path: &str, password: &str) -> Result<Vec<u8>, Error> {
-    // `zip` is the original OOXML package — a valid .docx/.xlsx/.pptx
-    let zip = decrypt_ooxml(&std::fs::read(path)?, password)?;
+```rust,no_run
+use msoffice_crypto::{decrypt_ooxml, encrypt_ooxml};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // the original OOXML package — a valid .docx/.xlsx/.pptx
+    let zip = decrypt_ooxml(&std::fs::read("protected.docx")?, "correct horse battery staple")?;
+    std::fs::write("plain.docx", &zip)?;
+
     // agile, AES-256/SHA-512, 100 000 rounds, dataIntegrity HMAC — what Office 16 writes
-    encrypt_ooxml(&zip, password)
+    let sealed = encrypt_ooxml(&zip, "correct horse battery staple")?;
+    std::fs::write("resealed.docx", sealed)?;
+    Ok(())
 }
 ```
 
@@ -66,16 +87,20 @@ That default is a default, not a limit. `encrypt_ooxml_with_params` takes an `En
 separately, as [MS-OFFCRYPTO] treats them — and `validate()` refuses only what the format or
 AES actually forbids, saying which of the two it was:
 
-```rust
-use msoffice_crypto::{encrypt_ooxml_with_params, EncryptParams, Error, HashAlgorithm};
+```rust,no_run
+use msoffice_crypto::{encrypt_ooxml_with_params, EncryptParams, HashAlgorithm};
 
-fn encrypt_sha384(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
-    encrypt_ooxml_with_params(package, password, EncryptParams {
-        hash: HashAlgorithm::Sha384,
-        key_data_key_bits: 192,
-        password_key_bits: 192,
-        ..Default::default()
-    })
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let package = std::fs::read("report.docx")?;
+    let sealed = encrypt_ooxml_with_params(&package, "correct horse battery staple",
+        EncryptParams {
+            hash: HashAlgorithm::Sha384,
+            key_data_key_bits: 192,
+            password_key_bits: 192,
+            ..Default::default()
+        })?;
+    std::fs::write("report-protected.docx", sealed)?;
+    Ok(())
 }
 ```
 
@@ -92,25 +117,26 @@ that choosing it is a decision.
 97-2003 document *in place* — the same CFB container with its encrypted streams replaced,
 which is what Word, Excel and PowerPoint open:
 
-```rust
-use msoffice_crypto::{classify, decrypt_binary_office, Document, Error};
+```rust,no_run
+use msoffice_crypto::{classify, decrypt_binary_office, Document};
 
-fn open_word_binary(path: &str, password: &str) -> Result<Option<Vec<u8>>, Error> {
-    let data = std::fs::read(path)?;
-    if classify(&data).document != Document::WordBinary {
-        return Ok(None);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let data = std::fs::read("protected.doc")?;
+    if classify(&data).document == Document::WordBinary {
+        // byte for byte what msoffcrypto-tool writes
+        let doc = decrypt_binary_office(&data, "correct horse battery staple")?;
+        std::fs::write("unlocked.doc", doc)?;
     }
-    // byte for byte what msoffcrypto-tool writes
-    decrypt_binary_office(&data, password).map(Some)
+    Ok(())
 }
 ```
 
 | Feature | Adds crypto? | Enables | Dependencies |
 | --- | :-: | --- | --- |
-| *(none — default)* | no | `classify`, `is_cfb_office` | `cfb`, `quick-xml`, `thiserror` |
-| `crypto-ops` | yes | `decrypt_ooxml`, `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_with_params`, `encrypt_ooxml_standard`, `encrypt_ooxml_standard_with_key_bits`, `check_encryptable`, `EncryptParams`, `IntegrityPolicy` / `IntegrityOutcome` | + `aes`, `cbc`, `ecb`, `sha1`, `sha2`, `hmac`, `base64`, `rand`, `secure-gate` |
-| `legacy-binary` | superset of `crypto-ops` | `decrypt_binary_office` | + `rc4`, `md-5` |
-| `cli` | via `crypto-ops` | the `msoffice-crypto` binary | + `clap`, `serde_json`, `rpassword`/`rtoolbox` (**Apache-2.0-only**) |
+| *(none — default)* | no | `classify`, `is_cfb_office` | `cfb`, `quick-xml`, `thiserror` — **13 crates** |
+| `crypto-ops` | yes | `decrypt_ooxml`, `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_with_params`, `encrypt_ooxml_standard`, `encrypt_ooxml_standard_with_key_bits`, `check_encryptable`, `EncryptParams`, `IntegrityPolicy` / `IntegrityOutcome` | + `aes`, `cbc`, `ecb`, `sha1`, `sha2`, `hmac`, `base64`, `rand`, `secure-gate` — **36 crates** |
+| `legacy-binary` | superset of `crypto-ops` | `decrypt_binary_office` | + `rc4`, `md-5` — **38 crates** |
+| `cli` | via `crypto-ops` | the `msoffice-crypto` binary | + `clap`, `serde_json`, `rpassword`/`rtoolbox` (**Apache-2.0-only**) — **49 crates** |
 
 Everything reachable from a library build is dual MIT/Apache-2.0 or more permissive.
 `rpassword` and `rtoolbox` are **Apache-2.0-only** and arrive with the CLI's non-echoing
@@ -283,6 +309,10 @@ the crate root, which also refuses an `#[allow]` override), and `cargo deny` ove
 advisories, bans and sources on every push. The first thing that job found was a reachable
 quadratic-time denial of service in this crate's XML parser — `RUSTSEC-2026-0194`,
 remediated by the `quick-xml` floor in `Cargo.toml`.
+
+## MSRV
+
+Rust **1.85**, checked by a dedicated CI job rather than declared and hoped for.
 
 ## Sibling
 
