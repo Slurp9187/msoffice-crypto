@@ -42,6 +42,7 @@ import argparse
 import collections
 import os
 import pathlib
+import posixpath
 import re
 import sys
 
@@ -61,6 +62,32 @@ ALL_DOCS = LIVE_DOCS + [
     "docs/plan-workflow.md",
     "docs/design/msoffice-crypto-format-history.md",
 ]
+
+# The files the `.crate` ships, from Cargo.toml's `include` allowlist plus the `readme`
+# Cargo adds on its own. Used by check A, and the reason is a defect this tool had:
+# `exists()` answers "is this file on disk", and the question a published README asks is
+# "does this link reach a reader". Those differ exactly at the allowlist. README.md's link
+# to `docs/plans/...` existed on disk, passed check A green, and was dead in every tarball
+# from v0.1.0-rc.2 to v0.1.0-rc.4 -- `docs/` is not in `include`, so it resolved on GitHub
+# and nowhere else. Found by the odf-crypto sibling reading this function rather than
+# trusting its name.
+#
+# Modelled from `include` rather than shelling out to `cargo package --list`, so the prose
+# job stays cargo-free. Validated against that command on 2026-09-21: 50 files, of which the
+# four this function adds by hand below are exactly the metadata Cargo contributes itself,
+# and nothing was modelled that Cargo does not ship -- which is the direction that matters,
+# since claiming a file ships when it does not would let a dead link through.
+def packaged_files():
+    txt = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    block = re.search(r"(?ms)^include\s*=\s*\[(.*?)^\]", txt)
+    shipped = set()
+    for pat in re.findall(r'"([^"]+)"', block.group(1) if block else ""):
+        shipped.update(f.relative_to(ROOT).as_posix() for f in ROOT.glob(pat) if f.is_file())
+    readme = re.search(r'(?m)^readme\s*=\s*"([^"]+)"', txt)
+    shipped.add(readme.group(1) if readme else "README.md")
+    shipped.update(("Cargo.toml", "Cargo.lock", "Cargo.toml.orig", ".cargo_vcs_info.json"))
+    return shipped
+
 
 DEFAULT_CLONES = pathlib.Path("O:/projects-github-clones")
 
@@ -110,17 +137,27 @@ def main():
 
     # ---- A: relative markdown links --------------------------------------------------
     link = re.compile(r"\[[^\]]*\]\(([^)#\s]+)(?:#[^)]*)?\)")
+    shipped = packaged_files()
     for p in DOCS:
         if p.suffix != ".md":
             continue
         txt = read(p)
+        rel_doc = p.relative_to(ROOT).as_posix()
         for m in link.finditer(txt):
             target = m.group(1)
             if target.startswith(("http://", "https://", "mailto:")):
                 continue
             if not (p.parent / target).exists():
                 flag("A dead relative link",
-                     f"{p.relative_to(ROOT).as_posix()}:{line_of(txt, m.start())} -> {target}")
+                     f"{rel_doc}:{line_of(txt, m.start())} -> {target}")
+            elif rel_doc in shipped:
+                # This document ships. On disk is not the test; in the package is.
+                resolved = posixpath.normpath(
+                    posixpath.join(posixpath.dirname(rel_doc), target))
+                if resolved not in shipped:
+                    flag("A link dead in the published crate",
+                         f"{rel_doc}:{line_of(txt, m.start())} -> {target} "
+                         f"(resolves on disk, absent from the .crate -- make it absolute)")
 
     # ---- B: internal citations -------------------------------------------------------
     # Not only `.rs`. This repository's own tools get cited as `acceptance_gate.py:84` and
