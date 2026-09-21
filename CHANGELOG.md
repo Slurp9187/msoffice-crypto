@@ -57,9 +57,10 @@ earlier version of this section printed the gate's SHA-256 and then called that 
 byte-identical to the golden, three lines apart; both could not be true.
 
 **Re-run at release.** 2026-09-21, tree `fea6d9e` clean, artifact SHA-256
-`9ac58410f50b0b3857e4e9ed0cbb4abaa1bdc1cf856a56408d0fbc00225ead5f` (41,984 bytes). The
-commits after `fea6d9e` touch prose only — no `src/` — so the bytes this verdict was earned
-on are the bytes the tag carries:
+`9ac58410f50b0b3857e4e9ed0cbb4abaa1bdc1cf856a56408d0fbc00225ead5f` (41,984 bytes). The only
+`src/` change after `fea6d9e` is a test attribute — the corpus gate below — so no
+production code moved, and the bytes this verdict was earned on are the bytes the tag
+carries:
 
 ```
 office         PASS  Word 16.0 build 16.0.19127: OPENED, content matches | WRONG PASSWORD REFUSED 0x800A1520
@@ -73,6 +74,26 @@ Full matrix green in all five feature columns — `cargo test`, `cargo clippy -D
 `cargo fmt --check`, both `cargo doc` runs under `RUSTDOCFLAGS="-D warnings"`, `cargo deny`
 over licences, advisories, bans and sources, and `tools/audit_claims.py`. Every column
 reported **0 ignored**, so no corpus fixture is missing.
+
+### A test that passed here and failed in the published crate
+
+`the_writable_tuple_matrix_is_written_to_the_durable_artifact_directory` — the test that
+writes the durable double-click artifact set — reads the `.xlsx` and `.pptx` fixtures,
+which are two of the seventeen the `include` allowlist withholds. It carried no
+`#[cfg_attr(not(fixture_corpus), ignore = …)]`, so in the tarball it did not skip. It
+panicked — `fixture {name} is committed` — and took `cargo test` down with it under
+both `crypto-ops` and `legacy-binary`.
+
+**All five feature configurations were green in this repository the whole time**, because the
+corpus is present here. The matrix cannot see this class of defect at all; only
+`docs/RELEASING.md` § 3, which unpacks the `.crate` and runs it where the corpus is absent,
+was ever going to catch it — and it did, between the dry run and the tag.
+
+The fix is the gate every other corpus-dependent test already carries. What makes the defect
+legible is the two-directional read that step exists for: a tarball reporting **0 ignored**
+means the corpus leaked into the allowlist, and a repository run reporting **anything but 0**
+means a fixture is missing. This test sat outside both readings — counted as a pass here
+and a failure there — which is exactly the gap unpacking the tarball closes.
 
 ### The tuple × reader grid — plan slice 10, and the finding it surfaced
 
@@ -527,6 +548,42 @@ to work through against §2.3.4.5 rather than a caveat to write down; the suite 
 `msoffice_crypto_encrypt_ooxml_standard_aes192.docx` and `…_aes256.docx` into
 `MSOFFICE_CRYPTO_ARTIFACT_DIR` for exactly that check, and asserts nothing about what any
 external program does with them.
+
+### The verifier hash covered the padding, and the read half is live in rc.2 and rc.3
+
+[MS-OFFCRYPTO] §2.3.4.13 hashes the array generated in step 1, which is `saltSize` bytes. The
+`0x00` pad to an AES block multiple is step 3, applied when that array is encrypted, *after*
+the hash. This crate hashed the padded array instead — in the writer, in the reader, and in
+the test helper standing between them.
+
+**The read half reaches published code.** `verify_password` takes `password_salt_size` from
+the `EncryptionInfo` of the file it was handed, and digests the whole decrypted buffer
+(`hash.digest(vi)`, verbatim in both `v0.1.0-rc.2` and `v0.1.0-rc.3`). Nothing on that path
+consults who wrote the file. So rc.2 and rc.3 return `Error::WrongPassword` — on a
+**correct** password — for any conforming agile document whose password salt is not a
+multiple of the block size. The file is fine, the password is right, and the reader blames
+the user.
+
+**Why it survived two releases.** Every writer in the world emits a 16-byte salt, and at 16
+the padded and unpadded arrays are the same bytes. Writer, reader and test helper all shared
+one error, so every round trip agreed with itself; self-consistency proved nothing.
+
+**What broke the symmetry was writing files nobody had written before.**
+`encrypt_ooxml_with_params` at `saltSize` 8 and 17 produced conforming documents that real
+Word refused with `0x800A1520` on the correct password. That is the write half. The read
+half's scope — that it applies to *foreign* files, and therefore to published code — was
+established afterwards by the downstream consumer, reading rc.3 as shipped rather than
+reasoning from this tree.
+
+An earlier account of this work, in a report rather than in this file, said the defect was
+reachable only through the new write entry point. That was wrong, in the direction that
+matters: a missing write API bounds what rc.3 can *produce*, never what it can be *asked to
+read*.
+
+**Scope, plainly.** Narrow, because such files are rare — and serious, because a false
+"wrong password" is the one refusal this crate's own rules single out as unacceptable.
+LibreOffice 26.2.1.2 carries the identical defect (`AgileEngine.cxx:346-347,354`), which is
+why the salt rows in the grid above refuse there too.
 
 ### `spinCount` is bounded at the spec's number, and was bounded below it on the read path
 

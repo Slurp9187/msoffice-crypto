@@ -955,6 +955,10 @@ const PLAIN_DOCX_TEXT: &str = "Hello, encrypted Office world!";
 /// them, and using the production entry point there is one fewer thing to keep in step
 /// with `standard_encrypt`'s own seeded core.
 #[test]
+#[cfg_attr(
+    not(fixture_corpus),
+    ignore = "needs the fixture corpus, which the published crate does not ship"
+)]
 fn the_writable_tuple_matrix_is_written_to_the_durable_artifact_directory() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("artifacts/tuples-2026-09-20");
     std::fs::create_dir_all(&dir)
