@@ -133,6 +133,30 @@ other than `ENCRYPT_ALGO_AES128` outright.<br>
 ⁸ Same defect class as ⁵, already on record: `generic-array-0.14.7/src/lib.rs:572: assertion
 left == right failed, left: 32, right: 16`.
 
+**The manual Office check — 18 of 18, and it is the row that decides this release.**
+
+Every artifact in `artifacts/tuples-2026-09-20/` was opened by hand in real Word, Excel and
+PowerPoint by the owner, on the interactive path, and every one produced the expected content.
+This is a **distinct and higher-ranked result than the `office` COM leg** in the grid above:
+`office_com_check.ps1` drives Word through automation, while Protected View, the Trust Center
+and the password dialog sit on the double-click path and not necessarily on the automated one.
+A file COM opens is not proof a person can open it.
+
+Three of those eighteen had never been confirmed by any shipping Office reader before:
+
+* **`standard_aes192.docx` and `standard_aes256.docx`.** §2.3.2 defines three AlgIDs and this
+  crate wrote one until this release. No Office reader had ever been run at AES-192 or AES-256
+  on the ECMA-376 standard path — `msoffcrypto-tool` read them byte-identically and
+  `office-crypto` 0.3 panicked on both (its bug, recorded above). Real Word opens both.
+* **`agile_default_salt8.docx` and `agile_default_salt17.docx`**, the two Word refused before
+  the verifier-hash fix below. Confirmed on the interactive path, not only through COM.
+* **AES-256/SHA-256 and AES-256/SHA-384**, the two tuples LibreOffice's four-tuple allowlist
+  refuses. Word opens both, which settles the question the grid raises: those cells are that
+  reader's limitation and not a property of the file, and the format permits the tuple.
+
+The default `agile_sha512_256_default.docx` is byte-identical to the committed golden
+(41 984 / `b4cc009e…`), so the manual pass covers the regression as well as the new tuples.
+
 **The finding this run existed for, and it was ours.** `saltSize` 8 and 17 were refused by
 **real Word** — `0x800A1520`, "the password is incorrect", on the right password. A Word
 refusal is never a reader limitation, so the two-case procedure applies and the default

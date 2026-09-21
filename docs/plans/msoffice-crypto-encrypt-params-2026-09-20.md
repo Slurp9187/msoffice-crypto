@@ -12,7 +12,7 @@ not rewrite.
 The issues half of the protocol (a parent `plan` issue, one `slice` sub-issue each) is **not
 filed**. Named here so the gap is visible rather than assumed closed.
 
-## Status at 2026-09-20
+## Status at 2026-09-21
 
 | slice | state |
 | --- | --- |
@@ -26,7 +26,7 @@ filed**. Named here so the gap is visible rather than assumed closed.
 | 7. `agile_encrypt` threading | done, `ac3bce8` |
 | 8. `lib.rs` entry point | done, `ac3bce8` |
 | 9. Tests + evidence pass | done, `ac3bce8` — ten tuples, both goldens unmoved |
-| 10. Artifacts + gate + grid | done — `artifacts/tuples-2026-09-20/` (gitignored) + the tuple x reader grid in `CHANGELOG.md`. **It did its job on the first run**: real Word refused `saltSize` 8 and 17 with `0x800A1520`, which the two-case procedure makes our bug by default, and it was — the verifier hash covered the `0x00` padding, in the writer, in `verify_password` and in the synthetic-file test helper, all three agreeing. Fixed and pinned by a test that never consults this crate's own reader. What remains is the owner opening the regenerated set by hand, which no agent can do |
+| 10. Artifacts + gate + grid | **done and cleared** — `artifacts/tuples-2026-09-20/` (gitignored), the tuple x reader grid in `CHANGELOG.md`, and the owner's manual open of all 18 files in real Word, Excel and PowerPoint: **18 of 18**, including standard AES-192/256 which no shipping Office reader had ever opened. The gate did its job on the first run — Word refused `saltSize` 8 and 17, which the two-case procedure makes our bug by default, and it was: the verifier hash covered the `0x00` padding, in the writer, in `verify_password` and in the synthetic-file test helper, all three agreeing. Fixed in `ff11e3e`, pinned by a test that never consults this crate's own reader, and both files re-verified by hand afterwards |
 | 11. Prose | partly, `64b82ce` + `ac3bce8` |
 
 **Skip 1 is closed on both halves, and it is not a numbered slice above.** The read half —
