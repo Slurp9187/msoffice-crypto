@@ -1087,9 +1087,10 @@ fn the_writable_tuple_matrix_is_written_to_the_durable_artifact_directory() {
              `0x800A1520` on the correct password, because this crate hashed the padded \
              verifier array where §2.3.4.13 hashes the saltSize bytes. Fixed, and both \
              re-opened in real Word afterwards, so a refusal here now is a NEW finding and \
-             not the known one. LibreOffice refuses saltSize 17 for an unrelated reason of \
-             its own -- `AgileEngine.cxx:260` rounds the IV up where §2.3.4.12 truncates -- \
-             which is that reader declining, not our bytes. Compare against the \
+             not the known one. LibreOffice refuses BOTH of these files, and for the \
+             very defect `ff11e3e` fixed here: `AgileEngine.cxx:346,354` hashes the \
+             verifier array with its padding. That is that reader declining, not our \
+             bytes -- real Word opens both. Compare against the \
              multiple-of-16 salt file beside this one to isolate the dimension."
         } else {
             "saltSize is a multiple of 16 but not the Office default (16) -- a control for \

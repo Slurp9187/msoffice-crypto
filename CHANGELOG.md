@@ -100,16 +100,17 @@ than a tidy table.
 
 * **The two Office `FAIL` cells were our bug**, diagnosed and fixed in `ff11e3e` (below). Word
   opens both now, and the owner's manual pass re-opened them by hand.
-* **The LibreOffice `saltSize` rows do not match the owner's interactive run**, and only one of
-  the three is explained by the fix. `salt8` was `FAIL` here and opens interactively — our bytes
-  changed. But `salt17` and `salt32` were `PASS` here and are refused interactively with
-  "password is incorrect", and **`salt32`'s bytes did not change in `ff11e3e` at all**, since 32
-  is a multiple of 16 and the padded and unpadded arrays coincide. Same bytes, two verdicts from
-  one reader: UNO accepts, the interactive open refuses.
-* That is the COM-versus-double-click distinction the plan makes for Word, showing up in
-  LibreOffice as UNO-versus-interactive. It is recorded as an open question rather than resolved
-  — the interactive verdict is the one that matters to a person, and the automated legs of this
-  gate measure the other path.
+* **The LibreOffice `saltSize` rows measured different bytes and cannot be read against the
+  owner's interactive run cell by cell.** This grid predates `ff11e3e`; the interactive run
+  follows it, and the fix changed every file whose `saltSize` is not a multiple of 16.
+  `salt17` is `PASS` here and refused interactively for precisely that reason — before the fix
+  we hashed the padded array, which is what LibreOffice hashes, so we agreed with it by
+  sharing its defect.
+* **The one file whose bytes did not change got the same verdict from both runs.** `salt32` is
+  a multiple of 16, so `ff11e3e` left it byte-identical, and it is `PASS` here and opens
+  interactively. That retracts the "UNO accepts, the interactive open refuses" reading an
+  earlier version of this entry filed as an open question: it rested on transposed verdicts,
+  and the only genuine same-bytes comparison available has the two paths agreeing.
 
 Every `NOT RUN⁵`/`NOT RUN⁸` cell in the office-crypto column was corrected to
 `REFUSED-BY-READER` after an audit: office-crypto *ran* and panicked on our file, which is a
@@ -187,7 +188,7 @@ artifacts, which is what makes the comparison worth anything.
 | refused | cause | LibreOffice source (MPL-2.0, read for behaviour only) |
 | --- | --- | --- |
 | the six off-allowlist agile tuples | the four-tuple allowlist: AES-128/SHA-1, AES-128/SHA-384, AES-192/SHA-384, AES-256/SHA-512 and nothing else | `AgileEngine.cxx:574-612` |
-| `agile_default_salt17`, `agile_default_salt32` | the IV's **truncate** branch is not implemented | `AgileEngine.cxx:260` |
+| `agile_default_salt8`, `agile_default_salt17` | the verifier array is hashed **with its padding** — the identical defect `ff11e3e` fixed here | `AgileEngine.cxx:346,354` |
 | `standard_aes192`, `standard_aes256` | the standard path is AES-128 only | `Standard2007Engine.cxx:311, :319` |
 
 **The allowlist prediction was confirmed exactly rather than approximately.** The grid above
@@ -196,21 +197,38 @@ four more, and the eight that pass are precisely the four allowlisted tuples acr
 default-tuple files. Ten of ten agile rows match the documented list. A prediction that
 survives at that resolution is worth more than the two cells it was written for.
 
-**The salt rows are a new finding about LibreOffice and the mirror image of ours.**
-§2.3.4.12: "pad the array of bytes by appending `0x36` until the array is `blockSize` bytes.
-**If the array of bytes is larger than `blockSize` bytes, truncate the array to `blockSize`
-bytes.**" `AgileEngine.cxx:260` resizes the IV to `roundUp(size, blockSize)` filled with
-`0x36` — correct for a short salt, and for a long one it rounds *up* where the spec says
-truncate. So `saltSize` 17 yields a 32-byte IV where the format says 16, and 32 stays 32.
-That is exactly the split the owner measured: `salt8` is the pad branch and opens; 17 and 32
-are the truncate branch and do not.
+**The salt rows are the same defect this release just fixed, in LibreOffice — and fixing
+ours is what exposed it.**
 
-Worth stating the symmetry plainly. This release fixed a defect of ours that was invisible at
-`saltSize` 16 because padded and unpadded coincide there; LibreOffice carries one that is
-invisible at 16 because `roundUp(16, 16) == 16`. **Two implementations, the same blind spot,
-created by the same fact — that every real writer emits a 16-byte salt and nothing else has
-ever been exercised.** Ours was found by Word refusing a file; theirs by us writing one nobody
-had written before.
+`AgileEngine.cxx:346-347` sizes the buffer it is about to hash to
+`roundUp(saltSize, blockSize)` — the padded length — and `:354` digests the whole of it.
+§2.3.4.13 hashes the array step 1 generated, which is `saltSize` bytes; the pad is step 3, and
+it happens *after* the hash. That is byte for byte the mistake this crate carried in three
+places until `ff11e3e`.
+
+It predicts all three of the owner's measurements exactly:
+
+| file | this crate hashes | LibreOffice hashes | verdict |
+| --- | --- | --- | --- |
+| `salt8` | 8 bytes | `roundUp(8, 16)` = 16 | differ → "password is incorrect" |
+| `salt17` | 17 bytes | `roundUp(17, 16)` = 32 | differ → "password is incorrect" |
+| `salt32` | 32 bytes | `roundUp(32, 16)` = 32 | identical → **opens** |
+
+**Before `ff11e3e` we shared the bug, so we agreed with LibreOffice; correcting ours is what
+made us disagree.** Two independent implementations reached the same wrong reading of the same
+sentence, and neither could see it, because every writer in the world emits a 16-byte salt and
+at 16 the padded and unpadded arrays are the same bytes. Word — whose vendor wrote both the
+format and the reader — opens all three, and that is what settles which reading is right.
+
+**This entry's own first version got that wrong, and recording the correction is the point of
+it.** It claimed LibreOffice fails to implement §2.3.4.12's IV *truncate* branch, citing
+`AgileEngine.cxx:260`. That was wrong twice over. The verdicts it was built on were
+transposed — `salt8` read as passing when it failed — and one transposed row made a false
+theory fit all three cells. And the mechanism does not exist: `calculateIV` (`:252-261`)
+rounds up the **digest** of salt‖blockKey, whose length is fixed by the hash, so it never
+reads `saltSize` at all and cannot tell these three files apart. Corrected in place rather
+than quietly amended, because a citation-backed claim that is wrong is worse than no claim,
+and this entry spends several paragraphs saying exactly that about other people's software.
 
 **Neither refusal says "unsupported", and one of them is actively misleading.** The two
 failure modes produce two different wrong sentences, both recorded verbatim by the owner:
