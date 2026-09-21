@@ -1,4 +1,4 @@
-Status: Pre-release — the first published version has not been cut yet
+Status: Pre-release — release candidates are published; no stable 0.1.0 has been cut
 
 # Changelog
 

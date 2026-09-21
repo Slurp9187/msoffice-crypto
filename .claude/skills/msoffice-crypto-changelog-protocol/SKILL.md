@@ -87,11 +87,12 @@ version, so it always names it.
 
 ## Tags
 
-**This repository has no tags yet**, and `docs/RELEASING.md` gained its tagging step at the
-same time as this skill. The reason a tag matters here is narrower than convention: the crate
-argues its claims are checkable, and without a tag a consumer holding `0.1.0-rc.1` from
-crates.io has no ref to check out and re-run the suite against. The `.crate` is immutable;
-the tag is what ties it to a tree.
+**This repository is tagged at every published version**, and also at `v0.1.0-rc.1`, which
+was tagged before the decision not to publish it. `docs/RELEASING.md` gained its tagging
+step at the same time as this skill. The reason a tag matters here is narrower than
+convention: the crate argues its claims are checkable, and without a tag a consumer holding a
+published version from crates.io has no ref to check out and re-run the suite against. The
+`.crate` is immutable; the tag is what ties it to a tree.
 
 Use an **annotated** tag, and push the branch and tag together:
 

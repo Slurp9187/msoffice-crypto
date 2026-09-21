@@ -11,7 +11,7 @@ sibling solved it before inventing something new.
 
 ## Project Status — release candidates published, no stable release
 
-> **`0.1.0-rc.2` (2026-09-16) and `0.1.0-rc.3` (2026-09-19) are live on crates.io, neither
+> **`0.1.0-rc.2` (2026-09-15) and `0.1.0-rc.3` (2026-09-19) are live on crates.io, neither
 > yanked. There is no stable release. The only known consumer is a private application in
 > the same hands.**
 
@@ -19,6 +19,11 @@ This section said "has never been published" until 2026-09-19, two weeks after i
 being true. The conclusions below were right anyway, but for a reason the text did not give,
 so the reason is now written down: the latitude comes from the **release-candidate line**,
 not from nothing having shipped.
+
+The dates are local, as `CHANGELOG.md`'s are: rc.2's registry timestamp is
+`2026-09-16T03:04Z`, which is the same evening on a UTC-7 machine. This file carried that
+UTC date until 2026-09-21 — the drift the changelog convention exists to stop,
+reappearing in the file that states the convention.
 
 An `0.1.0-rc.N` is unstable twice over. It is `0.x`, which semver puts outside its
 compatibility guarantee, and it is a pre-release, which Cargo will not resolve for anyone who
