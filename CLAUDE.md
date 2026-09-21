@@ -42,15 +42,16 @@ an rc line is for.
   includes — all fine, and expected, in a 0.x crate with one consumer.
 - **The one real constraint is that consumer's Office handler, and it is live.** It was
   dormant until rc.2 published and this file said so for four days after it stopped being
-  true. Verified 2026-09-20 in the consumer's own tree rather than taken on report: it takes
-  this crate from crates.io pinned at exactly `0.1.0-rc.2` with default features off, enables
+  true. Verified 2026-09-21 in the consumer's own tree rather than taken on report
+  (`Cargo.toml:455`): it takes this crate from crates.io pinned at exactly `0.1.0-rc.3`
+  with default features off, enables
   it through `msoffice-crypto/legacy-binary` (the superset, for
   `decrypt_binary_office`), and calls six entry points — `encrypt_ooxml`, `classify`,
   `is_cfb_office`, `decrypt_ooxml_with_policy`, `decrypt_binary_office` and
   `encrypt_ooxml_standard`. **Every item on the old re-enable list is done**, so that list is
   history rather than a to-do.
 
-  What replaces it: **the pin is two releases back, and a bump is the event to write for.**
+  What replaces it: **the pin is one release back, and a bump is the event to write for.**
   An API change here reaches nobody until someone moves that `=` pin, so when you change the
   API, say in your report what the bump lands — not what a re-enable would need. Both kinds
   of change count, and they are not equally visible: a refusal that did not exist before
@@ -335,10 +336,15 @@ Verify with
 
 **secure-gate version.** This crate tracks 0.9.x, matching `odf-crypto`, and the
 dependency is optional on `crypto-ops` — the detection build holds no key material.
-The consumer named above pins `=0.8.0-rc.10` and resolves both side by side, which works
-because **no secure-gate type crosses this crate's public API, by design**: the plan to
-move the boundary onto its types ("S1 part 3") was withdrawn as a design error on
-2026-09-04 and is not coming back without new evidence. The secure-gate skill is the
+Both this crate and the consumer named above pin `=0.9.0-rc.12` (`Cargo.toml:326` here,
+`Cargo.toml:317` there, verified 2026-09-21), so today they resolve to one copy rather than
+two. That is a coincidence of timing and not a requirement: **no secure-gate type crosses
+this crate's public API, by design**, so a consumer on a different version resolves both
+side by side without conflict. The plan to move the boundary onto its types ("S1 part 3")
+was withdrawn as a design error on 2026-09-04 and is not coming back without new evidence.
+This paragraph claimed the consumer was on `=0.8.0-rc.10` until 2026-09-21 — two versions
+stale, and stale in the direction that made the side-by-side case look load-bearing when
+nothing was currently exercising it. The secure-gate skill is the
 authority on what is wrapped; it agrees.
 
 ---
