@@ -9,16 +9,26 @@
 //! Algorithm:
 //!
 //! ```text
-//! 1. Parse binary EncryptionHeader → AlgID (must be AES), AlgIDHash (SHA-1), KeySize
+//! 1. Parse binary EncryptionHeader → AlgID (AES-128, AES-192 or AES-256),
+//!    AlgIDHash (SHA-1), KeySize (which must agree with the AlgID)
 //! 2. Find EncryptionVerifier at the declared EncryptionHeaderSize
 //! 3. Spin hash: H_0 = SHA1(salt + password_utf16le)
 //!               H_i = SHA1(LE32(i) + H_{i-1})  for i in 0..50_000
 //! 4. H_final = SHA1(H_n + LE32(0))   — the block-0 step
 //!    X1 = SHA1(H_final XOR 0x36-pad64), X2 = SHA1(H_final XOR 0x5C-pad64)
 //!    Final key = (X1 || X2)[..key_size]   — concatenated, not hashed again
-//! 5. Verify password via AES-128-ECB on EncryptedVerifier
+//! 5. Verify password via AES-ECB on EncryptedVerifier
 //! 6. Decrypt EncryptedPackage in 4096-byte ECB segments
 //! ```
+//!
+//! **One key length is not one KDF.** Steps 3 and 4 do not branch on the key size at
+//! all: [MS-OFFCRYPTO] §2.3.4.7 fixes `H` at SHA-1 and the iteration count at 50 000,
+//! and the only key-size-dependent step in the whole derivation is step 6 of the
+//! enumerated key-derivation method — "let keyDerived be equal to the first
+//! `cbRequiredKeyLength` bytes of X3" — with step 1 capping `cbRequiredKeyLength` at 40,
+//! inside which AES-256's 32 bytes sit. So AES-192 and AES-256 are the same forty bytes
+//! of ladder output cut in a different place, and nothing else. Until 2026-09-20 they
+//! were nevertheless refused **by name**.
 //!
 //! Since GH #7 the steps a writer inverts are seams rather than inline code:
 //! [`parse_encryption_info`] (1-2), [`derive_standard_key`] (3-4) and
@@ -29,7 +39,7 @@
 use crate::error::Error;
 use crate::limits;
 use crate::sensitive::{utf16le_password, DerivedKey, PasswordDigest, VerifierPlaintext};
-use aes::Aes128;
+use aes::{Aes128, Aes192, Aes256};
 use ecb::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyInit};
 use secure_gate::{ConstantTimeEq, RevealSecret};
 use sha1::{Digest, Sha1};
@@ -48,9 +58,13 @@ use sha1::{Digest, Sha1};
 /// only because `standard_encrypted.docx` declares the spec-forbidden `fAES` + `0x6801`
 /// pair, and it cost two answers: a conforming `0x660E` file was refused, and a genuine
 /// RC4 CryptoAPI file reached the AES path and came back `WrongPassword`.
+///
+/// All three AES identifiers are `pub(crate)` because `standard_encrypt` now **emits**
+/// one of them: the reader's table and the writer's are the same three numbers, declared
+/// once here, so a writer cannot name a cipher this reader would refuse.
 pub(crate) const ALG_ID_AES_128: u32 = 0x0000_660E;
-const ALG_ID_AES_192: u32 = 0x0000_660F;
-const ALG_ID_AES_256: u32 = 0x0000_6610;
+pub(crate) const ALG_ID_AES_192: u32 = 0x0000_660F;
+pub(crate) const ALG_ID_AES_256: u32 = 0x0000_6610;
 const ALG_ID_RC4: u32 = 0x0000_6801;
 
 /// `AlgIDHash` for SHA-1 — `CALG_SHA1`, [MS-OFFCRYPTO] §2.3.2. The only hash this format
@@ -88,8 +102,30 @@ pub(crate) const ENCRYPTION_VERIFIER_LEN: usize = 72;
 /// because the reader is the module that must not trust the number.
 pub(crate) const HEADER_FIXED_LEN: usize = 32;
 
-/// AES-128 key length in bytes — what every cipher call in this module assumes.
+/// AES-128 key length in bytes — what `standard_encrypt` writes, and the smallest of
+/// the three [`AES_KEY_LENS`] this module's cipher calls accept.
 pub(crate) const AES128_KEY_LEN: usize = 16;
+
+/// The three AES key lengths in bytes, in the order [`limits::STANDARD_KEY_BITS_AES`]
+/// gives them: AES-128, AES-192, AES-256.
+///
+/// Fixed by AES, not by [MS-OFFCRYPTO] — but §2.3.2's `KeySize` table enumerates the
+/// same three in bits, so on this path the format and the cipher agree and the header
+/// is checked against the format's list (see [`aes_key_bits`]). This one exists for
+/// [`check_aes_key`], whose subject is the cipher's requirement rather than the file's
+/// declaration.
+const AES_KEY_LENS: [usize; 3] = [16, 24, 32];
+
+const _: () = {
+    assert!(AES_KEY_LENS[0] == AES128_KEY_LEN);
+    assert!(AES_KEY_LENS[0] * 8 == limits::STANDARD_KEY_BITS_AES[0] as usize);
+    assert!(AES_KEY_LENS[1] * 8 == limits::STANDARD_KEY_BITS_AES[1] as usize);
+    assert!(AES_KEY_LENS[2] * 8 == limits::STANDARD_KEY_BITS_AES[2] as usize);
+    // §2.3.4.7 step 1: "cbRequiredKeyLength MUST be less than or equal to 40", and the
+    // ladder yields exactly 2 × SHA1_LEN = 40. AES-256's key is the largest this format
+    // can name and it fits with 8 bytes to spare, which is why one KDF serves all three.
+    assert!(AES_KEY_LENS[2] <= 2 * SHA1_LEN);
+};
 
 /// What a standard `EncryptionInfo` stream declares, borrowed from it — every field
 /// [`decrypt`] acts on and nothing it does not.
@@ -97,7 +133,8 @@ pub(crate) const AES128_KEY_LEN: usize = 16;
 /// The lengths are fixed by [`parse_encryption_info`] before this exists: the salt and
 /// the verifier are 16 bytes each and the verifier hash is 32, the split of the 72-byte
 /// [`ENCRYPTION_VERIFIER_LEN`]. `key_size_bytes` is the one number that comes from a
-/// field rather than from the layout, and it is pinned to 16 on the way here.
+/// field rather than from the layout, and on the way here it is pinned to 16, 24 or 32 —
+/// the `KeySize` the file declares, checked against the cipher its `AlgID` names.
 pub(crate) struct StandardParams<'a> {
     /// `EncryptionVerifier.Salt`.
     pub(crate) salt: &'a [u8],
@@ -121,8 +158,8 @@ pub(crate) struct StandardParams<'a> {
 ///
 /// [`Error::MissingStream`] if the header is truncated;
 /// [`Error::BadParameters`] if `EncryptionHeaderSize` or a sibling field is
-/// out of range; [`Error::UnsupportedAlgorithm`] if `AlgID` is not AES-128 or
-/// `AlgIDHash` is not SHA-1; [`Error::WrongPassword`] if the verifier does not
+/// out of range; [`Error::UnsupportedAlgorithm`] if `AlgID` names a cipher other than
+/// AES or `AlgIDHash` is not SHA-1; [`Error::WrongPassword`] if the verifier does not
 /// match; [`Error::CipherError`] if an AES-ECB step rejects a block.
 pub(crate) fn decrypt(
     info: &[u8],
@@ -200,21 +237,37 @@ pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, E
     let _provider_type = read_u32(h, 20);
     // Reserved1 at 24, Reserved2 at 28 — ignored
 
-    require_aes_128(flags, alg_id)?;
+    let named_key_bits = aes_key_bits(flags, alg_id)?;
     require_sha1(alg_id_hash)?;
 
-    // AlgID says AES-128, so KeySize must say 128: [MS-OFFCRYPTO] gives AES-192 and
-    // AES-256 their own AlgIDs, rejected above. The field is nevertheless an
-    // unconstrained u32 out of the file and it sizes two buffers below —
-    // `KeySize / 8` truncates the fixed 40-byte XOR-ladder output (panics above 320)
-    // and the result is then handed to AES-128 (panics for anything but 16). Neither
-    // needs a password to reach: both run before the verifier comparison.
-    if key_size_bits != limits::STANDARD_KEY_BITS_AES128 {
+    // `KeySize` is an unconstrained u32 out of the file and it sizes two buffers below —
+    // `KeySize / 8` truncates the fixed 40-byte XOR-ladder output (a panic above 320
+    // bits) and the result is then handed to AES (a panic for anything but 16, 24 or
+    // 32). Neither needs a password to reach: both run before the verifier comparison.
+    //
+    // Two checks, because the file makes two separate statements. First, the value must
+    // be one [MS-OFFCRYPTO] §2.3.4.5 permits: "This value MUST be 0x00000080 (AES-128),
+    // 0x000000C0 (AES-192), or 0x00000100 (AES-256)."
+    if !limits::STANDARD_KEY_BITS_AES.contains(&key_size_bits) {
         return Err(Error::BadParameters(format!(
-            "EncryptionHeader.KeySize is {key_size_bits}; this crate implements AES-128 \
-             only, which requires {}",
-            limits::STANDARD_KEY_BITS_AES128
+            "EncryptionHeader.KeySize is {key_size_bits}; [MS-OFFCRYPTO] 2.3.4.5 permits \
+             {:?} for AES",
+            limits::STANDARD_KEY_BITS_AES
         )));
+    }
+    // Second, where the `AlgID` names a key length of its own, `KeySize` must agree with
+    // it: §2.3.2 gives AES-128, AES-192 and AES-256 three distinct AlgIDs *and* three
+    // distinct `KeySize` values, so a header pairing `0x0000660E` with 256 describes no
+    // cipher at all. Taking either field alone would silently pick a winner — and the
+    // wrong pick is a 32-byte key run against AES-128's schedule, i.e. `WrongPassword`
+    // for a password that was right.
+    if let Some(named) = named_key_bits {
+        if key_size_bits != named {
+            return Err(Error::BadParameters(format!(
+                "EncryptionHeader.KeySize is {key_size_bits} but AlgID {alg_id:#010x} names \
+                 AES-{named}; [MS-OFFCRYPTO] 2.3.2 pairs each AlgID with one KeySize"
+            )));
+        }
     }
 
     let key_size_bytes = (key_size_bits / 8) as usize;
@@ -279,8 +332,8 @@ pub(crate) fn verify_password(key: &DerivedKey, params: &StandardParams<'_>) -> 
     let (dec_verifier, dec_hash) = key.with_secret(
         |k| -> Result<(VerifierPlaintext, VerifierPlaintext), Error> {
             Ok((
-                VerifierPlaintext::new(aes128_ecb_decrypt(k, params.encrypted_verifier)?),
-                VerifierPlaintext::new(aes128_ecb_decrypt(k, params.encrypted_verifier_hash)?),
+                VerifierPlaintext::new(aes_ecb_decrypt(k, params.encrypted_verifier)?),
+                VerifierPlaintext::new(aes_ecb_decrypt(k, params.encrypted_verifier_hash)?),
             ))
         },
     )?;
@@ -307,52 +360,71 @@ pub(crate) fn verify_password(key: &DerivedKey, params: &StandardParams<'_>) -> 
     Ok(())
 }
 
-/// The cipher this file names, refusing everything but AES-128 **by name**.
+/// The cipher this file names: AES at one of three key lengths, or a refusal **by name**.
 ///
-/// Two fields decide it and both are read, in the precedence [MS-OFFCRYPTO] §2.3.1
+/// Returns the key length in bits that `Flags` and `AlgID` between them declare, or
+/// `None` where they name AES without naming a length — in which case `KeySize` is the
+/// file's only statement of it and the caller takes that instead.
+///
+/// **Both fields decide it and both are read**, in the precedence [MS-OFFCRYPTO] §2.3.1
 /// gives: "If the fAES encryption bit is set, a block cipher that supports ECB mode MUST
 /// be used." RC4 is a stream cipher, so with the bit set the `AlgID` does not get to name
 /// RC4 — and §2.3.2's combination table, which the two fields "MUST be set to one of",
 /// carries no row pairing `fAES` with `0x00006801` at all. That is not academic —
-/// `standard_encrypted.docx`
-/// declares exactly that forbidden pair and is AES-128 in fact, and `classify` already
-/// reads it this way (`classify::classify_standard`). Reading `AlgID` alone, as this
-/// function's predecessor did, made the decryptor and the classifier disagree about the
-/// same bytes.
+/// `standard_encrypted.docx` declares exactly that forbidden pair and is AES-128 in fact,
+/// and `classify` already reads it this way (`classify::classify_standard`). Reading
+/// `AlgID` alone, as this function's predecessor did, made the decryptor and the
+/// classifier disagree about the same bytes.
+///
+/// **The three AES rows, from §2.3.2's `AlgID` table verbatim:** `0x0000660E` is
+/// "128-bit AES", `0x0000660F` "192-bit AES", `0x00006610` "256-bit AES"; §2.3.4.5 says
+/// of the same field "This value MUST be 0x0000660E (AES-128), 0x0000660F (AES-192), or
+/// 0x00006610 (AES-256)." Until 2026-09-20 this function was `require_aes_128` and
+/// refused the latter two outright, so a conforming Office 2007 document using either was
+/// unopenable — an owner locked out of their own file by this crate's choice and not by
+/// the format's. Nothing else on the path needed to change: §2.3.4.7's KDF does not
+/// branch on the key length (see this module's header), and `AlgIDHash` and the iteration
+/// count are fixed by the format at SHA-1 and 50 000 whatever `AlgID` says.
+///
+/// The `None` arm is the forbidden `fAES` + `0x00006801` pair. §2.3.1 makes it AES, and
+/// §2.3.2's combination table has no row for it and therefore states no key length, so
+/// there is nothing here to agree or disagree with `KeySize` about. `AlgID = 0` is
+/// different and is **not** this case: the table's `fCryptoAPI=1, fAES=1, fExternal=0,
+/// AlgID=0x00000000` row reads "128-bit AES" in so many words, so the length is declared.
 ///
 /// The refusal is [`Error::UnsupportedAlgorithm`], never
 /// `UnsupportedEncryptionVersion`: an RC4 CryptoAPI file is a well-formed `vMinor = 2`
 /// document this crate has not implemented, and the version pair is not what is wrong
 /// with it. It used to come back `WrongPassword` — the AES verifier comparison failing on
 /// an RC4 file — which is the one answer that is actively misleading.
-fn require_aes_128(flags: u32, alg_id: u32) -> Result<(), Error> {
+fn aes_key_bits(flags: u32, alg_id: u32) -> Result<Option<u32>, Error> {
     const WHAT: &str = "EncryptionHeader/@AlgID";
 
-    // Named AES, but a key length this crate does not implement. Checked before the fAES
-    // branch: the file is unambiguous about the cipher and the flag cannot rescue it.
-    if alg_id == ALG_ID_AES_192 || alg_id == ALG_ID_AES_256 {
-        let name = if alg_id == ALG_ID_AES_192 {
-            "AES-192 (0x0000660f)"
-        } else {
-            "AES-256 (0x00006610)"
-        };
-        return Err(Error::UnsupportedAlgorithm {
-            what: WHAT,
-            name: name.to_string(),
-        });
+    // The three AlgIDs that name a cipher and a key length at once. Checked before the
+    // fAES branch, in both directions: the file is unambiguous about the cipher, and
+    // `standard_encrypted.docx` shows the flag is not always trustworthy on its own.
+    match alg_id {
+        ALG_ID_AES_128 => return Ok(Some(limits::STANDARD_KEY_BITS_AES[0])),
+        ALG_ID_AES_192 => return Ok(Some(limits::STANDARD_KEY_BITS_AES[1])),
+        ALG_ID_AES_256 => return Ok(Some(limits::STANDARD_KEY_BITS_AES[2])),
+        _ => {}
     }
 
-    // fAES set: the header says AES regardless of what AlgID spells, which is the
-    // spec's own precedence and what the fixture needs. `KeySize` is checked next and
-    // pins the length to 128.
     if flags & FLAG_AES != 0 {
-        return Ok(());
+        // fAES set with an AlgID that is not one of the three. `0x00000000` means
+        // "determined by Flags" (§2.3.2) and the combination table's fAES row for it
+        // says 128-bit AES; anything else (in practice RC4's `0x00006801`) is a
+        // combination the table does not carry, so the length is left to `KeySize`.
+        return Ok(if alg_id == 0 {
+            Some(limits::STANDARD_KEY_BITS_AES[0])
+        } else {
+            None
+        });
     }
 
     // fAES clear. `AlgID = 0` means "determined by Flags" ([MS-OFFCRYPTO] §2.3.2), and
     // with the AES bit clear that is RC4.
     match alg_id {
-        ALG_ID_AES_128 => Ok(()),
         ALG_ID_RC4 | 0 => Err(Error::UnsupportedAlgorithm {
             what: WHAT,
             name: "RC4 CryptoAPI (0x00006801)".to_string(),
@@ -509,7 +581,7 @@ fn decrypt_package(key: &DerivedKey, encrypted_package: &[u8]) -> Result<Vec<u8>
         if rem != 0 {
             padded.resize(padded.len() + (16 - rem), 0);
         }
-        let dec = key.with_secret(|k| aes128_ecb_decrypt(k, &padded))?;
+        let dec = key.with_secret(|k| aes_ecb_decrypt(k, &padded))?;
         output.extend_from_slice(&dec);
     }
 
@@ -523,49 +595,80 @@ fn decrypt_package(key: &DerivedKey, encrypted_package: &[u8]) -> Result<Vec<u8>
 /// reason: `GenericArray::from_slice` panics on a length mismatch, and on the decrypt
 /// side the length is reachable from `EncryptionHeader.KeySize`, an unconstrained u32 in
 /// the file. The check belongs here *as well as* at the parse boundary — the parse check
-/// states what this crate accepts, this one states what the cipher requires, and a
-/// future caller that skips the first still hits the second.
-fn check_aes128_key(key: &[u8]) -> Result<(), Error> {
-    if key.len() != AES128_KEY_LEN {
+/// states what the *format* permits and what the file's own `AlgID` agrees with, this one
+/// states what the cipher requires, and a future caller that skips the first still hits
+/// the second.
+fn check_aes_key(key: &[u8]) -> Result<(), Error> {
+    if !AES_KEY_LENS.contains(&key.len()) {
         return Err(Error::BadParameters(format!(
-            "AES-128 needs a {}-byte key; this file's parameters produced {}",
-            AES128_KEY_LEN,
+            "AES-ECB takes a 16-, 24- or 32-byte key; this file's parameters produced {}",
             key.len()
         )));
     }
     Ok(())
 }
 
-/// AES-128-ECB decrypt with NoPadding — the read half of [`aes128_ecb_encrypt`], with the
-/// same key rule. Data must be a multiple of 16 bytes; anything else is
-/// [`Error::CipherError`], never a panic.
-pub(crate) fn aes128_ecb_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
+/// AES-ECB decrypt with NoPadding, AES-128/192/256 by key length — the read half of
+/// [`aes_ecb_encrypt`], with the same key rule. Data must be a multiple of 16 bytes;
+/// anything else is [`Error::CipherError`], never a panic.
+///
+/// **AES-128, AES-192 and AES-256, chosen by key length** — since 2026-09-20. Before that
+/// this was `aes_ecb_decrypt` and the only key length in the module, which is why
+/// `parse_encryption_info` had to refuse AES-192 and AES-256 by name one frame earlier.
+/// The dispatch is `agile::aes_cbc_decrypt`'s, deliberately: the two modules now decide
+/// the cipher the same way, from the same fact, so neither can be fixed without the
+/// other's shape being visible.
+pub(crate) fn aes_ecb_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
     use aes::cipher::generic_array::GenericArray;
-    check_aes128_key(key)?;
-    let key = GenericArray::from_slice(key);
+    check_aes_key(key)?;
     let mut out = vec![0u8; ciphertext.len()];
-    ecb::Decryptor::<Aes128>::new(key)
-        .decrypt_padded_b2b_mut::<NoPadding>(ciphertext, &mut out)
-        .map_err(|_| Error::CipherError)?;
+    // The key length *is* the cipher, and `check_aes_key` has already refused every
+    // length AES does not define — which is what makes the third arm total rather than
+    // a guess.
+    macro_rules! run {
+        ($cipher:ty) => {
+            ecb::Decryptor::<$cipher>::new(GenericArray::from_slice(key))
+                .decrypt_padded_b2b_mut::<NoPadding>(ciphertext, &mut out)
+        };
+    }
+    match key.len() {
+        16 => run!(Aes128),
+        24 => run!(Aes192),
+        _ => run!(Aes256),
+    }
+    .map_err(|_| Error::CipherError)?;
     Ok(out)
 }
 
-/// AES-128-ECB encrypt with NoPadding — the write half of [`aes128_ecb_decrypt`], with
-/// the same key rule. Data must be a multiple of 16 bytes; anything else is
-/// [`Error::CipherError`], never a panic.
+/// AES-ECB encrypt with NoPadding, AES-128/192/256 by key length — the write half of
+/// [`aes_ecb_decrypt`], with the same key rule. Data must be a multiple of 16 bytes;
+/// anything else is [`Error::CipherError`], never a panic.
 ///
 /// ECB has no IV and no chaining, which is why the standard format needs no segment
 /// iterator and no per-segment IV derivation: every block is independent, and the
 /// writer's job is only to pad the tail to a block. That independence is also why the
 /// format is the weaker one — see `standard_encrypt`'s header.
-pub(crate) fn aes128_ecb_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
+///
+/// `standard_encrypt` hands this a 16-byte key and nothing else today; the other two arms
+/// exist because the reader's tests drive this function to build the AES-192 and AES-256
+/// containers no writer of ours yet emits, and because letting the two directions differ
+/// in what they accept is how a crate ends up writing a file it cannot read.
+pub(crate) fn aes_ecb_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
     use aes::cipher::generic_array::GenericArray;
-    check_aes128_key(key)?;
-    let key = GenericArray::from_slice(key);
+    check_aes_key(key)?;
     let mut out = vec![0u8; plaintext.len()];
-    ecb::Encryptor::<Aes128>::new(key)
-        .encrypt_padded_b2b_mut::<NoPadding>(plaintext, &mut out)
-        .map_err(|_| Error::CipherError)?;
+    macro_rules! run {
+        ($cipher:ty) => {
+            ecb::Encryptor::<$cipher>::new(GenericArray::from_slice(key))
+                .encrypt_padded_b2b_mut::<NoPadding>(plaintext, &mut out)
+        };
+    }
+    match key.len() {
+        16 => run!(Aes128),
+        24 => run!(Aes192),
+        _ => run!(Aes256),
+    }
+    .map_err(|_| Error::CipherError)?;
     Ok(out)
 }
 
@@ -809,31 +912,38 @@ mod tests {
         assert!(derive_standard_key("pw", b"1234567890123456", 40).is_ok());
     }
 
-    /// `GenericArray::from_slice` panics on any length but 16, and the length reaches
-    /// here from `EncryptionHeader.KeySize`. This is the mirror of the guard
-    /// `agile::aes_cbc_decrypt` already had — the sibling function did not get it,
-    /// so a `KeySize` of 0, 64 or 256 bits cleared the slice above and crashed here.
+    /// `GenericArray::from_slice` panics on any length AES does not define, and the
+    /// length reaches here from `EncryptionHeader.KeySize`. This is the mirror of the
+    /// guard `agile::aes_cbc_decrypt` already had — the sibling function did not get it,
+    /// so a `KeySize` of 0 or 64 bits cleared the slice above and crashed here.
     /// Both directions share the rule, so both are asserted.
+    ///
+    /// 32 used to be in the refusal list, because this module was AES-128 only. It is in
+    /// the control list now: AES-256 is [MS-OFFCRYPTO] §2.3.2's `0x00006610`, and the
+    /// length the cipher refuses is the length AES refuses, not the length this crate
+    /// had implemented.
     #[test]
-    fn aes128_key_length_is_checked_not_asserted() {
-        for key_len in [0usize, 8, 15, 17, 32, 40] {
+    fn aes_key_length_is_checked_not_asserted() {
+        for key_len in [0usize, 8, 15, 17, 23, 25, 31, 33, 40] {
             assert!(
                 matches!(
-                    aes128_ecb_decrypt(&vec![0u8; key_len], &[0u8; 16]),
+                    aes_ecb_decrypt(&vec![0u8; key_len], &[0u8; 16]),
                     Err(Error::BadParameters(_))
                 ),
                 "a {key_len}-byte key must be an error, not a panic"
             );
             assert!(
                 matches!(
-                    aes128_ecb_encrypt(&vec![0u8; key_len], &[0u8; 16]),
+                    aes_ecb_encrypt(&vec![0u8; key_len], &[0u8; 16]),
                     Err(Error::BadParameters(_))
                 ),
                 "a {key_len}-byte key must be an error on the encrypt side too"
             );
         }
-        assert!(aes128_ecb_decrypt(&[0u8; 16], &[0u8; 16]).is_ok());
-        assert!(aes128_ecb_encrypt(&[0u8; 16], &[0u8; 16]).is_ok());
+        for key_len in AES_KEY_LENS {
+            assert!(aes_ecb_decrypt(&vec![0u8; key_len], &[0u8; 16]).is_ok());
+            assert!(aes_ecb_encrypt(&vec![0u8; key_len], &[0u8; 16]).is_ok());
+        }
     }
 
     /// `NoPadding` means the caller pads; a length that is not a block multiple is a
@@ -843,14 +953,14 @@ mod tests {
         for len in [1usize, 15, 17, 4095] {
             assert!(
                 matches!(
-                    aes128_ecb_encrypt(&[0u8; 16], &vec![0u8; len]),
+                    aes_ecb_encrypt(&[0u8; 16], &vec![0u8; len]),
                     Err(Error::CipherError)
                 ),
                 "{len} bytes must be refused by the encrypt side"
             );
             assert!(
                 matches!(
-                    aes128_ecb_decrypt(&[0u8; 16], &vec![0u8; len]),
+                    aes_ecb_decrypt(&[0u8; 16], &vec![0u8; len]),
                     Err(Error::CipherError)
                 ),
                 "{len} bytes must be refused by the decrypt side"
@@ -902,26 +1012,38 @@ mod tests {
         assert!(out.starts_with(&plaintext), "the padding is what follows");
     }
 
+    const FAES: u32 = FLAG_AES | 0x0000_0004; // fAES | fCryptoAPI, as writers emit
+    const CRYPTO_API: u32 = 0x0000_0004; // fCryptoAPI alone — RC4 CryptoAPI
+
     /// `AlgID` alone used to decide this, against RC4's own identifier. Both halves of
     /// that were wrong answers, and both are asserted here: a conforming `0x660E` file is
     /// accepted, and an RC4 CryptoAPI header is refused **by name** rather than
     /// misdiagnosed.
+    ///
+    /// Since 2026-09-20 the function also *returns* the key length its two fields name,
+    /// so every accepted row asserts that too — the value `parse_encryption_info` then
+    /// requires `KeySize` to agree with.
     #[test]
     fn the_cipher_is_decided_by_faes_first_then_alg_id() {
-        const FAES: u32 = FLAG_AES | 0x0000_0004; // fAES | fCryptoAPI, as writers emit
-        const CRYPTO_API: u32 = 0x0000_0004; // fCryptoAPI alone — RC4 CryptoAPI
-
-        // Accepted: the conforming AES-128 identifier, with and without the flag; and
-        // the spec-forbidden `fAES` + RC4-AlgID pair the shipped fixture carries.
-        for (flags, alg_id) in [
-            (FAES, ALG_ID_AES_128),
-            (CRYPTO_API, ALG_ID_AES_128),
-            (FAES, ALG_ID_RC4),
-            (FAES, 0),
+        // Accepted, with the key length each row declares. The three AES AlgIDs name
+        // their own ([MS-OFFCRYPTO] §2.3.2); `fAES` with `AlgID = 0` is the combination
+        // table's "128-bit AES" row; `fAES` with RC4's AlgID is the spec-forbidden pair
+        // the shipped fixture carries, which names AES but no length, so `None`.
+        for (flags, alg_id, named) in [
+            (FAES, ALG_ID_AES_128, Some(128)),
+            (CRYPTO_API, ALG_ID_AES_128, Some(128)),
+            (FAES, ALG_ID_AES_192, Some(192)),
+            (CRYPTO_API, ALG_ID_AES_192, Some(192)),
+            (FAES, ALG_ID_AES_256, Some(256)),
+            (CRYPTO_API, ALG_ID_AES_256, Some(256)),
+            (FAES, 0, Some(128)),
+            (FAES, ALG_ID_RC4, None),
         ] {
-            assert!(
-                require_aes_128(flags, alg_id).is_ok(),
-                "flags={flags:#x} algId={alg_id:#x} must be accepted"
+            assert_eq!(
+                aes_key_bits(flags, alg_id)
+                    .unwrap_or_else(|e| panic!("flags={flags:#x} algId={alg_id:#x}: {e}")),
+                named,
+                "flags={flags:#x} algId={alg_id:#x}"
             );
         }
 
@@ -930,11 +1052,9 @@ mod tests {
         for (flags, alg_id, expected) in [
             (CRYPTO_API, ALG_ID_RC4, "RC4"),
             (CRYPTO_API, 0u32, "RC4"),
-            (FAES, ALG_ID_AES_192, "AES-192"),
-            (FAES, ALG_ID_AES_256, "AES-256"),
             (CRYPTO_API, 0x0000_6802, "0x00006802"),
         ] {
-            let err = require_aes_128(flags, alg_id).expect_err("must be refused");
+            let err = aes_key_bits(flags, alg_id).expect_err("must be refused");
             assert!(
                 matches!(&err, Error::UnsupportedAlgorithm { what, name }
                     if *what == "EncryptionHeader/@AlgID" && name.contains(expected)),
@@ -944,17 +1064,31 @@ mod tests {
     }
 
     #[test]
-    fn test_aes128_ecb_roundtrip() {
-        let key_bytes = [0u8; 16];
-        let plaintext = b"test block data!"; // exactly 16 bytes
-        let enc = aes128_ecb_encrypt(&key_bytes, plaintext).unwrap();
-        assert_ne!(
-            &enc[..],
-            &plaintext[..],
-            "ECB under a zero key is not the identity"
-        );
-        let dec = aes128_ecb_decrypt(&key_bytes, &enc).unwrap();
-        assert_eq!(&dec, plaintext);
+    fn test_aes_ecb_roundtrip_at_all_three_key_lengths() {
+        for key_len in AES_KEY_LENS {
+            let key_bytes = vec![0u8; key_len];
+            let plaintext = b"test block data!"; // exactly 16 bytes
+            let enc = aes_ecb_encrypt(&key_bytes, plaintext).unwrap();
+            assert_ne!(
+                &enc[..],
+                &plaintext[..],
+                "ECB under a zero {key_len}-byte key is not the identity"
+            );
+            let dec = aes_ecb_decrypt(&key_bytes, &enc).unwrap();
+            assert_eq!(&dec, plaintext, "key_len={key_len}");
+        }
+
+        // The three are genuinely three ciphers and not one arm reached three ways: the
+        // same 16 zero bytes under a zero key of each length must give three different
+        // blocks. Without this, a dispatch that fell through to `Aes256` for everything
+        // would pass every other assertion in this file.
+        let blocks: Vec<Vec<u8>> = AES_KEY_LENS
+            .iter()
+            .map(|&n| aes_ecb_encrypt(&vec![0u8; n], &[0u8; 16]).unwrap())
+            .collect();
+        assert_ne!(blocks[0], blocks[1], "AES-128 and AES-192 must differ");
+        assert_ne!(blocks[1], blocks[2], "AES-192 and AES-256 must differ");
+        assert_ne!(blocks[0], blocks[2], "AES-128 and AES-256 must differ");
     }
 
     /// `verify_password` is a seam now, so a blob shorter than a digest must be a
@@ -964,8 +1098,8 @@ mod tests {
     fn a_verifier_hash_blob_shorter_than_a_digest_is_a_wrong_password_not_a_panic() {
         let key = DerivedKey::new(vec![0x5Au8; 16]);
         let salt = [0u8; 16];
-        let encrypted_verifier = aes128_ecb_encrypt(&[0x5Au8; 16], &[7u8; 16]).unwrap();
-        let short_hash = aes128_ecb_encrypt(&[0x5Au8; 16], &[0u8; 16]).unwrap();
+        let encrypted_verifier = aes_ecb_encrypt(&[0x5Au8; 16], &[7u8; 16]).unwrap();
+        let short_hash = aes_ecb_encrypt(&[0x5Au8; 16], &[0u8; 16]).unwrap();
         let params = StandardParams {
             salt: &salt,
             encrypted_verifier: &encrypted_verifier,
@@ -976,5 +1110,273 @@ mod tests {
             verify_password(&key, &params),
             Err(Error::WrongPassword)
         ));
+    }
+
+    // ---- AES-192 and AES-256 on the read path ---------------------------------------
+    //
+    // [MS-OFFCRYPTO] §2.3.2 defines three AES `AlgID`s for this format — `0x0000660E`
+    // (AES-128), `0x0000660F` (AES-192), `0x00006610` (AES-256) — and §2.3.4.5 repeats
+    // all three against the three `KeySize` values. Until 2026-09-20 this reader refused
+    // the latter two by name, so a conforming Office 2007 document using either was
+    // unopenable here.
+    //
+    // **There is no fixture and there cannot be one from Office**, which writes AES-128
+    // for this format and offers no setting that changes it (`development-record.md:225`
+    // records the registry policy being ignored on the agile path for the same reason).
+    // So the containers below are built at runtime, in the style of `malformed_input.rs`,
+    // and built from the *reader's own* primitives inverted: the verifier blobs come from
+    // `derive_standard_key` + `aes_ecb_encrypt`, which is exactly what §2.3.4.8 says a
+    // writer does. That makes these tests evidence about the parse, the key length and
+    // the cipher dispatch — not about interoperability, which only a real reader
+    // (`tools/acceptance_gate.py`) can supply and which the write half of this work owes.
+
+    const PW: &str = "testpass";
+
+    /// A standard `EncryptionInfo` body — the stream after its 8-byte prefix, which is
+    /// what [`parse_encryption_info`] takes — at a caller-chosen `AlgID` and `KeySize`,
+    /// with the two verifier blobs supplied.
+    ///
+    /// `AlgID` and `KeySize` are independent parameters on purpose: a file is free to
+    /// disagree with itself about them, and that disagreement is its own test below.
+    fn aes_body(
+        alg_id: u32,
+        key_size_bits: u32,
+        salt: &[u8; 16],
+        enc_verifier: &[u8; 16],
+        enc_hash: &[u8; 32],
+    ) -> Vec<u8> {
+        let csp_len = (CSP.len() + 1) * 2;
+        let mut out = Vec::new();
+        out.extend_from_slice(&((HEADER_FIXED_LEN + csp_len) as u32).to_le_bytes());
+        for field in [
+            FAES,
+            0, // SizeExtra
+            alg_id,
+            ALG_ID_HASH_SHA1,
+            key_size_bits,
+            0x0000_0018, // ProviderType (AES)
+            0,           // Reserved1
+            0,           // Reserved2
+        ] {
+            out.extend_from_slice(&field.to_le_bytes());
+        }
+        for unit in CSP.encode_utf16().chain(std::iter::once(0u16)) {
+            out.extend_from_slice(&unit.to_le_bytes());
+        }
+        out.extend_from_slice(&16u32.to_le_bytes()); // SaltSize
+        out.extend_from_slice(salt);
+        out.extend_from_slice(enc_verifier);
+        out.extend_from_slice(&(SHA1_LEN as u32).to_le_bytes()); // VerifierHashSize
+        out.extend_from_slice(enc_hash);
+        out
+    }
+
+    /// The `EncryptionVerifier` a conforming writer produces for `password` at this key
+    /// length — [MS-OFFCRYPTO] §2.3.4.8, steps 3 to 6 — plus the key itself.
+    fn real_verifier(
+        password: &str,
+        key_size_bytes: usize,
+        salt: &[u8; 16],
+    ) -> (DerivedKey, [u8; 16], [u8; 32]) {
+        let key = derive_standard_key(password, salt, key_size_bytes).unwrap();
+        let verifier = [0x5Au8; 16];
+        let enc_verifier: [u8; 16] = key
+            .with_secret(|k| aes_ecb_encrypt(k, &verifier))
+            .unwrap()
+            .try_into()
+            .unwrap();
+        // §2.3.3 step 6 then step 7: the SHA-1 digest of the verifier, written into a
+        // 32-byte slot whose tail is zero (§2.3.4.9 step 3 fixes the encrypted blob at
+        // 32, and zeros are the pad every reader here ignores and Word requires).
+        let mut hash_blob = [0u8; 32];
+        hash_blob[..SHA1_LEN].copy_from_slice(&Sha1::digest(verifier));
+        let enc_hash: [u8; 32] = key
+            .with_secret(|k| aes_ecb_encrypt(k, &hash_blob))
+            .unwrap()
+            .try_into()
+            .unwrap();
+        (key, enc_verifier, enc_hash)
+    }
+
+    /// An `EncryptedPackage` stream under `key`: the 8-byte little-endian plaintext size
+    /// then the ECB ciphertext, with the final segment zero-padded to a block
+    /// ([MS-OFFCRYPTO] §2.3.4.4).
+    fn encrypted_package(key: &DerivedKey, plaintext: &[u8]) -> Vec<u8> {
+        let mut padded = plaintext.to_vec();
+        let rem = padded.len() % 16;
+        if rem != 0 {
+            padded.resize(padded.len() + (16 - rem), 0);
+        }
+        let mut out = (plaintext.len() as u64).to_le_bytes().to_vec();
+        out.extend_from_slice(&key.with_secret(|k| aes_ecb_encrypt(k, &padded)).unwrap());
+        out
+    }
+
+    /// The whole read path at all three AES key lengths: parse, derive, verify, decrypt.
+    ///
+    /// The two that matter are AES-192 and AES-256, which this reader refused by name
+    /// until 2026-09-20; AES-128 is the control, and it is the row that proves the
+    /// container builder above produces something the reader accepts for reasons other
+    /// than the key length.
+    ///
+    /// **Delete the `aes_key_bits` AES-192/AES-256 arms and this fails at
+    /// `UnsupportedAlgorithm`; delete the `KeySize`-agrees-with-`AlgID` check and it
+    /// still passes** — which is why the disagreement test below exists separately.
+    #[test]
+    fn all_three_aes_key_lengths_decrypt_end_to_end() {
+        let plaintext: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
+        for (alg_id, key_size_bits) in [
+            (ALG_ID_AES_128, 128u32),
+            (ALG_ID_AES_192, 192),
+            (ALG_ID_AES_256, 256),
+        ] {
+            let salt = [0x3Cu8; 16];
+            let key_size_bytes = (key_size_bits / 8) as usize;
+            let (key, enc_verifier, enc_hash) = real_verifier(PW, key_size_bytes, &salt);
+            let body = aes_body(alg_id, key_size_bits, &salt, &enc_verifier, &enc_hash);
+
+            let params = parse_encryption_info(&body)
+                .unwrap_or_else(|e| panic!("AES-{key_size_bits} is [MS-OFFCRYPTO] 2.3.2's {alg_id:#010x} and must parse: {e}"));
+            assert_eq!(params.key_size_bytes, key_size_bytes);
+            assert_eq!(params.salt, &salt);
+
+            let derived = derive_standard_key(PW, params.salt, params.key_size_bytes).unwrap();
+            assert_eq!(derived.with_secret(|k| k.len()), key_size_bytes);
+            verify_password(&derived, &params).unwrap_or_else(|e| {
+                panic!("AES-{key_size_bits}: the right password must verify: {e}")
+            });
+
+            let package = encrypted_package(&key, &plaintext);
+            assert_eq!(
+                decrypt_package(&derived, &package).unwrap(),
+                plaintext,
+                "AES-{key_size_bits} must round-trip the package"
+            );
+
+            // The negative control, per size: without it the verifier could be accepting
+            // anything and every assertion above would still hold.
+            let wrong =
+                derive_standard_key("not the password", params.salt, key_size_bytes).unwrap();
+            assert!(
+                matches!(verify_password(&wrong, &params), Err(Error::WrongPassword)),
+                "AES-{key_size_bits}: a wrong password must be WrongPassword"
+            );
+        }
+    }
+
+    /// One KDF, three cut lengths — [MS-OFFCRYPTO] §2.3.4.7's key-derivation method,
+    /// whose only key-size-dependent step is step 6, "the first `cbRequiredKeyLength`
+    /// bytes of X3".
+    ///
+    /// So the three keys are not three derivations: each is a **prefix** of the next. If
+    /// a future change ever made the derivation branch on the key size, this fails while
+    /// every round-trip above still passes, because a round trip only needs the writer
+    /// and the reader to agree with each other.
+    #[test]
+    fn the_three_key_lengths_are_prefixes_of_one_forty_byte_ladder() {
+        let salt = [0x3Cu8; 16];
+        let full = derive_standard_key(PW, &salt, 2 * SHA1_LEN).unwrap();
+        for key_size_bytes in AES_KEY_LENS {
+            let cut = derive_standard_key(PW, &salt, key_size_bytes).unwrap();
+            assert!(
+                cut.with_secret(|c| full.with_secret(|f| c == &f[..key_size_bytes])),
+                "the {key_size_bytes}-byte key must be a prefix of the 40-byte ladder"
+            );
+        }
+    }
+
+    /// `AlgID` and `KeySize` each name the key length and a file can make them disagree.
+    ///
+    /// [MS-OFFCRYPTO] §2.3.2 pairs each AlgID with one `KeySize` (`0x0000660E` with
+    /// `0x00000080`, and so on), so a header pairing AES-128's identifier with 256 bits
+    /// describes no cipher the format defines. Taking either field alone would silently
+    /// pick a winner, and the wrong pick derives a key of one length and runs it through
+    /// another cipher's schedule — which surfaces as `WrongPassword` for a password that
+    /// was right, the answer this crate has twice been bitten by.
+    ///
+    /// The control is the matching pair, which is the test above.
+    #[test]
+    fn key_size_disagreeing_with_the_alg_id_is_refused_by_name() {
+        let salt = [0x3Cu8; 16];
+        for (alg_id, key_size_bits) in [
+            (ALG_ID_AES_128, 192u32),
+            (ALG_ID_AES_128, 256),
+            (ALG_ID_AES_192, 128),
+            (ALG_ID_AES_192, 256),
+            (ALG_ID_AES_256, 128),
+            (ALG_ID_AES_256, 192),
+        ] {
+            let body = aes_body(alg_id, key_size_bits, &salt, &[0u8; 16], &[0u8; 32]);
+            let err = parse_encryption_info(&body).err().unwrap_or_else(|| {
+                panic!("AlgID {alg_id:#010x} with KeySize {key_size_bits} must be refused")
+            });
+            assert!(
+                matches!(&err, Error::BadParameters(msg)
+                    if msg.contains("KeySize") && msg.contains("AlgID")),
+                "AlgID={alg_id:#010x} KeySize={key_size_bits} must name both fields, got: {err}"
+            );
+        }
+    }
+
+    /// The other half of the `KeySize` rule: a value outside the three §2.3.4.5
+    /// enumerates is refused whatever the `AlgID` says.
+    ///
+    /// The field is an unconstrained `u32` reached before any password work, and
+    /// `KeySize / 8` is a truncation length on a 40-byte buffer as well as an AES key
+    /// length — 320 and above used to slice out of range, and anything that cleared that
+    /// slice but was not 16 panicked inside `GenericArray`.
+    ///
+    /// **`ALG_ID_RC4` is in the sweep and it is the row that earns the check.** Deleting
+    /// the enumeration check and running this test with only the three AES AlgIDs passes
+    /// — every one of those names a key length, so the *agreement* check refuses the
+    /// value first and the enumeration check never runs. `fAES` with RC4's AlgID is the
+    /// shipped fixture's own spec-forbidden combination, and it is the one shape where
+    /// `KeySize` is the file's only statement of the key length: there this check is the
+    /// sole guard, and without it the file travels as far as `derive_standard_key`'s
+    /// 40-byte ceiling or the cipher's key-length check and is refused by a message that
+    /// names neither the field nor the format.
+    #[test]
+    fn key_size_outside_the_specs_three_is_refused_by_name() {
+        let salt = [0x3Cu8; 16];
+        for key_size_bits in [0u32, 8, 64, 127, 129, 160, 255, 320, 512, u32::MAX] {
+            for alg_id in [
+                ALG_ID_AES_128,
+                ALG_ID_AES_192,
+                ALG_ID_AES_256,
+                ALG_ID_RC4, // with fAES set: names AES, names no length
+            ] {
+                let body = aes_body(alg_id, key_size_bits, &salt, &[0u8; 16], &[0u8; 32]);
+                let err = parse_encryption_info(&body)
+                    .err()
+                    .unwrap_or_else(|| panic!("KeySize {key_size_bits} must be refused"));
+                assert!(
+                    matches!(&err, Error::BadParameters(msg) if msg.contains("KeySize")),
+                    "KeySize={key_size_bits} algId={alg_id:#010x} got: {err}"
+                );
+            }
+        }
+        // The controls: each of the three, paired with its own AlgID — and each of the
+        // three under the fixture's `fAES` + RC4-AlgID pair, where `KeySize` alone
+        // decides and all three are therefore legitimate.
+        for (alg_id, key_size_bits) in [
+            (ALG_ID_AES_128, 128u32),
+            (ALG_ID_AES_192, 192),
+            (ALG_ID_AES_256, 256),
+            (ALG_ID_RC4, 128),
+            (ALG_ID_RC4, 192),
+            (ALG_ID_RC4, 256),
+        ] {
+            assert!(
+                parse_encryption_info(&aes_body(
+                    alg_id,
+                    key_size_bits,
+                    &salt,
+                    &[0u8; 16],
+                    &[0u8; 32]
+                ))
+                .is_ok(),
+                "AlgID {alg_id:#010x} with KeySize {key_size_bits} is conforming"
+            );
+        }
     }
 }

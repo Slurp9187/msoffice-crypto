@@ -26,8 +26,23 @@ filed**. Named here so the gap is visible rather than assumed closed.
 | 7. `agile_encrypt` threading | done, `ac3bce8` |
 | 8. `lib.rs` entry point | done, `ac3bce8` |
 | 9. Tests + evidence pass | done, `ac3bce8` — ten tuples, both goldens unmoved |
-| 10. Artifacts + gate + grid | **not started — this is what blocks the merge** |
+| 10. Artifacts + gate + grid | done — `artifacts/tuples-2026-09-20/` (gitignored) + the tuple x reader grid in `CHANGELOG.md`. **It did its job on the first run**: real Word refused `saltSize` 8 and 17 with `0x800A1520`, which the two-case procedure makes our bug by default, and it was — the verifier hash covered the `0x00` padding, in the writer, in `verify_password` and in the synthetic-file test helper, all three agreeing. Fixed and pinned by a test that never consults this crate's own reader. What remains is the owner opening the regenerated set by hand, which no agent can do |
 | 11. Prose | partly, `64b82ce` + `ac3bce8` |
+
+**Skip 1 is closed on both halves, and it is not a numbered slice above.** The read half —
+`standard::aes_key_bits`, the `KeySize` × `AlgID` agreement check, `STANDARD_KEY_BITS_AES`
+— landed first, on the grounds § *Skips audit* gives it: a conforming document refused is
+an owner locked out. The write half followed as
+`encrypt_ooxml_standard_with_key_bits(package, password, key_bits)`, with
+`encrypt_ooxml_standard` one line over it at 128 and both goldens unmoved. It is **not**
+shaped as an `EncryptParams`: §2.3.4.5 fixes every other field of that header, so the
+parameter space is one number and the entry point takes one number. Its refusal is
+`Error::EncryptParams` with a new `EncryptParam::KeySize` — the binary field, not
+§2.3.4.10's `keyBits` attribute — and only `OutsideSpecRange`, because on this path the
+format enumerates AES's own three sizes and there is no value it permits that the cipher
+refuses. Item 10 still owes it Word: `msoffcrypto-tool` reads AES-192 and AES-256
+byte-identically and `office-crypto` 0.3 panics on both (its bug, recorded in
+`CHANGELOG.md`), and no shipping Office reader has been run at either size.
 
 Landed alongside, outside this plan's scope, because they were found while doing it:
 `85ed681` the encrypt guard, `ad64424` `spinCount` spec-exactness, `fe0e075` two secret

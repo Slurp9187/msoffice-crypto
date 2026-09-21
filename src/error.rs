@@ -136,7 +136,8 @@ pub enum Error {
     /// The message says only that, because that is all the pair tells us. It used to
     /// assert "Office XP/2003 RC4 encryption is not supported — re-save the file with
     /// Office 2007 or later" for *every* pair that reached it, including `vMinor = 3`
-    /// (extensible encryption) and, until `standard::require_aes_128` landed, every
+    /// (extensible encryption) and, until `standard::aes_key_bits` landed (as
+    /// `require_aes_128`, which is what it was called then), every
     /// Office 2007 file whose `AlgID` was the conforming `0x660E`. A cipher this crate
     /// has not implemented is [`Error::UnsupportedAlgorithm`]; this variant is
     /// for the version pair alone.
@@ -599,7 +600,41 @@ pub enum EncryptParam {
     /// exactly that mislabelling was added, and caught by an adversarial audit rather
     /// than by a test. The prose form of the defect is the harder one to see, because
     /// nothing compiles it.
+    ///
+    /// **This variant is the agile format's XML attribute only.** ECMA-376 *standard*
+    /// encryption states its key size in a different field, in a different structure,
+    /// under a different clause; it is [`Self::KeySize`], and the two are not
+    /// interchangeable.
     KeyBits,
+
+    /// `EncryptionHeader.KeySize`: the key size of an ECMA-376 **standard** (Office
+    /// 2007) file, in bits ([MS-OFFCRYPTO] §2.3.2).
+    ///
+    /// Separate from [`Self::KeyBits`] rather than folded into it, because the two name
+    /// different fields under different rules and a consumer acts on the difference:
+    ///
+    /// | | [`Self::KeyBits`] | this variant |
+    /// | --- | --- | --- |
+    /// | field | `keyBits`, an XML attribute of `<keyData>` / `<p:encryptedKey>` | `KeySize`, a `u32` in the binary `EncryptionHeader` |
+    /// | typed by | `ST_KeyBits` (§2.3.4.10) — `minInclusive="8"`, a multiple of 8, **no maximum** | §2.3.4.5's header table — `0x00000080`, `0x000000C0` or `0x00000100` |
+    /// | written by | [`crate::encrypt_ooxml_with_params`] | [`crate::encrypt_ooxml_standard_with_key_bits`] |
+    ///
+    /// `Display` prints `EncryptionHeader.KeySize`, so a consumer forwarding the sentence
+    /// names the field its user would find in the file rather than an attribute that is
+    /// not in it.
+    ///
+    /// **Its only `problem` is [`EncryptParamProblem::OutsideSpecRange`], and
+    /// [`EncryptParamProblem::UnsupportedByCipher`] is unreachable here** — the opposite
+    /// of [`Self::KeyBits`], where both fire. `ST_KeyBits` is generic across cipher
+    /// algorithms, so there the format and AES are two authorities with different reach.
+    /// §2.3.4.5 names AES for this stream and then enumerates AES's three key sizes
+    /// itself, so here the format's set and the cipher's set are one set and the format
+    /// states it first. Reporting 64 as a cipher limitation would assert that this header
+    /// may carry a 64-bit key — §2.3.4.5 says it may not — which is the typed lie
+    /// [`EncryptParamProblem`]'s split exists to prevent. `AesKeySize::new` in
+    /// `src/standard_encrypt.rs` carries the argument in full, including why §2.3.2's
+    /// RC4 and `0x00000000` rows are not a counter-example.
+    KeySize,
 
     /// `saltSize`: the length in bytes of a salt.
     ///
@@ -661,10 +696,11 @@ pub enum EncryptParam {
 pub enum EncryptParamProblem {
     /// Outside the range [MS-OFFCRYPTO] states for the attribute.
     ///
-    /// The **spec** row of `limits.rs`'s table: the number §2.3.4.10's simple types
-    /// state, so a request that trips it would produce a file no conforming reader need
-    /// accept. The only one of the four that says the *caller* asked for something the
-    /// format forbids.
+    /// The **spec** row of `limits.rs`'s table: the number the format itself states —
+    /// §2.3.4.10's simple types for the agile attributes, §2.3.4.5's header table for
+    /// [`EncryptParam::KeySize`] — so a request that trips it would produce a file no
+    /// conforming reader need accept. The only one of the four that says the *caller*
+    /// asked for something the format forbids.
     OutsideSpecRange,
 
     /// Inside the spec, outside AES as implemented here.
@@ -723,7 +759,9 @@ pub enum EncryptParamProblem {
 
 #[cfg(feature = "crypto-ops")]
 impl core::fmt::Display for EncryptParam {
-    /// The attribute's spelling in [MS-OFFCRYPTO] §2.3.4.10, not the Rust identifier.
+    /// The field's own spelling in [MS-OFFCRYPTO] — §2.3.4.10's attribute names for the
+    /// agile parameters, §2.3.2's field name for the standard header's `KeySize` — never
+    /// the Rust identifier.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // Exhaustive, with no `_` arm, so that a variant added above is a compile error
         // here rather than a parameter that silently prints as something else.
@@ -733,6 +771,10 @@ impl core::fmt::Display for EncryptParam {
             Self::KeyBits => "keyBits",
             Self::SaltSize => "saltSize",
             Self::KeyBitsWithHash => "keyBits together with hashAlgorithm",
+            // Qualified by its structure, because `keyBits` is printed above and a bare
+            // "KeySize" beside it would read as a spelling variant of the same field
+            // rather than as a different field in a different format.
+            Self::KeySize => "EncryptionHeader.KeySize",
         })
     }
 }
@@ -743,8 +785,17 @@ impl core::fmt::Display for EncryptParamProblem {
     /// **whose** rule was broken.
     ///
     /// A consumer with no match arm forwards this sentence, so each one has to be honest
-    /// standing alone: the spec case cites [MS-OFFCRYPTO] §2.3.4.10, and the margin case
-    /// says this crate declines without implying the format agrees.
+    /// standing alone: the spec case names [MS-OFFCRYPTO] as the authority, and the
+    /// margin case says this crate declines without implying the format agrees.
+    ///
+    /// **The spec case names no section number, deliberately.** Which clause states the
+    /// range depends on the parameter printed before it — §2.3.4.10's simple types for
+    /// the agile attributes, §2.3.4.5's header table for
+    /// [`EncryptParam::KeySize`] — so a fixed citation here would be right for one and
+    /// wrong for the other. It said "§2.3.4.10" until the standard writer learned its
+    /// second and third key sizes, at which point the sentence would have cited the
+    /// agile schema at a caller who never touched it. The section numbers live in the
+    /// [`EncryptParam`] variants' docs, where they can be per-parameter.
     ///
     /// Each is phrased "was given …" rather than "is …" so that it reads correctly after
     /// a compound subject too — [`EncryptParam::KeyBitsWithHash`] names two attributes,
@@ -752,8 +803,8 @@ impl core::fmt::Display for EncryptParamProblem {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
             Self::OutsideSpecRange => {
-                "was given a value outside the range [MS-OFFCRYPTO] §2.3.4.10 states \
-                 for it, so the file would not conform"
+                "was given a value outside the range [MS-OFFCRYPTO] states for it, so \
+                 the file would not conform"
             }
             Self::UnsupportedByCipher => {
                 "was given a value [MS-OFFCRYPTO] permits but AES, the only cipher this \

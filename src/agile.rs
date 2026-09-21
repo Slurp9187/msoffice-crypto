@@ -463,8 +463,34 @@ pub(crate) fn verify_password(params: &AgileParams, h_final: &PasswordDigest) ->
     // Cargo.toml. The channel here is much weaker (both sides derive from the password
     // being guessed), but two comparisons that look identical should not have been
     // reasoned about differently.
+    // **Over `saltSize` bytes, not the whole decrypted blob**, and the difference is only
+    // visible when `saltSize` is not a multiple of `blockSize`.
+    //
+    // [MS-OFFCRYPTO] §2.3.4.13, `encryptedVerifierHashValue` step 1: "Obtain the hash
+    // value of the random array of bytes generated in step 1 of the steps for
+    // encryptedVerifierHashInput" — and that step 1 is "Generate a random array of bytes
+    // with the number of bytes used specified by the saltSize attribute". The `0x00`
+    // padding to a block multiple arrives in step 3, at *encryption* time, after the hash
+    // has been taken. So the hashed array is `saltSize` bytes and the blob it travels in
+    // is `roundUp(saltSize, blockSize)`.
+    //
+    // This digested the whole blob until 2026-09-21, and `agile_encrypt` hashed the
+    // padded buffer to match. The two agreed with each other and disagreed with the
+    // format, so every round trip in this crate passed and every file it wrote at a
+    // non-block-multiple `saltSize` was refused by real Word 16 with `0x800A1520` — the
+    // wrong-password code, on a correct password. Found by running the artifact set past
+    // Word rather than by any test here, which is the argument for that gate.
+    //
+    // The read half was the shipped defect: a *conforming* file from another writer with
+    // `saltSize = 8` would have been refused as a wrong password. That is the same class
+    // as the `spinCount` ceiling — an owner locked out of their own document by our
+    // choice, not the format's.
+    //
+    // The slice is in range because `input_len` above is `roundUp(salt_len, block_size)`,
+    // which is `>= salt_len`, and the blob's length was checked equal to it.
+    let salt_len = params.password_salt_size as usize;
     let matches = verifier_input.with_secret(|vi| {
-        let computed = hash.digest(vi);
+        let computed = hash.digest(&vi[..salt_len]);
         verifier_hash.with_secret(|vh| computed.as_slice().ct_eq(&vh[..digest_len]))
     });
     if !matches {
@@ -2412,7 +2438,20 @@ mod tests {
         };
         let h_final = spin_hash(hash, password, salt, 0);
         let input = pad(&vec![0xA5u8; salt.len()]);
-        let value = pad(&hash.digest(&input));
+        // H(the `saltSize` bytes), not H(the padded blob) — §2.3.4.13's
+        // `encryptedVerifierHashValue` step 1 hashes the array step 1 *generated*, which
+        // is `saltSize` bytes, and the pad arrives a step later when it is encrypted.
+        //
+        // This helper hashed `&input` until 2026-09-21, which is the same error the
+        // reader and the writer both carried. Three places agreeing is why no test could
+        // see it: this one built files that matched the reader's mistake, so a salt of 1,
+        // 8 or 15 round-tripped here while real Word refused the equivalent file.
+        //
+        // The `0x36` pad above is deliberately left as it is and is now irrelevant to
+        // this value: the hash no longer covers the padding, so the byte cannot change
+        // the digest. It stays because a non-conforming pad is a useful thing for these
+        // synthetic files to carry — the reader must not care what is in the tail.
+        let value = pad(&hash.digest(&input[..salt.len()]));
         // The IV is the salt fitted to `blockSize` ([MS-OFFCRYPTO] §2.3.4.12), which is
         // the salt itself for every length a real writer emits.
         let iv = fit_iv(salt, AES_BLOCK_LEN);

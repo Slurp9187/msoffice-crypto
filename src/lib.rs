@@ -10,7 +10,9 @@
 //!
 //! The public surface is re-exported at the crate root. Detection types
 //! ([`Classification`], [`Family`], [`IntegrityDeclaration`]) compile into every build.
-//! `decrypt_ooxml`, `encrypt_ooxml`, `encrypt_ooxml_with_params`, `check_encryptable`,
+//! `decrypt_ooxml`, `encrypt_ooxml`, `encrypt_ooxml_with_params`,
+//! `encrypt_ooxml_standard`, `encrypt_ooxml_standard_with_key_bits`,
+//! `check_encryptable`,
 //! `EncryptParams`, `Error`, `IntegrityPolicy` and `IntegrityOutcome` exist only under
 //! `crypto-ops`; `decrypt_binary_office` exists only under `legacy-binary`. Those names
 //! are not linked from this page because this crate-level document renders in the
@@ -27,9 +29,11 @@
 //!   password.
 //! - **Standard encryption** (Office 2007, `vMajor` 2/3/4 with `vMinor=2` and `fAES` set):
 //!   AES in ECB under a SHA-1 KDF of 50,000 iterations ([MS-OFFCRYPTO] §2.3.4.7). The
-//!   header (§2.3.4.5) declares AES-128, AES-192 or AES-256; this crate reads and writes
-//!   AES-128, which is Office's default. SHA-1, ECB and the iteration count are fixed by
-//!   the KDF; the key length is not.
+//!   header (§2.3.4.5) declares AES-128, AES-192 or AES-256; this crate **reads all
+//!   three** and writes AES-128, which is Office's default. SHA-1, ECB and the 50 000
+//!   iterations are fixed by the format (§2.3.4.7) and are not file fields; the key
+//!   length is the one parameter the header chooses, and the derivation does not branch
+//!   on it — all three keys are prefixes of the same 40-byte ladder output.
 //!
 //! Both OOXML formats use a CFB container (magic: `D0 CF 11 E0 A1 B1 1A E1`). The
 //! decrypted output of the modern path is the original OOXML ZIP.
@@ -84,7 +88,8 @@
 //!
 //! **Decryption and encryption are the `crypto-ops` feature.** `decrypt_ooxml`,
 //! `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_with_params`,
-//! `encrypt_ooxml_standard`, `check_encryptable`, the `Decrypted` and `EncryptParams`
+//! `encrypt_ooxml_standard`, `encrypt_ooxml_standard_with_key_bits`,
+//! `check_encryptable`, the `Decrypted` and `EncryptParams`
 //! structs and the `IntegrityPolicy` / `IntegrityOutcome` enums live behind it,
 //! together with `aes`, `cbc`, `ecb`, `sha1`,
 //! `sha2`, `hmac`, `base64` and `rand`:
@@ -159,7 +164,10 @@
 //! declared spin count unvalidated — and that is where such a rule belongs, because a
 //! ceiling imposed here is one the caller cannot loosen for a document its owner
 //! already holds. Agile key sizes are 128, 192 or 256 bits, salts 1..=65536 bytes, and
-//! the standard path accepts AES-128 only.
+//! the standard path takes the same three key sizes — [MS-OFFCRYPTO] §2.3.4.5's
+//! `0x00000080` / `0x000000C0` / `0x00000100` — with the further requirement that the
+//! value agree with the `AlgID` beside it. That path refused AES-192 and AES-256 by
+//! name until 2026-09-20, which was this crate's decision and not the format's.
 //!
 //! Under **`legacy-binary`**: RC4 key sizes 40..=128 bits (the spec's own range,
 //! [MS-OFFCRYPTO] § 2.3.5.1) and an XOR-obfuscation password of at most 15 characters,
@@ -298,6 +306,13 @@ mod standard;
 /// The standard (Office 2007) write path: the salt, the derived key, the two verifier
 /// blobs, the binary header, and the assembly behind [`encrypt_ooxml_standard`]. Runs on
 /// `standard`'s own KDF and ECB helper, so the two directions share one derivation.
+///
+/// It also holds the one parameter this format has — the key size, judged by a private
+/// `AesKeySize` and reaching a caller through
+/// [`encrypt_ooxml_standard_with_key_bits`]'s plain `u32`. No type of its own is
+/// exported for it: [MS-OFFCRYPTO] fixes every other field of the header, so there is no
+/// tuple to name, and that module's own header argues the choice against the two
+/// alternatives.
 #[cfg(feature = "crypto-ops")]
 mod standard_encrypt;
 
@@ -750,6 +765,9 @@ pub fn encrypt_ooxml_with_params(
 /// Encrypt an OOXML package in the Office 2007 format, ECMA-376 standard encryption.
 ///
 /// AES-128-ECB under a SHA-1-derived key, for a reader that predates agile encryption.
+/// [`encrypt_ooxml_standard_with_key_bits`] writes the other two key sizes
+/// [MS-OFFCRYPTO] §2.3.4.5 defines; this function is that one with AES-128 supplied, and
+/// AES-128 is what Office 2007 itself wrote.
 ///
 /// **Prefer [`encrypt_ooxml`].** Standard encryption defines no integrity element: a
 /// modified ciphertext decrypts, silently, to a modified document, and ECB leaks equal
@@ -780,7 +798,7 @@ pub fn encrypt_ooxml_with_params(
 ///   read back
 /// - [`Error::RandomSource`] — the system RNG would not produce bytes
 /// - [`Error::CipherError`] — an AES-ECB step returned a blob of the wrong
-///   length (unreachable for the fixed AES-128 tuple this function writes)
+///   length (unreachable for the AES-128 key size this function writes)
 /// - [`Error::Io`] — the in-memory container could not be written
 ///
 /// # Examples
@@ -808,10 +826,111 @@ pub fn encrypt_ooxml_with_params(
 ///
 /// [`encrypt_ooxml`] writes agile encryption with a `dataIntegrity` HMAC, which is what
 /// Office 16 writes and what this crate recommends.
+/// [`encrypt_ooxml_standard_with_key_bits`] writes AES-192 and AES-256 in this same
+/// format.
 #[cfg(feature = "crypto-ops")]
 pub fn encrypt_ooxml_standard(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
+    // One line over the parameterised entry point, for the reason `encrypt_ooxml` is one
+    // line over `encrypt_ooxml_with_params`: "the default path and the parameterised
+    // path are the same code" is then a fact anyone can check by reading it, rather than
+    // two argument lists that agree today.
+    encrypt_ooxml_standard_with_key_bits(package, password, standard_encrypt::DEFAULT_KEY_BITS)
+}
+
+/// Encrypt an OOXML package in the Office 2007 format at a key size of the caller's
+/// choosing — AES-128, AES-192 or AES-256.
+///
+/// [`encrypt_ooxml_standard`] is this function with 128 supplied, and everything it
+/// documents holds here unchanged: the container, the conforming
+/// `fCryptoAPI | fAES` header, the zero-padded verifier hash blob, the `secure-gate`
+/// wrapping, the system CSPRNG, the absence of any integrity element, and writing
+/// nothing on error. What changes is two fields of the `EncryptionHeader` and the length
+/// of the derived key.
+///
+/// **`key_bits` MUST be 128, 192 or 256** — [MS-OFFCRYPTO] §2.3.4.5 says of this header's
+/// `KeySize` that "This value MUST be 0x00000080 (AES-128), 0x000000C0 (AES-192), or
+/// 0x00000100 (AES-256)", and of its `AlgID` that it MUST be the matching one of
+/// `0x0000660E` / `0x0000660F` / `0x00006610`. The two are one statement: this function
+/// writes the pair from a single table, so the mismatched header §2.3.2 forbids — and
+/// that [`decrypt_ooxml`] refuses by name — is not expressible through it. Anything else
+/// is [`Error::EncryptParams`], raised before the password is used for anything.
+///
+/// The key size is the **only** parameter this format has. `AlgIDHash` is SHA-1 by
+/// §2.3.4.5, the 50 000 iterations are fixed by §2.3.4.7 and are not a field in the file
+/// at all, and the salt and verifier lengths are fixed by §2.3.3 — so there is no tuple
+/// here and no [`EncryptParams`]: that type is the agile format's, where five of its six
+/// fields name attributes this format does not have. `src/standard_encrypt.rs`'s header
+/// carries that argument in full, including why this is a plain `u32` and not a struct.
+///
+/// # Interoperability is measured on AES-128 only
+///
+/// The four-reader acceptance gate's verdicts in `CHANGELOG.md`, and the committed
+/// byte-for-byte golden, are all AES-128 artifacts, because that is the tuple Office 2007
+/// wrote and therefore the only one a fixture can exist for. AES-192 and AES-256 are
+/// proved here against this crate's own reader and against the spec clauses above; what
+/// external readers do with them is an evidence gap, recorded as one rather than
+/// implied away. Prefer [`encrypt_ooxml_standard`] — or, better, [`encrypt_ooxml`] —
+/// unless you have a reason to write a wider key.
+///
+/// # Errors
+///
+/// Every error [`encrypt_ooxml_standard`] returns, plus:
+///
+/// - [`Error::EncryptParams`] — `key_bits` is not one of the three sizes §2.3.4.5
+///   defines. The payload names the field ([`EncryptParam::KeySize`]), whose rule it
+///   broke ([`EncryptParamProblem::OutsideSpecRange`] — the format's, always, on this
+///   path) and, in `min` and `max` alike, the nearest size that would have been accepted
+///
+/// # Examples
+///
+/// ```
+/// use msoffice_crypto::{
+///     classify, decrypt_ooxml, encrypt_ooxml_standard_with_key_bits, CipherAlgorithm,
+///     EncryptParam, EncryptParamProblem, Error, Family,
+/// };
+///
+/// let package = include_bytes!("../tests/fixtures/plain.docx");
+/// let sealed = encrypt_ooxml_standard_with_key_bits(package, "testpass", 256)?;
+///
+/// // The header declares the key size, and the round trip is this crate's own reader.
+/// let class = classify(&sealed);
+/// assert_eq!(class.family, Family::Standard);
+/// let header = class.key_data.expect("the EncryptionHeader is present");
+/// assert_eq!(header.key_bits, Some(256));
+/// assert_eq!(header.cipher, Some(CipherAlgorithm::Aes));
+/// assert_eq!(decrypt_ooxml(&sealed, "testpass")?, package);
+///
+/// // A size the format does not define is refused, and named.
+/// let err = encrypt_ooxml_standard_with_key_bits(package, "testpass", 64).unwrap_err();
+/// assert!(matches!(
+///     err,
+///     Error::EncryptParams {
+///         param: EncryptParam::KeySize,
+///         problem: EncryptParamProblem::OutsideSpecRange,
+///         got: 64,
+///         min: 128,
+///         max: 128,
+///     }
+/// ));
+/// # Ok::<(), msoffice_crypto::Error>(())
+/// ```
+///
+/// # See Also
+///
+/// [`encrypt_ooxml_with_params`] is the agile format's parameterised entry point, and
+/// the one with an integrity element.
+#[cfg(feature = "crypto-ops")]
+pub fn encrypt_ooxml_standard_with_key_bits(
+    package: &[u8],
+    password: &str,
+    key_bits: u32,
+) -> Result<Vec<u8>, Error> {
     check_encryptable(package)?;
-    standard_encrypt::encrypt(package, password, &mut rand::rngs::SysRng)
+    // `standard_encrypt::encrypt` judges `key_bits` itself, before the payload ceiling
+    // and before the first draw. Not repeated here, for the reason
+    // `encrypt_ooxml_with_params` does not repeat `EncryptParams::validate`: two copies
+    // of one question are two places for the answer to change.
+    standard_encrypt::encrypt(package, password, key_bits, &mut rand::rngs::SysRng)
 }
 
 /// Decrypt a Word 97-2003, Excel 97-2003 or PowerPoint 97-2003 document in place.

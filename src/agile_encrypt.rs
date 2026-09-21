@@ -225,11 +225,24 @@ pub(crate) fn generate<R: TryRng + TryCryptoRng>(
 
     // encode.hpp:171-172 -- H(verifier_input) in a buffer at `roundUp(hashSize,
     // blockSize)`. A no-op for SHA-512 (64 is a multiple of 16) and load-bearing for
-    // SHA-1 (20 -> 32). The hash is over the **padded** input, which is what the reader
-    // hashes: `agile::verify_password` digests the whole decrypted blob, not a prefix.
+    // SHA-1 (20 -> 32).
+    //
+    // **The hash is over the first `saltSize` bytes, not the padded buffer.**
+    // §2.3.4.13's `encryptedVerifierHashValue` step 1 hashes "the random array of bytes
+    // generated in step 1 of the steps for encryptedVerifierHashInput", and that array is
+    // `saltSize` bytes; the `0x00` pad to a block multiple is added in step 3, when the
+    // array is encrypted, after the hash.
+    //
+    // This hashed the padded buffer until 2026-09-21, and `agile::verify_password`
+    // digested the whole decrypted blob to match -- two halves agreeing with each other
+    // and disagreeing with the format. Invisible at every `saltSize` that is a multiple
+    // of 16, which was every salt size that existed before it became a caller's choice,
+    // and invisible to every round-trip test in this crate for the same reason. Real
+    // Word 16 refused the result with `0x800A1520`.
+    let salt_len = to_len(params.password_salt_size);
     let verifier_hash = verifier_input.with_secret(|vi| {
         VerifierPlaintext::new_with(round_up(params.hash.digest_len(), AES_BLOCK_LEN), |slot| {
-            let digest = params.hash.digest(vi);
+            let digest = params.hash.digest(&vi[..salt_len]);
             // `digest.len() == params.hash.digest_len() <= slot.len()` by `round_up`.
             slot[..digest.len()].copy_from_slice(&digest);
         })

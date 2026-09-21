@@ -21,12 +21,20 @@
 //!
 //! Every alias whose length the *file* decides is `Dynamic<Vec<u8>>` rather than
 //! `Fixed<[u8; N]>` — `XorObfuscationArray` is the exception and says so itself, its 16
-//! bytes being the spec's rather than the file's. That choice is
-//! forced by the format rather than chosen: the agile `keyBits` attribute is
-//! read from the file's own `EncryptionInfo` XML, so the derived key length
-//! (16/24/32) is decided by input this crate does not control. The rule, same
-//! as odf-crypto's: `Fixed` when the byte count is fixed by *your* design,
-//! `Dynamic` when it is fixed by input you don't.
+//! bytes being the spec's rather than the file's.
+//!
+//! **That split is two rules, not one, and they carry different weight.** In the
+//! file-decided direction it is not a choice at all: `Fixed<[u8; N]>` needs `N` at compile
+//! time, and the agile `keyBits` attribute (16/24/32) is read from the file's own
+//! `EncryptionInfo` XML, so nothing but `Dynamic` can even name the type — the same way
+//! `Vec<u8>` rather than `[u8; N]` is forced anywhere else in the crate a length comes from
+//! an attacker. In the *other* direction it is house style, not a correctness claim:
+//! `XorObfuscationArray`'s 16 bytes could sit in a `Dynamic<Vec<u8>>` just as safely,
+//! allocation and all, and nothing would misbehave. `Fixed` is chosen there because it
+//! makes "this length is the spec's, permanently, not the file's" a fact the type states
+//! rather than one a reader has to take from a comment. Credited to odf-crypto because the
+//! convention is shared house style, same shape for the same reason — not because either
+//! crate's file-decided direction needed the other's permission to be forced.
 
 //! These were `dynamic_alias!` / `fixed_alias!` invocations until secure-gate 0.9.0-rc.10
 //! deleted all four alias macros. They only ever expanded to a `type` alias, so the change

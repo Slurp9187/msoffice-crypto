@@ -4,7 +4,13 @@
 //! `EncryptionInfo` stream, and each one is used as a loop count or a slice length
 //! before anything else in the crate has had a chance to reject the file. The sibling
 //! crate `odf-crypto` keeps the same list for the same reason (`odf-crypto/src/limits.rs`
-//! — `PBKDF2_MAX_ITER`, `DERIVED_KEY_MIN_LEN`/`MAX_LEN`); the shapes match deliberately.
+//! — `PBKDF2_MAX_ITER`, `DERIVED_KEY_MIN_LEN`/`MAX_LEN`); the *shapes* match
+//! deliberately — one module, every bound labelled by where it comes from. **No number
+//! crosses between the two crates.** [MS-OFFCRYPTO] and ODF's manifest schema are
+//! different documents with different facets, so where the two files hold the same
+//! figure (`PAYLOAD_CEILING`, `1 << 30` in both) that is either crate's own arithmetic
+//! landing on the same number, not one borrowed from the other — see that constant's
+//! doc comment for the derivation this file is required to give on its own terms.
 //!
 //! # Where each bound comes from
 //!
@@ -23,6 +29,8 @@
 //!
 //! **spec** — [`crypto::SPIN_COUNT_MAX`] (§2.3.4.10 `ST_SpinCount`, `0..=10000000`),
 //! [`crypto::AGILE_SALT_SIZE`] (§2.3.4.10 `ST_SaltSize`, `1..=65536`),
+//! [`crypto::STANDARD_KEY_BITS_AES`] (§2.3.2 and §2.3.4.5 both **enumerate** the AES
+//! `KeySize` values as 0x80 / 0xC0 / 0x100),
 //! [`PPT_PERSIST_OBJECTS_MAX`] (§2.3.5, `persistId` is 20 bits),
 //! [`legacy::RC4_KEY_BITS`] and [`legacy::RC4_KEY_BITS_DEFAULT`] (§2.3.5.1),
 //! [`legacy::XOR_PASSWORD_MAX_LEN`] (§2.3.7.2, structural — the `InitialCode` table has
@@ -30,8 +38,9 @@
 //!
 //! **cipher** — [`crypto::AGILE_KEY_BITS_ALLOWED`] (what AES defines; the schema's
 //! `ST_KeyBits` sets `minInclusive="8"` and *no maximum*, being generic across cipher
-//! algorithms) and [`crypto::STANDARD_KEY_BITS_AES128`] (§2.3.2 gives AES-192 and AES-256
-//! their own AlgIDs, which are refused by name earlier).
+//! algorithms). It holds the same three numbers as `STANDARD_KEY_BITS_AES` one row up
+//! and is labelled differently on purpose: there the format states the set, here AES
+//! does.
 //!
 //! **margin** — every read cap ([`ENCRYPTION_INFO_READ_CAP`], [`BINARY_HEADER_READ_CAP`],
 //! [`BIFF_SCAN_CAP`], [`CURRENT_USER_READ_CAP`], [`PPT_PERSIST_DIRECTORY_READ_CAP`],
@@ -58,7 +67,8 @@
 //! gate, so
 //! `dead_code` stays live everywhere rather than being silenced by a module-wide `allow`
 //! that would hide a genuinely unused bound as readily as an expected one. That split is
-//! `odf-crypto/src/limits.rs`'s shape, deliberately.
+//! `odf-crypto/src/limits.rs`'s shape, deliberately — the gating structure, not any figure
+//! inside it.
 
 /// Ceiling on the `\EncryptionInfo` stream this crate will read into memory.
 ///
@@ -212,23 +222,33 @@ mod crypto {
     /// there is a stated working set to reason about; and the figure has somewhere to be
     /// shared from, rather than being repeated at each `Vec` that grows.
     ///
-    /// **The figure is `odf-crypto`'s, deliberately** (`odf-crypto/src/limits.rs`
-    /// `PAYLOAD_CEILING`, also `1 << 30`). The two crates do the same job on the same class
-    /// of file, so a different number here would need a reason this crate has and the
-    /// sibling does not, and there is none. CLAUDE.md § *Sibling crate* asks for exactly
-    /// this when a rule is thin.
+    /// **1 GiB, argued on this crate's own numbers — not borrowed from the sibling.**
+    /// [MS-OFFCRYPTO] §2.3.4.4 declares `StreamSize` (the length prefix on
+    /// `\EncryptedPackage`) an 8-byte unsigned integer and states no ceiling on it at all,
+    /// so nothing here caps what the format permits; every payload this figure refuses is
+    /// refused on this crate's own grounds, not the spec's. Those grounds are the memory
+    /// argument above (ciphertext plus plaintext held at once, so 1 GiB peaks near 2 GiB)
+    /// together with real-world headroom: Office's own guidance keeps documents far below
+    /// this, a `.pptx` in the hundreds of megabytes — the size GH #10's deferral worried
+    /// about — has 2-10x of room under it, and the per-file limits these documents travel
+    /// under (OneDrive/SharePoint uploads, mail gateways) have historically sat at or under
+    /// 2 GB, so this ceiling refuses only what those transports would already have refused.
+    ///
+    /// **`odf-crypto`'s `PAYLOAD_CEILING` lands on the identical `1 << 30`**
+    /// (`odf-crypto/src/limits.rs`), and that is worth naming precisely because it is not
+    /// the reason for this one: both crates hold a whole file's ciphertext and plaintext in
+    /// memory at once, so the same arithmetic on the same class of machine produces the
+    /// same number for two different formats. Presenting the match as the justification
+    /// would be exactly the inversion `docs/plans/msoffice-crypto-encrypt-params-2026-09-20.md`
+    /// § *Governing principle* rules out — a sibling's figure is at most a tiebreak where
+    /// the spec is silent, never the default a different number would need a reason to
+    /// beat. Here there is nothing to tie-break: the number above is derived fresh, and the
+    /// sibling agreeing is corroboration, not provenance.
     ///
     /// **What it is not.** It is not an anti-amplification bound: `cfb` 0.14 bounds every
     /// read by the directory entry's `stream_len` *and* by the real FAT chain, so a forged
     /// length fails the read instead of allocating, and a file claiming a gigabyte must
-    /// actually be a gigabyte. It is a memory bound — a decrypt holds the ciphertext and the
-    /// plaintext at once, so 1 GiB of payload is ~2 GiB of peak, which is why the number is
-    /// well under what a 64-bit machine could survive.
-    ///
-    /// **Margin.** Office's own guidance keeps PowerPoint decks far below this, and the
-    /// per-file limits these documents travel under (OneDrive/SharePoint uploads, mail
-    /// gateways) have historically sat at or under 2 GB. A `.pptx` in the hundreds of
-    /// megabytes — the size the deferral note in GH #10 worried about — has 2-10x of room.
+    /// actually be a gigabyte. It is a memory bound, argued above.
     ///
     /// **If this ever refuses a real document, the fix is the streaming API, not a bigger
     /// number.** Raising it buys one more document and moves the same wall; `Read + Write +
@@ -370,13 +390,43 @@ mod crypto {
     /// value to whatever base64 the file actually carries.
     pub(crate) const AGILE_SALT_SIZE: std::ops::RangeInclusive<u32> = 1..=65536;
 
-    /// The only `EncryptionHeader.KeySize` this crate's standard-encryption path accepts.
+    /// The `EncryptionHeader.KeySize` values this crate's standard-encryption path
+    /// accepts — **a set of three, not a single value**.
     ///
-    /// AES-128 means a 128-bit key; [MS-OFFCRYPTO] §2.3.2 gives AES-192 and AES-256 their
-    /// own AlgIDs (`0x0000660F` / `0x00006610`, against AES-128's `0x0000660E`), which
-    /// `standard::require_aes_128` rejects by name before this is read. The
-    /// field is nevertheless an unconstrained u32 in the file, and it sizes two things:
-    /// `KeySize / 8` truncates the fixed 40-byte SHA-1 XOR-ladder buffer, and the result is
-    /// then handed to AES-128, which accepts exactly 16 bytes and panics otherwise.
-    pub(crate) const STANDARD_KEY_BITS_AES128: u32 = 128;
+    /// [MS-OFFCRYPTO] §2.3.2's `KeySize` table enumerates them for AES outright —
+    /// "0x00000080, 0x000000C0, 0x00000100 … 128-bit, 192-bit, or 256-bit" — and
+    /// §2.3.4.5 repeats the same three against the three AlgIDs the same header may
+    /// declare: "This value MUST be 0x00000080 (AES-128), 0x000000C0 (AES-192), or
+    /// 0x00000100 (AES-256)."
+    ///
+    /// **That enumeration is why this is a *spec* bound while
+    /// [`AGILE_KEY_BITS_ALLOWED`] is a *cipher* one.** Agile's `ST_KeyBits` sets
+    /// `minInclusive="8"` and no maximum, so there the set of three comes from AES and
+    /// not from the format; here the format states it. Same three numbers, different
+    /// provenance, and the distinction is what a consumer needs to say whether a file
+    /// that trips it is non-conforming (here: yes) or merely beyond what this crate
+    /// implements (agile: also yes, but for the cipher's reason).
+    ///
+    /// Until 2026-09-20 this was a single `STANDARD_KEY_BITS_AES128 = 128` and
+    /// `standard::require_aes_128` refused the other two AlgIDs **by name**, so the
+    /// crate could not open a conforming Office 2007 document that used them — the
+    /// refusal, not the format, was the constraint, and the refusal was then cited as
+    /// evidence the format offered no choice.
+    ///
+    /// The field is an unconstrained `u32` in the file and it sizes two things:
+    /// `KeySize / 8` truncates the 40-byte SHA-1 XOR-ladder buffer (§2.3.4.7 step 1 caps
+    /// `cbRequiredKeyLength` at 40, and AES-256's 32 sits inside that), and the result is
+    /// handed to AES, which accepts exactly 16, 24 or 32 bytes and panics otherwise.
+    /// `standard::parse_encryption_info` additionally requires the value to **agree with
+    /// the AlgID**, which is the tighter of the two checks.
+    pub(crate) const STANDARD_KEY_BITS_AES: [u32; 3] = [128, 192, 256];
+
+    /// Pins the three values and their order. `standard_encrypt` takes `[0]` as the
+    /// AES-128 it writes, so ascending order is load-bearing there and not only here,
+    /// and `standard::aes_key_bits` maps the three AlgIDs onto these three positions.
+    const _: () = {
+        assert!(STANDARD_KEY_BITS_AES[0] == 128); // §2.3.2 0x00000080, AlgID 0x0000660E
+        assert!(STANDARD_KEY_BITS_AES[1] == 192); // §2.3.2 0x000000C0, AlgID 0x0000660F
+        assert!(STANDARD_KEY_BITS_AES[2] == 256); // §2.3.2 0x00000100, AlgID 0x00006610
+    };
 }

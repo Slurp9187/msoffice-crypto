@@ -628,6 +628,71 @@ fn the_wrapped_key_blob_is_the_session_key_with_a_zero_tail() {
     assert_eq!(&plaintext[24..], &[0u8; 8], "and a zero tail, not 0x36");
 }
 
+/// `encryptedVerifierHashValue` is the hash of the **`saltSize` random bytes**, not of the
+/// padded blob they travel in.
+///
+/// [MS-OFFCRYPTO] §2.3.4.13 step 1: "Obtain the hash value of the random array of bytes
+/// generated in step 1 of the steps for encryptedVerifierHashInput", and that array is
+/// `saltSize` bytes. The `0x00` pad to a block multiple is step 3, applied when the array
+/// is encrypted — after the hash.
+///
+/// **This test exists because no other test in the crate could have caught the bug, and
+/// that is the interesting part.** Until 2026-09-21 the writer hashed the padded buffer
+/// and `agile::verify_password` digested the whole decrypted blob to match. Two halves
+/// agreeing with each other and disagreeing with the format: every round trip here
+/// passed, including the ten-tuple sweep at `password_salt_size` 8, 9, 24 and 40. Real
+/// Word 16 refused those files with `0x800A1520`, the wrong-password code, on the right
+/// password — which is what the artifact set and a human opening it exist to find.
+///
+/// So this asserts against a digest computed **in the test**, never against the crate's
+/// own reader. A test that decrypted the blob and re-digested it the way
+/// `verify_password` does would have agreed with the bug.
+///
+/// `saltSize = 9` because the two lengths must differ: at any multiple of 16 the padded
+/// and unpadded arrays are the same bytes and the assertion cannot fail.
+#[test]
+fn the_verifier_hash_covers_the_salt_sized_array_and_not_its_padding() {
+    let p = EncryptParams {
+        password_salt_size: 9,
+        ..params()
+    };
+    let m = generate(PASSWORD, p, &mut seeded()).unwrap();
+    assert_eq!(m.encrypted_verifier_hash_input.len(), 16, "roundUp(9, 16)");
+
+    let h_final = agile::spin_hash(p.hash, PASSWORD, &m.password_salt, p.spin_count);
+    let blob_iv = crate::hash::fit_iv(&m.password_salt, 16);
+    let unwrap = |block_key: &[u8; 8], blob: &[u8]| {
+        agile::derive_block_key(p.hash, &h_final, block_key, p.password_key_bits)
+            .expect("SHA-512 carries 256 bits")
+            .with_secret(|k| agile::aes_cbc_decrypt(blob, k, &blob_iv))
+            .expect("wrapped under this key and IV")
+    };
+
+    let input = unwrap(
+        &agile::BLOCK_VERIFIER_INPUT,
+        &m.encrypted_verifier_hash_input,
+    );
+    let value = unwrap(
+        &agile::BLOCK_VERIFIER_HASH,
+        &m.encrypted_verifier_hash_value,
+    );
+
+    assert_eq!(&input[9..], &[0u8; 7], "the pad is 0x00, per step 3");
+
+    // Computed here, from the spec's sentence, against the file's own bytes.
+    let want = p.hash.digest(&input[..9]);
+    assert_eq!(&value[..want.len()], &want[..], "H(the saltSize bytes)");
+
+    // And the negative that names the old behaviour, so a revert fails by meaning rather
+    // than by a number nobody can read.
+    let padded = p.hash.digest(&input[..]);
+    assert_ne!(
+        &value[..padded.len()],
+        &padded[..],
+        "must NOT be H(the padded blob) -- that is the bug Word refused"
+    );
+}
+
 // ---- the public entry point, end to end (GH #6 step 6) --------------------------------
 
 fn plain_docx() -> Vec<u8> {
@@ -839,5 +904,279 @@ fn encrypt_ooxml_writes_the_artifact_the_external_readers_are_run_on() {
         "encrypt_ooxml artifact written to {} ({} bytes, SHA-256 {digest})",
         path.display(),
         written.len()
+    );
+}
+
+// ---- plan slice 10: the durable double-click artifact set --------------------------
+
+/// `tests/fixtures/{name}`, read or panic — the same contract `plain_docx` already keeps,
+/// generalised so this section can also reach the two real-Office `.xlsx`/`.pptx`
+/// fixtures without inventing a second helper for one caller.
+fn fixture_bytes(name: &str) -> Vec<u8> {
+    std::fs::read(format!(
+        "{}/tests/fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap_or_else(|e| panic!("fixture {name} is committed: {e}"))
+}
+
+/// The plaintext behind `plain_content.txt` — the one prose fact a human checking
+/// `agile_sha512_256_default.docx` and its siblings by hand can compare against without
+/// opening a second window.
+const PLAIN_DOCX_TEXT: &str = "Hello, encrypted Office world!";
+
+/// Plan slice 10, the part this machine can do. Writes the durable artifact set the plan's
+/// § *Item 7* describes — one file per writable `(hash, keyBits)` tuple, three salt sizes
+/// at the default tuple, the three standard `AlgID`s, and `.xlsx`/`.pptx` at the default
+/// agile tuple — into a directory the owner can double-click through, plus a
+/// `MANIFEST.md` that carries per-file provenance and the two-case procedure for reading a
+/// Word refusal. This is *not* the automated acceptance gate (`tools/acceptance_gate.py`
+/// runs over this directory separately) and it is not `MSOFFICE_CRYPTO_ARTIFACT_DIR`
+/// (a `mktemp` directory the automation consumes and forgets, per that env var's own
+/// doc comment above): the whole point of this directory is that it survives past the
+/// test run, at a name a human can find again.
+///
+/// **Named for the date this slice was executed, not computed from today's clock** — this
+/// machine reads local time (UTC-7) and CI reads UTC, so a `chrono::Local::today()` string
+/// would print a different directory name depending on which one generated it. Matches the
+/// plan's own `artifacts/tuples-2026-09-20/`.
+///
+/// **The default agile file is asserted byte-identical to the seeded golden**, which is
+/// what turns the owner's manual open of this one file into a regression check as well as
+/// an interop check: if this assertion ever fails, the manual check below would have been
+/// run against a file that no longer represents what the golden pins, silently.
+///
+/// Every agile file here is written under the fixed `seeded()` RNG rather than the public
+/// `encrypt_ooxml_with_params` entry point's `SysRng` — the only way to make the default
+/// file's bytes reproducible against the committed golden, and every sibling file inherits
+/// the same determinism so a re-run of this test does not silently replace a file the owner
+/// already opened with a different (still-conforming) one. The three standard files use
+/// the public `encrypt_ooxml_standard_with_key_bits` and real randomness: no golden pins
+/// them, and using the production entry point there is one fewer thing to keep in step
+/// with `standard_encrypt`'s own seeded core.
+#[test]
+fn the_writable_tuple_matrix_is_written_to_the_durable_artifact_directory() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("artifacts/tuples-2026-09-20");
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("{} must be creatable: {e}", dir.display()));
+
+    let mut manifest = String::new();
+    manifest.push_str(
+        "# Tuple artifacts — 2026-09-20\n\n\
+         Generated by `the_writable_tuple_matrix_is_written_to_the_durable_artifact_directory` \
+         (`src/agile_encrypt_tests.rs`), the deliverable of plan slice 10 in \
+         `docs/plans/msoffice-crypto-encrypt-params-2026-09-20.md`. Every file below opens \
+         with the password **`testpass`**.\n\n\
+         ## Reading a refusal — the two-case procedure (plan Item 7)\n\n\
+         The ultimate check is a human opening these files in real Word, Excel and \
+         PowerPoint. Word is not one of the four automated readers for this purpose — it \
+         is *the reference*, because Microsoft wrote both [MS-OFFCRYPTO] and this \
+         implementation of it. A refusal from Word on a file this crate believes conforms \
+         is never filed as \"a reader limitation\"; it is exactly one of two things, and \
+         both are worked through rather than caveated:\n\n\
+         1. **Our output is wrong** (the default assumption, and it blocks). Re-derive the \
+         bytes from the cited [MS-OFFCRYPTO] clause for the field in question and check our \
+         output against *that* — not against msoffcrypto-tool, LibreOffice, office-crypto \
+         or herumi, all of which are interpretations of the same document and never the \
+         standard. This is how the zero-pad rule (`0x800A1066`) and the verifier-value tail \
+         (`0x800A1520`) were both found, in both cases as our bugs.\n\
+         2. **Word diverges from its own published spec.** Possible, and then the finding \
+         *is* the deliverable: record the exact build, tuple and `AlgID`/attribute, cite \
+         the clause it contradicts, and bring it back for a decision. It does not silently \
+         become a documented caveat.\n\n\
+         A zero-pass row (no external reader, including Word, has opened a given tuple) is \
+         a fact to record, not a reason to stop writing that tuple: the spec defines it, so \
+         this crate implements it.\n\n\
+         ## Files\n\n",
+    );
+
+    let mut record =
+        |name: &str, tuple_words: &str, bytes: &[u8], expected: &str, meaning: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let digest = hex(&crate::hash::HashAlgorithm::Sha256.digest(bytes));
+            manifest.push_str(&format!(
+                "### `{name}`\n\n\
+             - **Tuple:** {tuple_words}\n\
+             - **Password:** `testpass`\n\
+             - **SHA-256:** `{digest}`\n\
+             - **Size:** {} bytes\n\
+             - **Expected content:** {expected}\n\
+             - **What a refusal would mean:** {meaning}\n\n",
+                bytes.len(),
+            ));
+            digest
+        };
+
+    let plain = plain_docx();
+
+    // The ten writable `(hash, keyBits)` combinations -- EVERY_WRITABLE_TUPLE is the
+    // authoritative list (see its own doc comment: typed literally, not derived from
+    // `can_carry_key_bits`, so this sweep disagrees with the code if either moves).
+    for &(hash, key_bits) in EVERY_WRITABLE_TUPLE.iter() {
+        let is_default = hash == HashAlgorithm::Sha512 && key_bits == 256;
+        let p = EncryptParams {
+            hash,
+            key_data_key_bits: key_bits,
+            password_key_bits: key_bits,
+            ..params()
+        };
+        let container = encrypt(&plain, PASSWORD, p, &mut seeded())
+            .unwrap_or_else(|e| panic!("{p:?} must be writable: {e}"));
+        let name = if is_default {
+            "agile_sha512_256_default.docx".to_string()
+        } else {
+            format!("agile_{}_{key_bits}.docx", hash.name().to_lowercase())
+        };
+        let words = format!(
+            "agile (ECMA-376), hash {}, keyBits {key_bits}/{key_bits} \
+             (keyData/p:encryptedKey), saltSize 16/16, spinCount {SPIN_COUNT}",
+            hash.name()
+        );
+        let meaning = if is_default {
+            "This is the exact tuple Office 16 itself writes. There is no plausible \
+             excuse for a refusal here: work case 1 first, and only report case 2 if \
+             re-deriving §2.3.4.10-.14 by hand still disagrees with what this file holds."
+        } else {
+            "One of the ten tuples [MS-OFFCRYPTO] §2.3.4.10 explicitly permits a writer \
+             to choose (\"values that are not defined MAY be used, and a compliant \
+             implementation is not required to support all defined values\" governs the \
+             hash; keyBits carries no upper bound at all). A refusal is never \
+             \"unsupported hash/key size\" on that basis -- apply the two-case procedure \
+             above."
+        };
+        let digest = record(&name, &words, &container, PLAIN_DOCX_TEXT, meaning);
+        if is_default {
+            assert_eq!(
+                (container.len(), digest.as_str()),
+                (GOLDEN_LEN, GOLDEN_SHA256),
+                "the durable default artifact must be byte-identical to the seeded golden \
+                 the rest of this file pins -- if this moved, the default write path moved \
+                 and the manual check below would be exercising a different file than the \
+                 one every other test in this crate measures"
+            );
+        }
+    }
+
+    // Three salt sizes at the default tuple, one a deliberate non-multiple of 16 -- the
+    // case `fit_iv` exists for and that no external reader has been measured on (see
+    // `EncryptParams::password_salt_size`'s doc comment).
+    for salt in [8u32, 17, 32] {
+        let p = EncryptParams {
+            key_data_salt_size: salt,
+            password_salt_size: salt,
+            ..params()
+        };
+        let container = encrypt(&plain, PASSWORD, p, &mut seeded())
+            .unwrap_or_else(|e| panic!("{p:?} must be writable: {e}"));
+        let name = format!("agile_default_salt{salt}.docx");
+        let words = format!(
+            "agile (ECMA-376), hash SHA512, keyBits 256/256, saltSize {salt}/{salt} \
+             (keyData/p:encryptedKey), spinCount {SPIN_COUNT} -- default tuple apart from \
+             the salt"
+        );
+        let non_multiple = salt % 16 != 0;
+        let meaning = if non_multiple {
+            "saltSize is not a multiple of 16, the case [MS-OFFCRYPTO] \u{a7}2.3.4.12's \
+             `fit_iv` pad/truncate step exists for. No external reader, Word included, has \
+             previously been measured on a non-multiple saltSize -- a refusal isolates to \
+             this one dimension (compare against the two multiple-of-16 salt files beside \
+             it) rather than to the tuple generally. Apply the two-case procedure above; \
+             §2.3.4.12 is the clause to re-derive from."
+        } else {
+            "saltSize is a multiple of 16 but not the Office default (16) -- a control for \
+             the non-multiple file beside it. If this one opens and the non-multiple one \
+             does not, the finding is specifically about the pad step, not about a \
+             non-default saltSize generally."
+        };
+        record(&name, &words, &container, PLAIN_DOCX_TEXT, meaning);
+    }
+
+    // The default agile tuple over a spreadsheet and a deck, not just a document --
+    // Excel and PowerPoint have each produced a distinct finding in this crate's history
+    // (recorded in docs/design/development-record.md), so Word alone is not the test.
+    // The plaintext is what this crate's own reader recovers from the real-Office
+    // fixtures already committed, whose SHA-256 is independently pinned against
+    // msoffcrypto-tool in tests/real_office_fixtures.rs::AGILE_GOLDENS -- so the content
+    // fed in here is not this test's own invention. The expected text below is the marker
+    // string each fixture actually carries -- read out of `xl/sharedStrings.xml` and
+    // `ppt/slides/slide1.xml` by hand, not guessed -- so `tools/acceptance_gate.py`'s
+    // Word/Excel/PowerPoint leg (which asserts the *recovered text*, not only that the
+    // file opened) has something real to check on these two as well as on the `.docx`s.
+    for (fixture_name, out_ext, app, marker) in [
+        (
+            "excel16_agile.xlsx",
+            "xlsx",
+            "Excel",
+            "msoffice-crypto fixture: excel16 xlsx agile encryption password testpass",
+        ),
+        (
+            "powerpoint16_agile.pptx",
+            "pptx",
+            "PowerPoint",
+            "msoffice-crypto fixture: powerpoint16 pptx, agile format, password testpass",
+        ),
+    ] {
+        let plain_app = crate::decrypt_ooxml(&fixture_bytes(fixture_name), PASSWORD)
+            .unwrap_or_else(|e| panic!("{fixture_name} must decrypt: {e}"));
+        let container = encrypt(&plain_app, PASSWORD, params(), &mut seeded())
+            .unwrap_or_else(|e| panic!("{fixture_name}: the default tuple must be writable: {e}"));
+        let name = format!("agile_sha512_256_default.{out_ext}");
+        let words = format!(
+            "agile (ECMA-376), hash SHA512, keyBits 256/256, saltSize 16/16, \
+             spinCount {SPIN_COUNT} -- default tuple, over a {app} package"
+        );
+        let expected = format!(
+            "the marker string \"{marker}\" (readable in {app} once opened), plus the rest \
+             of `tests/fixtures/{fixture_name}`'s content -- that fixture's decrypted \
+             SHA-256 is independently pinned against msoffcrypto-tool's own read in \
+             `tests/real_office_fixtures.rs::AGILE_GOLDENS`, so identity beyond the marker \
+             is already established and is not this test's own invention"
+        );
+        let meaning = format!(
+            "the default agile tuple, applied to a {app} package rather than a Word one. \
+             {app} has produced a distinct finding in this crate's history before (see \
+             docs/design/development-record.md), so a Word pass above does not predict \
+             this file -- apply the two-case procedure above independently. Gate with \
+             `--expect-sha256` / `--expect-len` from `AGILE_GOLDENS` and `--expect-text \
+             \"{marker}\"`, since no plaintext `.{out_ext}` twin of the decrypted package \
+             is committed to diff against."
+        );
+        record(&name, &words, &container, &expected, &meaning);
+    }
+
+    // The three standard AlgIDs, now that the write half supports them. Through the
+    // public entry point and real randomness: no golden pins these, so there is nothing
+    // to keep reproducible, and using the production entry point is one fewer thing to
+    // keep in step with `standard_encrypt`'s own seeded core.
+    for bits in [128u32, 192, 256] {
+        let container = crate::encrypt_ooxml_standard_with_key_bits(&plain, PASSWORD, bits)
+            .unwrap_or_else(|e| panic!("standard AES-{bits} must be writable: {e}"));
+        let name = format!("standard_aes{bits}.docx");
+        let words = format!(
+            "standard (ECMA-376/Office 2007), AES-{bits}, SHA-1 and 50 000 iterations \
+             fixed by [MS-OFFCRYPTO] \u{a7}2.3.4.7 (not file fields)"
+        );
+        let meaning = if bits == 128 {
+            "Office 2007 itself only ever writes AES-128 for this format, so this is the \
+             one standard-encryption file with a real-Office precedent; a refusal here \
+             follows the two-case procedure above with no caveat."
+        } else {
+            "AES-192/256 standard encryption: no shipping Office reader has been measured \
+             at this size before (no fixture exists -- Office cannot produce one), though \
+             msoffcrypto-tool reads it back byte-identical and this crate's own reader \
+             round-trips it. A refusal is the first real-Office measurement at this size \
+             and follows the two-case procedure above; §2.3.2 and §2.3.4.5 are the clauses \
+             to re-derive from."
+        };
+        record(&name, &words, &container, PLAIN_DOCX_TEXT, meaning);
+    }
+
+    let manifest_path = dir.join("MANIFEST.md");
+    std::fs::write(&manifest_path, &manifest)
+        .unwrap_or_else(|e| panic!("{}: {e}", manifest_path.display()));
+    println!(
+        "wrote the tuple artifact set and MANIFEST.md to {}",
+        dir.display()
     );
 }

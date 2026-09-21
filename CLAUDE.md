@@ -80,9 +80,18 @@ Consequences, all non-negotiable:
 - **`classify` must never fail loudly.** It is the first thing a caller runs on an unknown
   file. Return "unknown", never panic.
 
-Bounds live in one module with MIN and MAX for every field, each carrying a doc comment
-citing its provenance and justifying its margin. See `odf-crypto/src/limits.rs` for the shape
-and plan slice S9 for the numbers.
+Bounds live in one module, each carrying a doc comment citing its provenance. **The spec's
+range is the rule — not a MIN-and-MAX template applied to every field.** Where
+[MS-OFFCRYPTO] states a range, that range is the bound, floor included: `ST_SpinCount`'s
+own schema facet is `minInclusive="0"`, so `SPIN_COUNT_MAX` has no floor, deliberately,
+against a template that would have given it one. A MIN exists only where the format or the
+arithmetic needs one — never invented to fill a shape borrowed before the spec was checked.
+`SPIN_COUNT_MAX` is the worked example: a margin taken from the sibling's methodology
+(pick two figures, because the sibling's spec does not bound this) overrode
+[MS-OFFCRYPTO]'s own number, and the resulting `1 << 21` refused conforming files on the
+read path until `ad64424` restored the spec's `10000000`. See `src/limits.rs` for the shape
+of that module — never for a number, which does not cross between the two crates — and plan
+slice S9 for what it holds.
 
 ### 2. Key material is wrapped — it is why this crate exists
 

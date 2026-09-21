@@ -826,6 +826,13 @@ fn standard_conforming_aes128_alg_id_reaches_the_password_check() {
 /// anything but 16 bytes — two distinct crashes from one unvalidated field, both before
 /// the verifier comparison. 256 is the one that shows they are distinct: it clears the
 /// 40-byte slice and dies in the cipher.
+///
+/// **These containers all declare `AlgID = 0x0000660E`**, so 256 is still refused here
+/// even though [MS-OFFCRYPTO] §2.3.4.5 permits the value: AES-128's identifier paired
+/// with a 256-bit `KeySize` describes no cipher the format defines. The row that says
+/// the reader now *opens* AES-256 is
+/// [`standard_aes192_and_aes256_reach_the_password_check`] below, and the two together
+/// are what distinguish "the value is out of range" from "the two fields disagree".
 #[test]
 fn standard_key_size_other_than_128_is_an_error_not_a_panic() {
     for key_size_bits in [0u32, 8, 64, 256, 320, 512, u32::MAX] {
@@ -833,10 +840,51 @@ fn standard_key_size_other_than_128_is_an_error_not_a_panic() {
             &standard_encryption_info(key_size_bits, 72),
             &encrypted_package(),
         );
-        let err = decrypt_ooxml(&data, "irrelevant").expect_err("AES-128 means a 128-bit key");
+        let err = decrypt_ooxml(&data, "irrelevant").expect_err("AlgID 0x660E means a 128-bit key");
         assert!(
             matches!(err, Error::BadParameters(_)) && err.to_string().contains("KeySize"),
             "KeySize={key_size_bits} must be refused by name, got: {err}"
+        );
+    }
+}
+
+/// `AlgID` for AES-192 and AES-256 — [MS-OFFCRYPTO] §2.3.2, verbatim: "This value MUST
+/// be 0x0000660E (AES-128), 0x0000660F (AES-192), or 0x00006610 (AES-256)."
+const ALG_ID_AES_192: u32 = 0x0000_660F;
+const ALG_ID_AES_256: u32 = 0x0000_6610;
+
+/// A conforming Office 2007 document may declare AES-192 or AES-256, and until
+/// 2026-09-20 this crate refused both **by name** — `standard::require_aes_128` returned
+/// `UnsupportedAlgorithm` before the header had finished parsing.
+///
+/// That refusal was then cited as evidence that the format offered no choice of key
+/// size, which is the decision restated as its own justification. Both directions were
+/// unfaithful, and the read direction is the one that matters: a file the format defines,
+/// that its owner already holds, that this crate would not open.
+///
+/// Reaching `WrongPassword` is the whole assertion — the password here is deliberately
+/// wrong, and the point is *where* the file is refused. `UnsupportedAlgorithm` would mean
+/// the cipher was never accepted; `BadParameters` would mean a length check refused it.
+/// The end-to-end proof that the right password opens such a file, with a real verifier
+/// and a real package, is `standard::tests::all_three_aes_key_lengths_decrypt_end_to_end`.
+#[test]
+fn standard_aes192_and_aes256_reach_the_password_check() {
+    for (alg_id, key_size_bits) in [
+        (ALG_ID_AES_128, 128u32),
+        (ALG_ID_AES_192, 192),
+        (ALG_ID_AES_256, 256),
+    ] {
+        let data = build_cfb(
+            &standard_encryption_info_full(FLAGS_AES, alg_id, key_size_bits, 72),
+            &encrypted_package(),
+        );
+        assert!(
+            matches!(
+                decrypt_ooxml(&data, "irrelevant"),
+                Err(Error::WrongPassword)
+            ),
+            "AlgID {alg_id:#010x} with KeySize {key_size_bits} must reach the verifier \
+             comparison, not be refused by name"
         );
     }
 }

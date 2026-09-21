@@ -54,6 +54,135 @@ Full matrix green in all five feature columns — `cargo test`, `cargo clippy -D
 over licences, advisories, bans and sources, and `tools/audit_claims.py`. Every column
 reported **0 ignored**, so no corpus fixture is missing.
 
+### The tuple × reader grid — plan slice 10, and the finding it surfaced
+
+Every writable agile `(hash, keyBits)` tuple, three `saltSize`s at the default tuple (one a
+deliberate non-multiple of 16, the case `fit_iv` exists for), the three standard `AlgID`s, and
+the default agile tuple over `.xlsx`/`.pptx` — eighteen files, each written into
+`artifacts/tuples-2026-09-20/` (a durable, gitignored directory, not the `MSOFFICE_CRYPTO_-
+ARTIFACT_DIR` the automated gate consumes and forgets) by a new test beside
+`encrypt_ooxml_writes_the_artifact_the_external_readers_are_run_on`, which is untouched. The
+default artifact is asserted byte-identical to the 41,984 / `b4cc009e…` golden inside that
+test, so the one file the owner is most likely to open by hand also covers the regression.
+`MANIFEST.md` in that directory carries, per file, the tuple in words, the password
+(`testpass`), the SHA-256, the expected content, and what a refusal would mean.
+
+Run through `tools/acceptance_gate.py` over all four readers. **Word is the reference for this
+format, never a reader with a limitation**: its column holds only `PASS`, `FAIL` or `NOT RUN`,
+and a refusal there is filed as `FAIL` and blocks — the two-case procedure is our own bug
+(the default assumption) or a documented Word divergence, decided by re-deriving the bytes
+from the cited clause, never by comparing against another program.
+
+| tuple | Office (Word / Excel / PowerPoint) | LibreOffice | msoffcrypto-tool | office-crypto |
+| --- | --- | --- | --- | --- |
+| SHA-1 / 128 | PASS | PASS | REFUSED-BY-READER¹ | REFUSED-BY-READER² |
+| SHA-256 / 128 | PASS | REFUSED-BY-READER³ | PASS | REFUSED-BY-READER² |
+| SHA-256 / 192 | PASS | REFUSED-BY-READER³ | REFUSED-BY-READER⁴ | REFUSED-BY-READER² |
+| SHA-256 / 256 | PASS | REFUSED-BY-READER³ | PASS | REFUSED-BY-READER² |
+| SHA-384 / 128 | PASS | PASS | PASS | REFUSED-BY-READER² |
+| SHA-384 / 192 | PASS | PASS | REFUSED-BY-READER⁴ | REFUSED-BY-READER² |
+| SHA-384 / 256 | PASS | REFUSED-BY-READER³ | PASS | REFUSED-BY-READER² |
+| SHA-512 / 128 | PASS | REFUSED-BY-READER³ | PASS | NOT RUN⁵ |
+| SHA-512 / 192 | PASS | REFUSED-BY-READER³ | REFUSED-BY-READER⁴ | NOT RUN⁵ |
+| SHA-512 / 256 (default) | PASS | PASS | PASS | PASS |
+| `saltSize` 8/8 | **FAIL** | **FAIL** | REFUSED-BY-READER⁶ | NOT RUN⁵ |
+| `saltSize` 17/17 (non-multiple) | **FAIL** | PASS | REFUSED-BY-READER⁶ | NOT RUN⁵ |
+| `saltSize` 32/32 | PASS | PASS | REFUSED-BY-READER⁶ | NOT RUN⁵ |
+| default tuple, `.xlsx` | PASS | PASS | PASS | PASS |
+| default tuple, `.pptx` | PASS | PASS | PASS | PASS |
+| standard AES-128 | PASS | PASS | PASS | PASS |
+| standard AES-192 | PASS | REFUSED-BY-READER⁷ | PASS | NOT RUN⁸ |
+| standard AES-256 | PASS | REFUSED-BY-READER⁷ | PASS | NOT RUN⁸ |
+
+**Office 16/18 PASS, 2 FAIL. LibreOffice 9 PASS, 8 REFUSED-BY-READER, 1 FAIL. msoffcrypto-tool
+11 PASS, 7 REFUSED-BY-READER. office-crypto 4 PASS, 7 REFUSED-BY-READER, 7 NOT RUN.** One row —
+`saltSize` 8/8 — has zero passes: no reader opens it, not only Word. Recorded as a fact rather
+than a reason to stop writing that `saltSize`, per the plan's own rule for a zero-pass row —
+though see the finding below for why it should not yet be written at all.
+
+¹ `msoffcrypto/method/ecma376_agile.py:490,493` (installed 6.0.0): `verify_integrity` keys the
+HMAC from the **whole** AES-CBC-decrypted `encryptedHmacKey`/`Value` blob, with no truncation
+to `hashSize` first — unlike its own writer (`generate_integrity_parameter`, which keys the
+HMAC from the pre-pad, `hashSize`-length salt). SHA-1's 20-byte digest pads to a 32-byte AES
+block, and the twelve zero bytes it never strips corrupt the comparison. `file.decrypt()` with
+no integrity flag recovers the package byte-identical; only the extra `verify_integrity=True`
+leg this gate also runs fails. Already named at `docs/design/development-record.md:315-317`
+(same function, an older line number).<br>
+² `office-crypto/src/lib.rs:29` (`docs/design/msoffice-crypto-format-history.md:107-109`): only
+the SHA-512 agile path is implemented; every other hash returns `DecryptError::Unimplemented`,
+verbatim in this run's own output (`Unimplemented("SHA1"/"SHA256"/"SHA384")`).<br>
+³ `AgileEngine.cxx:574-612` (`docs/design/msoffice-crypto-format-history.md:118`): LibreOffice
+accepts exactly four agile tuples — AES-256/SHA-512, AES-128/SHA-1, AES-128/SHA-384,
+AES-192/SHA-384 — and refuses every other `(hash, keyBits)` pair outright, independent of
+whether the file is well-formed. Predicted by the plan before this run.<br>
+⁴ `docs/design/development-record.md:324`, "`msoffcrypto-tool` cannot read its own AES-192
+output" — confirmed here on **our** AES-192 output too, at all three hashes:
+`InvalidKeyError: The file could not be decrypted with this password`.<br>
+⁵ office-crypto 0.3 exits 101 (a panic, not its documented refusal code 3) — the same defect
+class already on record below for standard AES-192/256: fixed-length `generic_array` slices
+(`office-crypto/src/crypto.rs`) that assume the one key/salt shape its own fixtures ever
+varied.<br>
+⁶ `msoffcrypto/method/ecma376_agile.py:459` (`verify_password`) hands the raw `saltValue`
+straight to `cryptography`'s `modes.CBC(iv)`, which requires an exact 16-byte IV — no pad, no
+truncate, so any `saltSize != 16` raises `ValueError: Invalid IV size (N) for CBC` before the
+password is even tried. Proven a reader limitation rather than evidence about the file by
+`saltSize` 32: Word and LibreOffice both open that file cleanly, and msoffcrypto still refuses
+it.<br>
+⁷ `Standard2007Engine.cxx:43,319`: "only support key of size 128 bit"; refuses any `algId`
+other than `ENCRYPT_ALGO_AES128` outright.<br>
+⁸ Same defect class as ⁵, already on record: `generic-array-0.14.7/src/lib.rs:572: assertion
+left == right failed, left: 32, right: 16`.
+
+**The finding this run existed for, and it was ours.** `saltSize` 8 and 17 were refused by
+**real Word** — `0x800A1520`, "the password is incorrect", on the right password. A Word
+refusal is never a reader limitation, so the two-case procedure applies and the default
+assumption is our own bug. It was.
+
+The three-artifact spread narrowed it before anyone read the clause: `saltSize` 17's IV is a
+clean truncation (17 → 16), the identical operation `saltSize` 32's IV performs, and Word
+opens 32 while refusing 17 — so the discriminator is not `fit_iv`. What 8 and 17 share and 32
+does not is `roundUp(saltSize, blockSize) != saltSize`: whether the verifier-input blob needs
+a `0x00` tail at all.
+
+**The bug: this crate hashed the padded blob.** §2.3.4.13's `encryptedVerifierHashValue`
+step 1 says "Obtain the hash value of the random array of bytes generated in step 1 of the
+steps for encryptedVerifierHashInput", and that array is `saltSize` bytes; the `0x00` pad to a
+block multiple is step 3, applied when the array is *encrypted*, after the hash. The writer
+hashed the whole padded buffer, `agile::verify_password` digested the whole decrypted blob to
+match, and the synthetic-file helper in `agile.rs`'s own tests built its fixtures the same way.
+**Three places agreeing with each other and disagreeing with the format**, which is exactly
+why no test here could see it: `a_caller_chosen_tuple_round_trips_through_the_public_reader`
+round-trips `saltSize` 8, 9, 24 and 40 through this crate's own decrypt and passes. Invisible
+at every multiple of 16 — which was every salt size that existed before this release made it a
+caller's choice.
+
+All three are fixed. The new guard,
+`the_verifier_hash_covers_the_salt_sized_array_and_not_its_padding`, asserts against a digest
+computed **in the test** from the spec's sentence and never through this crate's reader: a test
+that decrypted the blob and re-digested it the way `verify_password` does would have agreed
+with the bug. It carries the negative too, so a revert fails by meaning rather than by a
+number.
+
+**The read half was shipped.** rc.2 and rc.3 refuse a *conforming* file from another writer
+whose `saltSize` is not a multiple of `blockSize`, reporting `WrongPassword` on a correct
+password. Narrow — no common writer emits such a salt — but it is the same class as the
+`spinCount` ceiling above: an owner locked out of their own document by this crate's error, not
+the format's.
+
+Worth stating plainly what found it. Not the type system, not 225 tests, not five clippy
+columns, not the four-reader gate's automated legs — a human opening files in Word. The
+artifacts at non-block-multiple salt sizes have been regenerated since the fix.
+
+This also supersedes, with real measurement, the "Word, LibreOffice and the interactive open
+path are not measured at AES-192 or AES-256" sentence under "Standard encryption writes all
+three key sizes" below: both now open in real Word, this run, for the first time.
+
+No leaked WINWORD, EXCEL, POWERPNT or soffice from this run's own opens. One stray `EXCEL.EXE`
+(`Book1`, already running before this session started) blocked the first Excel pass behind
+`office_com_check.ps1`'s own guard clause, verbatim: *"EXCEL is already running; close it
+first -- a live instance turns opens into dialogs this script cannot dismiss, and the watcher
+would stop it."* Closed, and the row above is the clean re-run.
+
 ### The agile write tuple is the caller's, within the range [MS-OFFCRYPTO] defines
 
 `encrypt_ooxml_with_params(package, password, EncryptParams { .. })` joins `encrypt_ooxml`,
@@ -101,6 +230,157 @@ syntax. The update form is the compatibility contract instead, and
 pad on `encryptedVerifierHashInput`, and no external reader has been measured on one. Word is
 documented rejecting wrong pad *bytes* twice elsewhere in this format. That gap is recorded in
 the rustdoc rather than papered over.
+
+### Standard encryption reads AES-192 and AES-256, which it refused by name
+
+[MS-OFFCRYPTO] §2.3.2 defines three AES `AlgID`s for the Office 2007 format —
+`0x0000660E` (AES-128), `0x0000660F` (AES-192), `0x00006610` (AES-256) — and §2.3.4.5
+repeats all three against the three `KeySize` values `0x00000080` / `0x000000C0` /
+`0x00000100`. `standard::require_aes_128` returned `UnsupportedAlgorithm` for the latter
+two before the header had finished parsing, so a conforming document using either was
+unopenable: **the owner of that file was locked out by this crate's choice, not by the
+format's.** The refusal was then cited as evidence the format offered no choice of key
+size, which is the decision restated as its own justification.
+
+The read path now takes all three. `require_aes_128` becomes `aes_key_bits`, which returns
+the key length its two cipher fields name, and `parse_encryption_info` requires `KeySize`
+to be one of the three §2.3.4.5 enumerates **and** to agree with the `AlgID` beside it —
+a header pairing AES-128's identifier with 256 bits describes no cipher the format defines,
+and taking either field alone would silently pick a winner. `limits::STANDARD_KEY_BITS_AES128`
+becomes `STANDARD_KEY_BITS_AES: [u32; 3]` and moves from the **cipher** row of the
+provenance table to the **spec** row: agile's `ST_KeyBits` states `minInclusive="8"` and no
+maximum so its set of three comes from AES, while here the format enumerates it.
+
+**Nothing else on the path had to change, and the derivation is the evidence.** §2.3.4.7
+fixes `H` at SHA-1 and the iteration count at 50 000, neither of which is a file field, and
+the only key-size-dependent step in the whole KDF is step 6 — "the first
+`cbRequiredKeyLength` bytes of X3" — with step 1 capping that length at 40, inside which
+AES-256's 32 sits. The three keys are prefixes of one 40-byte ladder output, which is now
+asserted rather than assumed. The ECB helpers were monomorphised on `Aes128`; they dispatch
+on key length now, the same shape `agile::aes_cbc_decrypt` already used. `classify` needed
+no change at all — it matched all three `AlgID`s onto `CipherAlgorithm::Aes` and passed
+`KeySize` through from the start, which had the detector reporting a supported AES-256 file
+that the decryptor then refused by name.
+
+**The default write path is unchanged and still emits AES-128** — what Office writes — so
+both goldens are untouched (41,984 / `b4cc009e…` and 40,960 / `491298746c…`). The other two
+are now writable through a second entry point, which is the next entry; the interop
+measurement against real Office that reading did not need is still owed, and is recorded
+there as an evidence gap rather than implied away.
+
+**Tests.** There is no fixture and Office cannot produce one: it writes AES-128 for this
+format. So the containers are built at runtime in the style of `malformed_input.rs`, from
+the reader's own primitives inverted as §2.3.4.8 describes a writer doing. Deleting the
+AES-192/256 arms fails five tests, among them
+`all_three_aes_key_lengths_decrypt_end_to_end` ("AES-192 is [MS-OFFCRYPTO] 2.3.2's
+0x0000660f and must parse") and `standard_aes192_and_aes256_reach_the_password_check`;
+deleting the agreement check fails `key_size_disagreeing_with_the_alg_id_is_refused_by_name`
+alone. Deleting the enumeration check failed **nothing** on the first attempt — every row
+of that test named an `AlgID` that carries its own key length, so the agreement check
+refused the value first. The sweep now includes the shipped fixture's own spec-forbidden
+`fAES` + RC4-`AlgID` pair, the one shape where `KeySize` is the file's sole statement of the
+key length and this check is therefore the only guard; with it, deleting the check fails at
+`KeySize 0 must be refused`.
+
+### Standard encryption writes all three key sizes, and the caller chooses which
+
+`encrypt_ooxml_standard_with_key_bits(package, password, key_bits)` joins
+`encrypt_ooxml_standard`, which is now one line delegating with 128 — the same shape
+`encrypt_ooxml` took over `encrypt_ooxml_with_params`, and for the same reason: "the
+default path and the parameterised path are the same code" is a fact someone can check by
+reading one line rather than a claim about two argument lists.
+
+**The read half above was only half the asymmetry.** With it, the crate read all three
+`AlgID`s [MS-OFFCRYPTO] §2.3.2 defines for this format and wrote one of them, which is the
+same gap the plan opened over the agile writer: a defined parameter space implemented at a
+single point. §2.3.4.5's header table enumerates `KeySize` `0x00000080` / `0x000000C0` /
+`0x00000100` against the matching `AlgID`, and a conforming writer may emit any row.
+
+**`EncryptParams` was not reused, and no type was added.** This format has exactly one
+writer-settable field. `AlgIDHash` is SHA-1 by §2.3.4.5, the 50 000 iterations are fixed by
+§2.3.4.7 and are not a field in the file at all, §2.3.3 fixes the salt and verifier
+lengths, and AES-ECB fixes the block — so five of `EncryptParams`' six fields name nothing
+this header has, and offering them would be an affordance shaped by the other format. A
+one-field struct was rejected for the same reason the other way round: it buys
+extensibility a format of MUSTs cannot use, and (per the plan's finding 1) it would have to
+ship without `#[non_exhaustive]` for `..Default::default()` to work. The argument, with the
+table of what fixes each field, is in `src/standard_encrypt.rs`'s header.
+
+**`AlgID` and `KeySize` are written as one statement.** A private `AesKeySize` holds the
+pair from a single table over `standard`'s own `AlgID` constants, so the mismatched header
+§2.3.2 forbids — and that this crate's reader refuses by name — is not expressible from the
+writer, and `write_encryption_info` stays infallible.
+
+**A refused key size is `Error::EncryptParams`, and it names a new `EncryptParam::KeySize`
+rather than borrowing `KeyBits`.** They are different fields under different clauses: the
+agile `keyBits` is an XML attribute typed by `ST_KeyBits` (§2.3.4.10 — `minInclusive="8"`,
+a multiple of 8, **no maximum**), while this is a `u32` in the binary `EncryptionHeader`
+that §2.3.4.5 enumerates. The `Display` prints `EncryptionHeader.KeySize`, so a consumer
+forwarding the sentence names the field its user would find in the file.
+
+The consequence of that difference is that **every refusal here is
+`OutsideSpecRange` and `UnsupportedByCipher` is unreachable on this path**, the opposite of
+the agile one where both fire. `ST_KeyBits` is generic across ciphers, so there the format
+and AES are two authorities with different reach and 512 satisfies one while failing the
+other; §2.3.4.5 names AES for this stream and then enumerates AES's own three sizes, so
+here the two sets are one set and the format states it first. Reporting 64 as a cipher
+limitation would assert that this header may carry a 64-bit key, which §2.3.4.5 denies —
+the typed lie the problem enum's split exists to prevent, pointed the other way. §2.3.2's
+RC4 (`0x28`–`0x80`) and `0x00000000` rows are not a counter-example: they are what that
+field may hold in *some* `EncryptionHeader`, and §2.3.4.5 governs this one.
+`EncryptParamProblem::OutsideSpecRange`'s `Display` consequently stopped naming §2.3.4.10,
+which would have cited the agile schema at a caller who never touched it; the section
+numbers moved into the per-parameter docs, where they can be right for each.
+
+**Neither golden moved** (41,984 / `b4cc009e…` and 40,960 / `491298746c…`). The default is
+`DEFAULT_KEY_BITS = 128`, the salt is 16 bytes at every key size (§2.3.3), and the two
+draws and their sizes are unchanged — so the AES-128 byte stream is what it was, and
+`the_default_key_size_is_aes_128_and_both_entry_points_write_it` pins the default by name
+so a moved default fails there rather than only in a digest.
+
+**Evidence.** Deleting the `Err` arm of `AesKeySize::new` fails two named tests:
+`a_key_size_the_format_does_not_define_is_refused_before_the_password` reports
+`0 must be (KeySize, OutsideSpecRange) naming 128, got: BadParameters("AES-ECB takes a 16-,
+24- or 32-byte key; this file's parameters produced 0")` — the refusal falling through to
+the cipher layer as the wrong error type, after the salt was drawn and the 50 000-round KDF
+had run — and `a_refused_key_size_consumes_no_rng_draw` fails on the error type for the
+same reason. The three sizes round-trip through `decrypt_ooxml_with_policy` with a
+wrong-password control each; `classify` reads the `key_bits` back and the `AlgID` is
+asserted against the byte offset §2.3.4.5's layout gives it, both against a table typed from
+the specification rather than from the writer's own constants.
+
+**One independent implementation reads both new sizes; the shipping readers are not
+measured.** Run 2026-09-20 on this machine against artifacts this change wrote
+(`--readers msoffcrypto,office-crypto`, plaintext `plain.docx`):
+
+```
+AES-192  msoffcrypto    PASS  msoffcrypto-tool 6.0.0: byte-identical to plain.docx (36,678 bytes)
+         office-crypto  NOT RUN  office-crypto 0.3 panicked (exit 101)
+AES-256  msoffcrypto    PASS  msoffcrypto-tool 6.0.0: byte-identical to plain.docx (36,678 bytes)
+         office-crypto  NOT RUN  office-crypto 0.3 panicked (exit 101)
+```
+
+The panic is `generic-array-0.14.7/src/lib.rs:572: assertion left == right failed, left:
+32, right: 16` — `office-crypto` 0.3 reads `KeySize` out of the header and hands the
+resulting 32-byte key to a cipher monomorphised on AES-128. **That is a defect in that
+reader, not a verdict on the file**: `msoffcrypto-tool` decrypts the same bytes to
+`plain.docx` exactly, and it is the same failure mode this crate's own `check_aes_key`
+exists to prevent (`src/standard.rs`) — a length from a file reaching
+`GenericArray::from_slice`, which panics rather than refusing. It is recorded here because
+a panic on a conforming document is worth a downstream report, and because the gate must
+say `NOT RUN` rather than swallow it. `an_independent_implementation_reads_what_…_wrote`
+still runs `office-crypto` on the **default** artifact every `cargo test`; no assertion
+about that reader is added at the two new sizes, which would freeze its bug into this
+suite.
+
+**Word, LibreOffice and the interactive open path are not measured at AES-192 or
+AES-256.** The acceptance-gate verdicts above and the byte-exact golden are AES-128
+artifacts, because that is what Office 2007 wrote and therefore the only row a fixture can
+exist for. Word is the reference for this format, and a refusal from it would be a finding
+to work through against §2.3.4.5 rather than a caveat to write down; the suite writes
+`msoffice_crypto_encrypt_ooxml_standard_aes192.docx` and `…_aes256.docx` into
+`MSOFFICE_CRYPTO_ARTIFACT_DIR` for exactly that check, and asserts nothing about what any
+external program does with them.
 
 ### `spinCount` is bounded at the spec's number, and was bounded below it on the read path
 
