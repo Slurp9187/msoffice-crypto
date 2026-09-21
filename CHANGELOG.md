@@ -22,7 +22,7 @@ What survives that move is in two places, deliberately:
 
 ---
 
-## v0.1.0-rc.4 — Unreleased
+## v0.1.0-rc.4 — 2026-09-21
 
 ### Evidence for this release
 
