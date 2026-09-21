@@ -1,5 +1,5 @@
 ---
-name: changelog-protocol
+name: msoffice-crypto-changelog-protocol
 description: Keep CHANGELOG.md honest by making the release date a verifiable claim rather than a typed one. Use when adding a changelog entry, cutting a release, bumping the version in Cargo.toml, tagging, or when a version heading looks out of step with the manifest or the tags.
 ---
 

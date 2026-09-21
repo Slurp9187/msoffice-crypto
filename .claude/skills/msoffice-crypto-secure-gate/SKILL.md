@@ -1,375 +1,199 @@
 ---
 name: msoffice-crypto-secure-gate
-description: Handling password-derived key material in msoffice-crypto with secure-gate wrappers. Use when touching spin_hash/derive_block_key/verify_password in agile.rs, derive_standard_key in standard.rs, adding a new cipher or KDF path, or adding the encrypt side (where the rand feature turns on). Not for the password argument or the returned plaintext Vec<u8> on the public decrypt_ooxml API — those stay plain by design — and not for cfb_reader/error code, which never sees key material.
+description: Handling password-derived key material in msoffice-crypto with secure-gate wrappers. Use when touching spin_hash/derive_block_key/verify_password in agile.rs, derive_standard_key in standard.rs, the RC4 families under legacy-binary, or the encrypt side; or when adding an alias to sensitive.rs. Not for the password argument or the returned plaintext Vec<u8> on the public API — those stay plain by design — and not for cfb_reader/error code, which never sees key material.
 ---
 
 # secure-gate in msoffice-crypto
 
-**Sole authority for this topic.** CLAUDE.md carries the crate-wide rules and points here
-for secure-gate specifics rather than duplicating them -- when the two disagree, this file
-wins on secure-gate and CLAUDE.md wins on everything else. Adapted from the sibling crate
-`odf-crypto`'s `odf-crypto-secure-gate` skill — the rules are the same, the material is
-not.
+**Sole authority for this topic.** `CLAUDE.md` carries the crate-wide rules and points here;
+when the two disagree, this file wins on secure-gate and `CLAUDE.md` wins on everything else.
 
-## The rule: secure-gate is this crate's zeroizing primitive, full stop
+The protocol — access tiers, the residue hazards, Fixed vs Dynamic, alias vs newtype, the
+reveal-borrow defect — is in the global `secure-gate` skill. **This file records only what is
+true of this crate.**
 
-Every value between the password and the decrypted package is wrapped. There is no bare
-`Zeroizing` anywhere in `src/`, and no "this one's local so plain is enough" exception.
+## Dependency
 
-**Dependency:** `secure-gate = "0.9.0-rc.7"`, `optional = true, default-features = false,
-features = ["alloc"]`, enabled by the crate's own `crypto-ops` feature together with
-`secure-gate/ct-eq` and `secure-gate/rand`. Not `encoding` — this crate neither displays
-nor copies key material. `rand` has been on since GH #6 step 4 (see "When encrypt lands"
-below, which has landed).
+```toml
+secure-gate = { version = "=0.9.0-rc.12", optional = true, default-features = false, features = ["alloc"] }
+```
 
-`ct-eq` was switched on at **S2**, and this is the record the "Comparisons" bullet below
-asks for. The reason is the dataIntegrity check specifically: it compares a MAC this crate
-computes against a value the *file* supplies, which is the textbook MAC-forgery oracle
-shape — a short-circuiting `==` there leaks how many leading bytes of a forged tag were
-right. The cost is exactly one crate, `subtle` 2.6, a leaf with no transitive dependencies,
-and `hmac` (added in the same slice for the HMAC itself) pulls it in regardless via
-`digest`'s `mac` feature. So the marginal dependency cost of `ct-eq` is zero.
+Enabled by the crate's own `crypto-ops` feature, which also turns on `secure-gate/ct-eq` and
+`secure-gate/rand`. Not `encoding` — this crate neither displays nor copies key material.
 
-secure-gate is **optional, on `crypto-ops`**, since 2026-09-05. It was unconditional
-through S1's feature split on the strength of a plan item — "the remaining third of S1
-puts its types on the public API, at which point the detection build uses it directly" —
-that was withdrawn as a design error. The reason that survives is the one that was
-always true: no module compiled into the detection build references it, because the
-detection build holds no key material and has nothing to zeroize. This is not a
-dependency-count argument; in the build that has key material, secure-gate and its
-`zeroize` come along regardless, which is what they are for.
+**Optional, on `crypto-ops`.** The rule for adding a secure-gate feature is: *does the
+detection build use it?* None of `alloc`, `ct-eq` or `rand` is, so all three ride on
+`crypto-ops`. This is not a dependency-count argument — in the build that has key material,
+secure-gate and its `zeroize` come along regardless, which is what they are for. What holds is
+that no module compiled into the detection build references it, because that build holds no key
+material and has nothing to zeroize.
 
-The rule when adding a secure-gate feature is unchanged: does the detection build *use*
-it? None of `alloc`, `ct-eq` or `rand` is, so all three ride on `crypto-ops`.
+`ct-eq`'s justification is the `dataIntegrity` check specifically: it compares a MAC this crate
+computes against a value the *file* supplies — the textbook MAC-forgery oracle shape, where a
+short-circuiting `==` leaks how many leading bytes of a forged tag were right. Marginal cost is
+zero: `subtle` is a leaf, and `hmac` pulls it in regardless via `digest`'s `mac` feature.
 
-## Scope: the public API stays plain
+**Every rule in the global skill is read against rc.12.** The rc.13 bump is a coordinated
+ecosystem wave — see the global skill's *upgrade* reference. This crate declares no newtypes,
+so the rc.13 `derive: [ConstantTimeEq]` break does **not** hit it.
 
-`decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, _>` is called by code this
-repo does not control, and both ends stay plain on purpose:
+## Boundary — the public API stays plain
 
-- **`password: &str`** — the caller owns it. Wrapping here adds no protection they don't
-  already have, and forces every consumer to depend on secure-gate.
-- **The returned `Vec<u8>`** — handing back the plaintext OOXML package *is* the function.
-  Wrapping it would be ceremony; the caller receives it in full regardless.
+`decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, _>` is called by code this repo
+does not control, and both ends stay plain on purpose: the caller owns the password, and
+handing back the plaintext package *is* the function.
 
-**Settled, 2026-09-04: the boundary stays plain.** The plan to move it onto secure-gate
-types at S1 was withdrawn as a design error — both this file and `odf-crypto`'s two
-published releases say the boundary stays plain, and the one consumer passes a bare
-`&str`. Do not reopen it without new evidence, and do not move it piecemeal.
+**Settled 2026-09-04: the boundary stays plain.** A plan to move it onto secure-gate types was
+withdrawn as a design error. Do not reopen it without new evidence, and do not move it
+piecemeal.
 
-## What is wrapped
+## The eight aliases
 
-All seven aliases live in `src/sensitive.rs`, all `pub(crate)`. Six are `Dynamic<Vec<u8>>`;
-`XorObfuscationArray` is the one `Fixed<[u8; 16]>`, and it is `legacy-binary`-gated, which
-makes that the only configuration compiling a `Fixed` at all.
+All in `src/sensitive.rs`, all `pub(crate)`, all plain `type` aliases — **not** newtypes.
 
-They are plain `type` aliases, not newtypes — since secure-gate 0.9.0-rc.10 deleted the
-`*_alias!` macros, they are spelled as `type` lines directly. Two aliases over
-`Dynamic<Vec<u8>>` are therefore the *same nominal type*: nothing stops a `SessionKey` being
-passed where a `DerivedKey` is meant. The separation buys greppable names and honest doc
-comments, not type safety.
-
-| Alias | Holds | Live at |
+| Alias | Inner | Holds |
 |---|---|---|
-| `PasswordDigest` | agile `H_final` (SHA-512 × `spinCount`), standard's 50 000-round SHA-1 digest, RC4 CryptoAPI's `SHA1(salt ‖ password)`, and the five bytes Office 97/2000 RC4 keeps from its second MD5 | `agile.rs` `spin_hash` return; consumed by `derive_block_key`, `verify_password`. `standard.rs` `derive_standard_key`, inside — **since GH #7**; this row claimed it earlier and the standard path held `H_final` bare until then. Under `legacy-binary`: `rc4_cryptoapi.rs` and `rc4_office97.rs` hold it as a struct field for the life of the key schedule |
-| `DerivedKey` | a block key, `SHA512(H_final ‖ block_key)[..keyBits/8]`; standard's XOR-ladder key; the RC4 families' per-block key, zero-padded to 128 bits at exactly 40 | `agile.rs` `derive_block_key` return; `standard.rs` `derive_standard_key` return, consumed by `standard_encrypt.rs` `generate` and `encrypt_package`. Under `legacy-binary`: the `BlockKeySchedule::block_key` return in `rc4_cryptoapi.rs` and `rc4_office97.rs`, consumed by `rc4.rs` |
-| `XorObfuscationArray` | the 16-byte XOR obfuscation array of \[MS-OFFCRYPTO\] §2.3.7.2 — the password transformed, not a key in any cryptographic sense | `xor_obfuscation.rs`, built by `xor_array` with `Fixed::new_with` and held as a struct field. `legacy-binary` only. **`Fixed`, not `Dynamic`: its 16 bytes are the spec's, not the file's** — which is the rule below, applied in the one direction the rest of the table does not show |
-| `SessionKey` | the key that decrypts `EncryptedPackage`, from `encryptedKeyValue` | `agile.rs` `decrypt`, consumed by `decrypt_package` |
-| `VerifierPlaintext` | decrypted `encryptedVerifierHashInput` / `…Value`; on the encrypt side, the drawn verifier and its hash before encryption | `agile.rs` and `standard.rs` `verify_password`; `agile_encrypt.rs` `generate`, `standard_encrypt.rs` `generate` (the standard verifier is drawn straight into the wrapper with `from_rng`) |
-| `IntegrityKey` | the HMAC key from `dataIntegrity/@encryptedHmacKey` | `integrity.rs` `verify` |
-| `IntegrityTag` | the expected package HMAC, and the one we compute | `integrity.rs` `verify` |
+| `Utf16Password` | `Dynamic<Vec<u8>>` | the UTF-16LE password bytes the legacy KDFs hash |
+| `PasswordDigest` | `Dynamic<Vec<u8>>` | agile `H_final`, standard's 50 000-round SHA-1 digest, RC4 CryptoAPI's `SHA1(salt ‖ password)`, and the five bytes Office 97/2000 RC4 keeps from its second MD5 |
+| `DerivedKey` | `Dynamic<Vec<u8>>` | a block key, the XOR-ladder key, the RC4 families' per-block key |
+| `XorObfuscationArray` | `Fixed<[u8; 16]>` | the 16-byte XOR obfuscation array of \[MS-OFFCRYPTO\] §2.3.7.2 |
+| `SessionKey` | `Dynamic<Vec<u8>>` | the key that decrypts `EncryptedPackage` |
+| `VerifierPlaintext` | `Dynamic<Vec<u8>>` | decrypted verifier hash input/value, and the drawn verifier on the encrypt side |
+| `IntegrityKey` | `Dynamic<Vec<u8>>` | the HMAC key from `dataIntegrity/@encryptedHmacKey` |
+| `IntegrityTag` | `Dynamic<Vec<u8>>` | the expected package HMAC, and the one we compute |
 
-**Why `Dynamic`, not `Fixed`.** Every length here is decided by the *file*, not by us:
-agile's `keyBits` attribute comes out of the `EncryptionInfo` XML and sets the derived-key
-and session-key length (16/24/32); the digest is 20 or 64 bytes depending on the hash the
-file names. Contrast a consuming application's own file key, which is `Fixed` when its
-byte count is an architectural constant that application chose. **Reach for `Fixed` when the byte count is fixed by
-your design; `Dynamic` when it is fixed by input you don't control.**
+**`Dynamic`, not `Fixed`, and why:** every length here is decided by the *file*. Agile's
+`keyBits` comes out of the `EncryptionInfo` XML and sets the derived-key and session-key length
+(16/24/32); the digest is 20 or 64 bytes depending on the hash the file names.
 
-`SessionKey` is separate from `DerivedKey` even though both are `Dynamic<Vec<u8>>` and the
-same length. They are different secrets with different blast radii: a `DerivedKey` is
-worthless without the password's digest, while `SessionKey` decrypts the document on its
-own and survives a password change. Type-level separation makes it hard to pass one where
-the other belongs.
+**`XorObfuscationArray` is the one `Fixed`**, because its 16 bytes are the *spec's*, not the
+file's — the rule applied in the direction the rest of the table does not show. It is
+`legacy-binary`-gated, which makes that the only configuration compiling a `Fixed` at all.
 
-## What is deliberately NOT wrapped
+**Seven of the eight are the same nominal type.** `SessionKey` is kept separate from
+`DerivedKey` because they have different blast radii — a `DerivedKey` is worthless without the
+password's digest, while a `SessionKey` decrypts the document on its own and survives a
+password change — but that separation buys **readability and grep targets, not compile-time
+safety.** Six interchangeable `Dynamic<Vec<u8>>` roles is past the point where the global skill
+says to settle the newtype question; it stays a deliberate open choice because nothing has yet
+passed the wrong one. Revisit when a ninth appears.
 
-- **`password: &str`** and **the returned package `Vec<u8>`** — the public boundary; see
-  "Scope".
-- **Salts, IVs, `spinCount`, `keyBits`, the block-key constants** — all public by
-  construction. Salts and `keyBits` are read out of the file's own XML; the five block
-  keys are fixed constants published in [MS-OFFCRYPTO]. Wrapping a constant that appears
-  in the spec is theatre.
-- **Ciphertext** — `EncryptedPackage` bytes, `EncryptionInfo` XML, the CFB streams. Still
-  encrypted, not credentials.
-- **The per-segment `padded` chunk buffer** in `decrypt_package` — it holds *ciphertext*
-  going in. Its decrypted output is appended to `output`, which becomes the public return.
+## Tier 1 only
 
-## The pattern
+Measured in `src/` (files, not occurrences):
 
-```rust
-// spin_hash: the digest is moved into the wrapper, not copied.
-fn spin_hash(password: &str, salt: &[u8], spin_count: u32) -> PasswordDigest {
-    // ... iterate ...
-    PasswordDigest::new(h)
-}
-
-// derive_block_key: the digest is read inside the closure; a wrapper comes back out.
-fn derive_block_key(h_final: &PasswordDigest, block_key: &[u8; 8], key_bits: u32) -> DerivedKey {
-    h_final.with_secret(|hf| {
-        let mut hasher = Sha512::new();
-        hasher.update(hf);
-        hasher.update(block_key);
-        let digest = hasher.finalize();
-        DerivedKey::new(digest[..(key_bits / 8) as usize].to_vec())
-    })
-}
-
-// verify_password: two wrapped plaintexts, nested closures, only a bool escapes --
-// and the comparison is ct_eq, never ==. (This snippet showed == until 2026-09-05,
-// contradicting the rule two paragraphs down; the code never did.)
-let matches = verifier_input.with_secret(|vi| {
-    let computed = hash.digest(vi);
-    verifier_hash.with_secret(|vh| computed.as_slice().ct_eq(&vh[..digest_len]))
-});
-
-// decrypt_package: the key is read per segment, never held unwrapped across the loop.
-let dec = encryption_key.with_secret(|k| aes256_cbc_decrypt(&padded, k, &iv))?;
+```sh
+for m in with_secret with_secret_mut expose_secret into_inner from_rng from_random new_with ct_eq; do
+  printf '%-16s %s\n' "$m" "$(grep -rl "$m" --include=*.rs src/ | wc -l)"
+done
 ```
 
-Three shapes worth naming:
+| method | files |
+|---|---|
+| `with_secret` | 12 |
+| `new_with` | 8 |
+| `ct_eq` | 6 |
+| `from_rng` | 4 |
+| `with_secret_mut` | **0** |
+| `expose_secret` | **0** |
+| `into_inner` | **0** |
+| `from_random` | **0** |
 
-- **Producing functions hand back the wrapper.** `spin_hash`, `derive_block_key`,
-  `derive_standard_key` all return a wrapped type, so a caller cannot forget to wrap.
-- **Comparisons happen inside nested closures, and use `ct_eq`.** `Dynamic` has no
-  `PartialEq` by design — `==` on secrets is the timing-unsafe habit the wrapper exists to
-  prevent. Nest the closures, compare with `secure_gate::ConstantTimeEq::ct_eq` on the
-  `&[u8]` inside, and let the `bool` out. Prefer that form over the wrapper-level
-  `a.ct_eq(&b)`: the wrapper impl calls `expose_secret()` internally, so a wrapper-level
-  call does not show up in a `with_secret` audit sweep and quietly breaks the "every
-  secret access is greppable" story.
+**There is no Tier 2 and no Tier 3 in this crate.** Every secret access is a `with_secret`
+closure, which is what makes "every access is greppable" actually true here — so keep it that
+way, and treat the first `expose_secret` as a decision to argue for rather than a convenience.
 
-  All three comparisons in the crate use it. Only one of them *needs* it — the
-  dataIntegrity MAC, where the right-hand side is attacker-supplied. `verify_password`'s
-  channel is far weaker, both operands being derived from the password being guessed. They
-  were converted together anyway: two comparisons that look identical but were reasoned
-  about differently is how the wrong one gets copied next.
-- **Cipher helpers keep plain `&[u8]` signatures.** `aes256_cbc_decrypt` and
-  `aes128_ecb_decrypt` are called *from inside* `with_secret`; Rust's auto-deref coerces
-  the `&Vec<u8>` closure parameter, so none of them needed a signature change.
+⚠️ **Grep trap, confirmed here:** a bare `grep into_inner` returns hits in 9 files, every one
+`cursor.into_inner()` or `cfb.into_inner()`. Filter before counting — a case-sensitive
+exclusion of `Cursor` alone still reports 17 false hits.
 
-## What a `with_secret` closure may return
+`from_rng`, not `from_random`: **the RNG is injected, never a global.** `generate(password,
+spin_count, rng)` takes `&mut R where R: rand::TryRng + rand::TryCryptoRng`, and
+`generate_with_system_rng` is a one-line wrapper passing `rand::rngs::SysRng` — so the seeded
+path a test drives and the path a caller gets are the same function. Tests use
+`chacha20::ChaCha12Rng`, **not** `rand_chacha` (pinned to `rand_core` 0.9, fails `from_rng`'s
+bounds) and **not** `rand::rngs::StdRng` (documented non-portable even with a fixed seed, which
+would silently invalidate a committed golden).
 
-**Every `with_secret` closure returns either a non-secret — a `bool`, a length, ciphertext
-— or a secret that already zeroizes on drop.** Anything else is the defect, whatever the
-wrapper and whatever syntax carried the bytes out. Wrap *inside* the closure:
+## Comparisons
 
-```rust
-// wrong -- SHA1(verifier) is an unprotected Vec until the outer constructor closes over it
-VerifierPlaintext::new(verifier.with_secret(|v| Sha1::digest(v).to_vec()))
+All three comparisons use `ct_eq` in the nested-closure form. Only one *needs* it — the
+`dataIntegrity` MAC, where the right-hand side is attacker-supplied. `verify_password`'s
+channel is far weaker, both operands deriving from the password being guessed. **They were
+converted together anyway**, because two comparisons that look identical but were reasoned
+about differently is how the wrong one gets copied next.
 
-// right -- never exists unwrapped
-verifier.with_secret(|v| VerifierPlaintext::new_with(LEN, |slot| { /* ... */ }))
-```
+## Deliberately not wrapped
 
-**That wrong form was in this crate**, at `standard_encrypt.rs`, until the rc.12 work. It
-is the case that shows why the question is *where* rather than *whether*: the value **is**
-wrapped, `VerifierPlaintext::new(...)` sits right there on the line, so an audit asking
-"is this wrapped?" gets a yes and moves on. The escape lives in the gap between where the
-copy is made and where the wrapper closes over it. Size is no guide either — it was 20
-bytes, so any "check the big buffers first" heuristic ranks it last.
+- **`password: &str` and the returned package `Vec<u8>`** — the public boundary.
+- **Salts, IVs, `spinCount`, `keyBits`, the block-key constants** — public by construction.
+  Salts and `keyBits` are read from the file's own XML; the five block keys are constants
+  published in \[MS-OFFCRYPTO\]. Wrapping a constant that appears in the spec is theater.
+- **Ciphertext** — `EncryptedPackage` bytes, `EncryptionInfo` XML, the CFB streams.
+- **The per-segment `padded` chunk buffer** in `decrypt_package` — it holds *ciphertext* going
+  in, and its decrypted output is appended to `output`, which becomes the public return.
+- **Salt and IV on the encrypt side**, drawn from the same injected CSPRNG — they are written
+  into `EncryptionInfo` in the clear. Do not wrap what the file publishes.
 
-It also stacked a second defect underneath: `to_vec()` allocated exactly 20 bytes and
-`resize(32)` could not fit, so it reallocated and abandoned the block holding
-`SHA1(verifier)` unwiped — the realloc hazard from the section below, co-occurring with
-this one, killed by the same `new_with`. **Expect them together**: a closure that builds a
-secret by growing a buffer usually also hands it out unwrapped.
+## Residue
 
-Three syntaxes reach it: `*p`, the pattern binding `|&p|`, and **any `self`-taking method
-returning an owned value** — `.to_vec()`, `.clone()`, `.to_owned()`, `.to_string()`,
-`.into()`, `collect()`, `try_from(p.as_slice())`. That list is unbounded and the last is
-not even a method on the secret, so **do not treat it as a checklist**.
+Re-derive from the manifests rather than trusting this list — it was incomplete once already.
 
-The first two need `T: Copy`, so they can only occur on a `Fixed<T: Copy>`; on a `Dynamic`
-they are `E0507`. **The third occurs on everything.** So the borrow checker removes two
-syntaxes from what you read for — it does not remove the reading, and **no alias is
-exempt.** Do not reason from the `FixedStorage` impl list either: it holds leaking members
-(`Option<T>`, tuples, `Wrapping<T>`, `MaybeUninit<T>`) and immune ones (`Zeroizing<T>`,
-`Fixed<T>`, whose `Drop` makes `Copy` an `E0184`) side by side, so membership predicts
-nothing. `Copy` is the discriminator; enumerate nothing.
+- `Sha512`/`Sha1` hashers buffer the raw password until `finalize` and drop unzeroized;
+  `sha1`/`sha2` at 0.10 expose no `zeroize` feature.
+- **`HmacSha*` holds opad/ipad state derived from `IntegrityKey`, and nothing wipes it.**
+  `hmac` 0.12 has no `Drop`, no zeroize, and only `reset`/`std` features — unlike `aes`, `cbc`
+  and `rc4` there is no flag to turn on. Exposure is MAC-forgery capability under that key.
+  **This entry was missing until the rc.12 audit**, and the way it was missing is the lesson:
+  the hasher class directly above it was known, written down, and then not carried across to
+  the HMAC path in the same crate.
+- `sha2::compress512` spills its message schedule; `W[0..16]` *is* the message block verbatim.
+- **The spin loop, specific to this format.** `spin_hash` runs `spinCount` (typically 100 000)
+  rounds, each allocating a fresh `Vec` dropped unzeroized — ~100 000 abandoned 64-byte buffers
+  per decrypt. They are *intermediate hash states*, not the key, and inverting SHA-512 to get
+  back to the password is the work the spin count exists to make expensive. **Do not wrap
+  them.** If it ever matters the fix is one reused buffer, not 100 000 wrappers.
 
-"Already zeroizes on drop" is deliberately not "is a secure-gate type". A cipher object
-whose crate has its `zeroize` feature on is fine as-is, and wrapping one in a `Fixed` would
-be worse than leaving it. But that property is a feature flag in another crate's manifest,
-invisible at the call site — see the `aes`/`cbc`/`rc4` note in `Cargo.toml`, and the `hmac`
-entry below for what happens when the feature does not exist.
+## Enforcement
 
-**No lint catches any of this.** Not "none found": `clippy::all`, `pedantic`, `nursery` and
-`restriction` pointed at code leaking a key return only cosmetic diagnostics, and rustc is
-silent under `-D warnings`. Detection is reading the closures.
+**None for secure-gate usage.** `tools/audit_claims.py` runs in CI but checks documentation
+claims, not wrapper discipline. Tier usage, coverage and the reveal-borrow shape are caught in
+review only.
 
-A grep decides *what to read*; it never decides what is clean. An over-broad window that
-flags thirteen sites and needs one read each is the useful kind — the rc.12 sweep ran
-exactly that and 12 of 13 were false positives, which is the point rather than a flaw. A
-pattern precise enough to be trusted is a pattern that gets trusted.
-
-**Record coverage, not a verdict.** Say which spellings were searched and how many closure
-bodies were read. "Audited, clean" cannot be corrected by someone who later learns a new
-form; "checked these four spellings, read 15 of 60 bodies" tells the next person exactly
-where to look. That note is why the second sweep found `standard_encrypt.rs` at all.
-
-## Residual the wrapper cannot reach — know it, don't chase it
-
-- The `Sha512`/`Sha1` hashers buffer the raw password bytes internally until `finalize`,
-  and are dropped unzeroized. `sha1`/`sha2` at 0.10 expose no `zeroize` feature.
-- **`HmacSha*` holds its opad/ipad state, derived from `IntegrityKey`, and nothing wipes
-  it.** `hmac` 0.12.1 has no `Drop` impl, no zeroize, and only two features — `reset` and
-  `std` — so unlike `aes`, `cbc` and `rc4` there is no flag to turn on. The exposure is
-  MAC-forgery capability under that key rather than key recovery, since the state is a hash
-  of key-derived material. It moves only on a dependency bump.
-
-  **This entry was missing until the rc.12 audit**, and the way it was missing is the
-  lesson: the hasher class directly above it was known, written down, and then not carried
-  across to the HMAC path in the same crate. A residual list is only as good as the sweep
-  that populates it, so re-derive it from the dependency manifests rather than trusting
-  that it is complete.
-- `sha2::compress512` spills its message schedule on the stack, and `W[0..16]` of that
-  schedule *is* the message block verbatim.
-- **The spin loop is the loud one here and is specific to this format.** `spin_hash` runs
-  `spinCount` (typically 100 000) rounds, each allocating a fresh `Vec` for the
-  intermediate `h` and dropping it unzeroized. That is ~100 000 abandoned 64-byte heap
-  buffers per decrypt. They are *intermediate hash states*, not the key — only `H_final`
-  derives block keys, and inverting SHA-512 to get from `H_i` back to the password is the
-  work the spin count exists to make expensive. Wrapping every round would allocate
-  100 000 wrappers to protect values whose secrecy is already the KDF's job. **Don't.**
-  If it ever matters, the fix is a single reused buffer, not a wrapper per round.
-
-The fix for the first two is upstream. Do not reimplement SHA here to close them.
-
-## The encrypt side (GH #6 step 4, landed) — the rand rule
-
-`src/agile_encrypt.rs` is the first place this crate generates a secret, and it is where
-secure-gate's `rand` feature went on.
-
-**The RNG is injected, never a global** (plan D3). `generate(password, spin_count, rng)`
-takes `&mut R where R: rand::TryRng + rand::TryCryptoRng`; the production entry point
-`generate_with_system_rng` is a one-line wrapper passing `rand::rngs::SysRng`, so the
-seeded path a test drives and the path a caller gets are the same function — a golden then
-proves something about production rather than about a second implementation that agrees
-today.
-
-```rust
-// production: the one-line wrapper
-generate(password, spin_count, &mut rand::rngs::SysRng)
-// tests -- byte-exact, reproducible; `chacha20::ChaCha12Rng`, NOT rand_chacha (whose
-// 0.9 is pinned to rand_core 0.9 and does not satisfy from_rng's bounds) and NOT
-// rand::rngs::StdRng (seedable, compiles, and documented non-portable "even with a
-// fixed seed" -- which would silently invalidate a committed golden)
-generate(password, spin_count, &mut chacha20::ChaCha12Rng::from_seed([0u8; 32]))
-```
-
-Inside, the session key is `SessionKey::from_rng(SESSION_KEY_LEN, rng)`, which writes into
-the wrapper's own storage via `new_with` so the secret never exists outside it; the
-intermediate verifier plaintext is `VerifierPlaintext`; the three encrypted blobs and the
-two salts are drawn or produced unwrapped, because every one of them is written into
-`EncryptionInfo` in the clear.
-
-**One deliberate departure from the reference**, recorded in that file's header: herumi
-draws the session key at `saltSize` (16) bytes and pads to `keyBits / 8` with `0x36`,
-which is an AES-256 key with 128 bits of entropy. This crate draws all 32. No round-trip
-test in any implementation could have found that, because the key is whatever the writer
-says it is.
-
-**The golden bar** is byte-exactness against our own committed golden under the seeded
-RNG, plus every external reader (GH #8) opening the result. Diffing against herumi's and
-msoffcrypto's bytes for identical inputs was the original bar and was withdrawn: it needs
-both tools driven with our salt, IV and session key, for evidence #8 gives more directly.
-
-**Salt and IV stay unwrapped even on the encrypt side** — they are written to
-`EncryptionInfo` in the clear, so they are public by construction, exactly like the KDF
-parameters beside them. They are drawn from the same injected CSPRNG via
-`TryRng::try_fill_bytes`; do not wrap what the file publishes.
-
-## Adding a new alias
-
-1. **Is its length fixed by your own design, or by input you don't control?** By design →
-   `Fixed<[u8; N]>`. By input (a `keyBits` attribute, a hash algorithm named in the file) →
-   `Dynamic<Vec<u8>>`, matching the six already there.
-
-   These are plain `type` aliases. **The `fixed_alias!` / `dynamic_alias!` macros this step
-   named until the rc.12 work no longer exist** — secure-gate 0.9.0-rc.10 deleted them, and
-   since they only ever expanded to `type` aliases the migration moved no call site. Do not
-   reach for `fixed_newtype!` / `dynamic_newtype!` as replacements: those build real
-   newtypes with a narrower API, which is a different decision from what this step is
-   asking. See the note at the end of this section on what aliases do and do not buy.
-2. Declare it `pub(crate)` in `sensitive.rs` beside its peers, with a doc string saying
-   what it is and — for a `Dynamic` — why not `Fixed`.
-3. Wrap at the point of creation, in the function that produces the value. If the value is
-   built rather than moved in whole, build it with `new_with(len, |slot| ...)` — see "What
-   a `with_secret` closure may return".
-4. **If it is a `Fixed<T>` where `T: Copy`, it joins that section's audit.** Today
-   `XorObfuscationArray` is the only one.
-5. Check whether it needs to leave the crate on a public signature. Per "Scope" that is
-   unlikely before S1 — but if it does, decide it explicitly and record it here.
-
-**S2 (dataIntegrity) landed and this section was wrong about it in two ways**, both worth
-keeping as a record of how the reasoning failed:
-
-1. *"It needs no new alias — the two dataIntegrity block keys are `DerivedKey` like their
-   three siblings."* There are no dataIntegrity block **keys**. The two constants
-   `5f b2 ad 01 0c b9 e1 f6` / `a0 67 7f 02 b2 2c 84 33` derive the two CBC **IVs**; the AES
-   key that unwraps both blobs is the `SessionKey`. So the slice introduced two aliases
-   instead: `IntegrityKey` (the HMAC key, a real secret with its own blast radius — it
-   forges tags) and `IntegrityTag` (the expected and computed MAC, wrapped for the
-   comparison shape rather than because a tag is secret). Neither is a `DerivedKey`.
-2. *"The HMAC comparison is a nested-closure `bool` like `verify_password`'s."* True of the
-   shape, wrong about the operator: `verify_password`'s was `==`. Following that literally
-   would have shipped a variable-time MAC comparison. See the `ct-eq` record above.
-
-One factual correction while here: this section claims separating `SessionKey` from
-`DerivedKey` "makes it hard to pass one where the other belongs". It does not.
-secure-gate's `macros/mod.rs:19-26` is explicit that a plain `type` alias "is a readability
-and audit-grep device, not compile-time separation between cryptographic roles" — two
-aliases over `Dynamic<Vec<u8>>` are the *same nominal type* and are freely interchangeable.
-The separation buys readability and grep targets; the compiler enforces nothing.
-
-(That citation read `:7-12` until the rc.12 work, and by then pointed at the paragraph
-arguing the opposite — upstream inserted a "Newtype or plain `type`?" heading above it. The
-claim stayed true because it is a language fact; the line reference did not. A `file:line`
-citation into a dependency is a claim that goes stale on someone else's schedule, so
-re-read them on every upgrade rather than only when the surrounding prose changes.)
-
-**If nominal separation is ever wanted, secure-gate now ships it and recommends it.**
-`fixed_newtype!` / `dynamic_newtype!` emit a real `struct`, so passing a `SessionKey` where
-a `DerivedKey` belongs becomes a compile error; `macros/mod.rs:10-18` says to prefer one
-"where you are unsure". Our seven are aliases and this is not a live problem — nothing has
-yet passed the wrong one — so it stays a deliberate open choice rather than a TODO. Revisit
-it if a third key of the same shape appears, since the risk is in the count of
-interchangeable `Dynamic<Vec<u8>>` roles, and that is already six.
+The audit record that matters: the rc.12 sweep found `standard_encrypt.rs` building
+`VerifierPlaintext::new(verifier.with_secret(|v| Sha1::digest(v).to_vec()))` — wrapped on the
+line, leaking in the gap — with the realloc hazard stacked underneath it, both killed by the
+same `new_with`. 12 of the 13 sites that sweep flagged were false positives, which is the point
+of an over-broad pattern rather than a flaw.
 
 ## Verify
 
-S1's feature split landed, so this is a matrix, not a single run. Each row is load-bearing:
-the detection build proves it compiles and passes with no cipher crate in the graph;
-`crypto-ops` that nothing on the decrypt path regressed; and **`legacy-binary` is the only
-configuration that compiles `XorObfuscationArray` at all**, so a change to the one `Fixed`
-alias — or to a `use secure_gate::Fixed` import — is invisible without it. The `cli` rows
-build the binary, which links the same wrappers through the library.
+The feature split makes this a matrix, not a run. `legacy-binary` is **the only configuration
+that compiles `XorObfuscationArray` at all**, so a change to the one `Fixed` alias is invisible
+without it.
 
 ```bash
-cargo test --no-default-features
-cargo test --no-default-features --features crypto-ops
-cargo test --no-default-features --features legacy-binary
-cargo test --no-default-features --features cli
-cargo test --no-default-features --features cli,legacy-binary
-cargo clippy --all-targets --no-default-features -- -D warnings
-cargo clippy --all-targets --no-default-features --features crypto-ops -- -D warnings
-cargo clippy --all-targets --no-default-features --features legacy-binary -- -D warnings
-cargo clippy --all-targets --no-default-features --features cli -- -D warnings
-cargo clippy --all-targets --no-default-features --features cli,legacy-binary -- -D warnings
+cargo test --locked --no-default-features
+cargo test --locked --no-default-features --features crypto-ops
+cargo test --locked --no-default-features --features legacy-binary
+cargo test --locked --no-default-features --features cli
+cargo test --locked --no-default-features --features cli,legacy-binary
+cargo clippy --locked --all-targets --no-default-features -- -D warnings   # and once per feature set above
 cargo fmt --all --check
 
-# and the claim the split exists to make:
-cargo tree --no-default-features -e normal | grep -Ei 'aes|sha1|sha2|cbc|ecb|hmac|subtle'
-# -> no output
+# the claim the split exists to make:
+cargo tree --locked -e normal --prefix none --no-default-features \
+  | grep -E '^(aes|cbc|ecb|sha1|sha2|hmac|subtle|rand|secure-gate|zeroize|base64) '   # must print nothing
 ```
+
+## What did not transfer
+
+- **The global skill's `new_with`-everywhere reading.** A broader `new_with` adoption was an
+  approved plan item here; every candidate was checked against the producer rule and the item
+  was **cancelled without converting anything**. `new` is a move and is correct where the
+  producer returns owned.
+- **Newtypes.** The global skill says the newtype wins where a role exists, and six
+  interchangeable roles is past its threshold. Kept as aliases deliberately — nothing has
+  passed the wrong one — and recorded here rather than silently ignored.
+- **The `encoding` feature and everything about `EncodedSecret`.** This crate never displays or
+  parses key material.
