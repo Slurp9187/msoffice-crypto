@@ -228,7 +228,7 @@ mentioned a tag. That is a real gap for a crate arguing its claims are checkable
 `.crate` on crates.io is immutable, but without a tag a consumer holding `0.1.0-rc.1` has no
 ref to check out and re-run the suite against.
 
-Per `.claude/skills/changelog-protocol/SKILL.md`, the date **is** the release marker:
+Per `.claude/skills/msoffice-crypto-changelog-protocol/SKILL.md`, the date **is** the release marker:
 
 ```bash
 # 1. substitute the ISO date for "unreleased" in CHANGELOG.md's top heading, and commit

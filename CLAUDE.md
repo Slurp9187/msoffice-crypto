@@ -295,7 +295,7 @@ marker, not a note about when the work happened** — git already records that, 
 date drifts (five entries here were once stamped in UTC on a UTC-7 machine and read a day
 into the future). Entries carry a date only when the date is part of the claim: a
 measurement against particular versions of external readers needs one, a rename does not.
-Full rule and the tagging step: [`.claude/skills/changelog-protocol/SKILL.md`](.claude/skills/changelog-protocol/SKILL.md);
+Full rule and the tagging step: [`.claude/skills/msoffice-crypto-changelog-protocol/SKILL.md`](.claude/skills/msoffice-crypto-changelog-protocol/SKILL.md);
 enforced as check G of `tools/audit_claims.py`. The pre-publication changelog was 3,397 lines
 of dated entries and stayed with the archived development repository — frozen, not a
 violation to tidy.
