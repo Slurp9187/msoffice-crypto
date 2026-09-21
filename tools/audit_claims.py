@@ -67,8 +67,9 @@ ALL_DOCS = LIVE_DOCS + [
 # Cargo adds on its own. Used by check A, and the reason is a defect this tool had:
 # `exists()` answers "is this file on disk", and the question a published README asks is
 # "does this link reach a reader". Those differ exactly at the allowlist. README.md's link
-# to `docs/plans/...` existed on disk, passed check A green, and was dead in every tarball
-# from v0.1.0-rc.2 to v0.1.0-rc.4 -- `docs/` is not in `include`, so it resolved on GitHub
+# to `docs/plans/...` existed on disk, passed check A green, and was dead in the v0.1.0-rc.2
+# and v0.1.0-rc.3 tarballs (rc.4 shipped it absolute, fixed in 95b8849 for an unrelated
+# reason two commits before the tag) -- `docs/` is not in `include`, so it resolved on GitHub
 # and nowhere else. Found by the odf-crypto sibling reading this function rather than
 # trusting its name.
 #
