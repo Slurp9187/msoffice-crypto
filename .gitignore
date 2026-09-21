@@ -34,3 +34,13 @@ MS-OFFCRYPTO.pdf
 # `cargo test`, never hand-authored. Unlike `tests/fixtures/`, nothing here is committed:
 # these are regenerable outputs of this crate's own writer, not inputs to it.
 /artifacts/
+
+# Python bytecode. `python tools/audit_claims.py` does not write one -- running a file as a
+# script never caches it -- but `import audit_claims` from a one-off check does, which is how
+# tools/__pycache__/acceptance_gate.cpython-314.pyc reached f5b7b64 under an unguarded
+# `git add -A`, the same hazard the worktree rule above is written for. The name carries the
+# interpreter version, so a committed one is stale for anybody on a different Python and is a
+# build artifact in version control either way. `tools/` is not in the crate's `include`, so
+# nothing here ever reached a published tarball.
+__pycache__/
+*.py[cod]
