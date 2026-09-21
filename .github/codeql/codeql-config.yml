@@ -47,6 +47,15 @@ paths-ignore:
   - src/standard_encrypt_tests.rs
   - src/bin/msoffice-crypto_tests.rs
 
+  # `lib.rs` and `sensitive.rs` carried their tests inline until 2026-09-21 and were the
+  # only two modules that did. That is why they are late additions to this list rather
+  # than original members: a `#[cfg(test)] mod tests` *inside* a production file cannot be
+  # excluded by path without blinding the scanner to the production half, so the fix was
+  # to move the tests, not to widen the filter. Eighteen alerts -- fifteen `"testpass"`
+  # literals and three `assert_eq!` panic messages -- were the prompt.
+  - src/lib_tests.rs
+  - src/sensitive_tests.rs
+
   # The hostile-input suites. These carry no `#[cfg(test)]` marker *inside* the file --
   # the gate is on the `mod` declaration in `src/lib.rs:248` and `:253`
   # (`#[cfg(all(test, feature = "crypto-ops"))]` and `... "legacy-binary"`), so a reader

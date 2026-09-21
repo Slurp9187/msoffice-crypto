@@ -226,7 +226,7 @@ spec or in a permissive reference. Cite where it came from.
 ## Layout
 
 ```
-src/lib.rs             public API: classify, is_cfb_office, decrypt_ooxml, decrypt_ooxml_with_policy, check_encryptable, encrypt_ooxml, encrypt_ooxml_standard, decrypt_binary_office
+src/lib.rs             public API: classify, is_cfb_office, decrypt_ooxml, decrypt_ooxml_with_policy, check_encryptable, encrypt_ooxml, encrypt_ooxml_with_params, encrypt_ooxml_standard, decrypt_binary_office   (+ lib_tests.rs)
 src/classify.rs        detection; NEVER panics, returns Unknown        (+ classify_tests.rs)
 src/binary_office.rs   legacy .doc/.xls/.ppt recognition, and the FIB / BIFF / persist-directory readers both probe and decrypt share
 src/agile.rs           ECMA-376 agile decrypt: parse, KDF, verifier, package
@@ -237,7 +237,7 @@ src/hash.rs            HashAlgorithm dispatch and IV derivation           (crypt
 src/segments.rs        the 4096-byte segment iterator both directions share (D4)   (+ segments_tests.rs)
 src/cfb_reader.rs      capped stream reads
 src/limits.rs          every bound, each with cited provenance
-src/sensitive.rs       secure-gate aliases — the only place they are declared
+src/sensitive.rs       secure-gate aliases — the only place they are declared   (+ sensitive_tests.rs)
 src/error.rs           Error -- the crate's single public error type
 src/bin/msoffice-crypto.rs  the CLI: exit codes, clap wiring, classify rendering, the decrypt dispatch and the atomic write   (+ msoffice-crypto_tests.rs)
 src/malformed_input.rs hostile-input tests, containers built at runtime
