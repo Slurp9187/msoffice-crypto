@@ -33,9 +33,11 @@ and standard AES-128 open in all four readers of the [acceptance gate](#how-its-
 the rest are recorded reader by reader, cell by cell, in [`CHANGELOG.md`][changelog].
 
 **The three ❌ are a refusal, not a backlog.** RC4 and XOR obfuscation are broken by any
-modern standard — XOR is not encryption at all. They are implemented so that a file written
-in 1997 can still be *opened*; writing them would make this a tool for producing newly
-weak documents, which is a different thing to be. See [Security](#security).
+modern standard — XOR is not encryption at all. **Reading them is not optional**: a 2026
+Office build still writes RC4 CryptoAPI when you save as *97-2003*, so these are current
+files, not museum pieces. Writing them *is* optional, and this crate declines — nothing
+obliges a writer to emit every format a specification defines, and emitting one would
+produce a newly weak document. See [Security](#security).
 
 **Out of scope, permanently:** password recovery and cracking.
 
@@ -320,8 +322,9 @@ happened, and is why the evidence is recorded against a hash rather than a path.
 Report privately through **Report a vulnerability** on this repository's Security tab.
 [`SECURITY.md`](SECURITY.md) is the policy, and its useful half is what does *not* count:
 RC4 and XOR obfuscation are broken by any modern standard — XOR is not encryption at all.
-They live behind the off-by-default `legacy-binary` feature so files written in 1997 can be
-**read**, and nothing here writes them.
+They live behind the off-by-default `legacy-binary` feature so those files can be
+**read** — including ones a current Office writes when you choose the 97-2003 format —
+and nothing here writes them.
 
 Two properties are enforced rather than claimed: no `unsafe` (`#![forbid(unsafe_code)]` at
 the crate root, which also refuses an `#[allow]` override), and `cargo deny` over licences,
