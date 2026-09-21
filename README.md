@@ -305,6 +305,11 @@ is not a gate. The two applications need an interactive Windows desktop, so they
 local gate, run before a change to the encrypt path merges and recorded in
 [`CHANGELOG.md`][changelog] against the artifact's SHA-256.
 
+That gate reads `MSOFFICE_CRYPTO_ARTIFACT_DIR`, and it must be set to a private
+directory. Every `cargo test` writes the artifact under one fixed name, so a gate
+pointed at shared system temp can measure whichever build wrote it last — which has
+happened, and is why the evidence is recorded against a hash rather than a path.
+
 ## Security
 
 Report privately through **Report a vulnerability** on this repository's Security tab.
