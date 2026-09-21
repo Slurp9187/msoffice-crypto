@@ -6,8 +6,11 @@
 [![MSRV](https://img.shields.io/crates/msrv/msoffice-crypto)](https://github.com/Slurp9187/msoffice-crypto#msrv)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Microsoft Office document encryption in Rust — detection, decryption and encryption of the
-formats [MS-OFFCRYPTO] defines, with **key material that zeroizes on drop**.
+[MS-OFFCRYPTO]-faithful Microsoft Office encryption: detect it, decrypt it, write it.
+
+Every encryption format the specification defines — OOXML and the 97-2003 binary
+documents alike — with **key material that zeroizes on drop**. What it writes is a subset
+of what it reads, and the table below says which.
 
 > **Status: release candidates on crates.io, no stable release.** This tree is
 > `0.1.0-rc.5` and is not released; `0.1.0-rc.4` is the newest on the registry. The API is
@@ -31,7 +34,54 @@ the rest are recorded reader by reader, cell by cell, in [`CHANGELOG.md`][change
 
 **Out of scope, permanently:** password recovery and cracking.
 
-## Use it
+## Why this one
+
+Aimed at callers who handle documents they did not create — vaults, backup and archival
+tools, mail and upload gateways, DLP scanners, indexing pipelines that keep hitting files
+they cannot open.
+
+1. **One API across detect, decrypt and encrypt.** `office-crypto` decrypts but does not
+   encrypt; `ms-offcrypto-writer` encrypts agile but does not decrypt; `msoffcrypto-tool` is
+   Python and `herumi/msoffice` is C++. A complete picture otherwise means several
+   dependencies with several postures toward the same key bytes.
+2. **Key material is wrapped.** Those four all hold the spin hash, block keys and session key
+   in bare `Vec<u8>` / `std::string`. This crate wraps them in
+   [`secure-gate`](https://crates.io/crates/secure-gate): zeroized on drop, `[REDACTED]` in
+   `Debug`, reachable only inside a `with_secret` closure, and comparable *only* in constant
+   time — no `PartialEq` at all, so a verifier or HMAC cannot be compared with `==` by
+   accident. Scope is honest: this is the key material *this crate holds*.
+   [`SECURITY.md`](SECURITY.md) says which dependency state is wiped and which is not.
+3. **Detection costs nothing.** *What is this file, is it encrypted, how strongly* is the
+   common case, and it pulls in no cryptography. `cargo tree --no-default-features` is the
+   claim.
+4. **It fails closed, and says which failure happened.** The agile `dataIntegrity` HMAC is
+   computed over ciphertext, so it is checked *before* any plaintext is returned;
+   `IntegrityPolicy::Require` is the default and `Skip` comes back labelled. `WrongPassword`,
+   `IntegrityCheckFailed` and `UnsupportedAlgorithm` are three variants, because telling
+   someone their password is wrong when the file was modified is actively misleading.
+5. **The claims are checkable rather than assertable.** Fixtures ship with their generators,
+   so evidence is re-run rather than taken on faith. Where an encrypt path exists the bar is
+   that real Word opens what it wrote and that independent implementations recover the same
+   bytes — not that it round-trips against itself. [`CHANGELOG.md`][changelog] records what
+   was run and what each reader answered, against the artifact's hash.
+
+## Install
+
+```toml
+[dependencies]
+# Detection only — no cryptographic dependency.
+msoffice-crypto = "0.1.0-rc.5"
+
+# Detection, decryption and encryption.
+msoffice-crypto = { version = "0.1.0-rc.5", features = ["crypto-ops"] }
+```
+
+Pre-release versions are not matched by ordinary requirements — name the full version as
+above; `"0.1"` will not resolve to it.
+
+The CLI is a separate install; see [Command line](#command-line).
+
+## Usage
 
 Three builds, and you pay only for the one you take.
 
@@ -54,18 +104,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 **`crypto-ops`** adds the ciphers, hashes, `secure-gate` and a CSPRNG:
-
-```toml
-[dependencies]
-# Detection only — no cryptographic dependency.
-msoffice-crypto = "0.1.0-rc.5"
-
-# Detection, decryption and encryption.
-msoffice-crypto = { version = "0.1.0-rc.5", features = ["crypto-ops"] }
-```
-
-Pre-release versions are not matched by ordinary requirements — name the full version as
-above; `"0.1"` will not resolve to it.
 
 ```rust,no_run
 use msoffice_crypto::{decrypt_ooxml, encrypt_ooxml};
@@ -130,50 +168,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
-
-| Feature | Adds crypto? | Enables | Dependencies |
-| --- | :-: | --- | --- |
-| *(none — default)* | no | `classify`, `is_cfb_office` | `cfb`, `quick-xml`, `thiserror` — **13 crates** |
-| `crypto-ops` | yes | `decrypt_ooxml`, `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_with_params`, `encrypt_ooxml_standard`, `encrypt_ooxml_standard_with_key_bits`, `check_encryptable`, `EncryptParams`, `IntegrityPolicy` / `IntegrityOutcome` | + `aes`, `cbc`, `ecb`, `sha1`, `sha2`, `hmac`, `base64`, `rand`, `secure-gate` — **36 crates** |
-| `legacy-binary` | superset of `crypto-ops` | `decrypt_binary_office` | + `rc4`, `md-5` — **38 crates** |
-| `cli` | via `crypto-ops` | the `msoffice-crypto` binary | + `clap`, `serde_json`, `rpassword`/`rtoolbox` (**Apache-2.0-only**) — **49 crates** |
-
-Everything reachable from a library build is dual MIT/Apache-2.0 or more permissive.
-`rpassword` and `rtoolbox` are **Apache-2.0-only** and arrive with the CLI's non-echoing
-prompt under `cli`; CI fails if either reaches the default graph. It matters because this
-crate is offered as `MIT OR Apache-2.0` and the point of a dual offer is that you may take
-*either*. `deny.toml` records the same finding beside the allow-list.
-
-## Why this one
-
-Aimed at callers who handle documents they did not create — vaults, backup and archival
-tools, mail and upload gateways, DLP scanners, indexing pipelines that keep hitting files
-they cannot open.
-
-1. **One API across detect, decrypt and encrypt.** `office-crypto` decrypts but does not
-   encrypt; `ms-offcrypto-writer` encrypts agile but does not decrypt; `msoffcrypto-tool` is
-   Python and `herumi/msoffice` is C++. A complete picture otherwise means several
-   dependencies with several postures toward the same key bytes.
-2. **Key material is wrapped.** Those four all hold the spin hash, block keys and session key
-   in bare `Vec<u8>` / `std::string`. This crate wraps them in
-   [`secure-gate`](https://crates.io/crates/secure-gate): zeroized on drop, `[REDACTED]` in
-   `Debug`, reachable only inside a `with_secret` closure, and comparable *only* in constant
-   time — no `PartialEq` at all, so a verifier or HMAC cannot be compared with `==` by
-   accident. Scope is honest: this is the key material *this crate holds*.
-   [`SECURITY.md`](SECURITY.md) says which dependency state is wiped and which is not.
-3. **Detection costs nothing.** *What is this file, is it encrypted, how strongly* is the
-   common case, and it pulls in no cryptography. `cargo tree --no-default-features` is the
-   claim.
-4. **It fails closed, and says which failure happened.** The agile `dataIntegrity` HMAC is
-   computed over ciphertext, so it is checked *before* any plaintext is returned;
-   `IntegrityPolicy::Require` is the default and `Skip` comes back labelled. `WrongPassword`,
-   `IntegrityCheckFailed` and `UnsupportedAlgorithm` are three variants, because telling
-   someone their password is wrong when the file was modified is actively misleading.
-5. **The claims are checkable rather than assertable.** Fixtures ship with their generators,
-   so evidence is re-run rather than taken on faith. Where an encrypt path exists the bar is
-   that real Word opens what it wrote and that independent implementations recover the same
-   bytes — not that it round-trips against itself. [`CHANGELOG.md`][changelog] records what
-   was run and what each reader answered, against the artifact's hash.
 
 ## Command line
 
@@ -276,6 +270,21 @@ script gets, and "try again", "this file was changed after it was encrypted" and
 with `--features cli,legacy-binary`" are three different next steps. One is a retry, one is a
 support ticket, one is an incident.
 
+## Features
+
+| Feature | Adds crypto? | Enables | Dependencies |
+| --- | :-: | --- | --- |
+| *(none — default)* | no | `classify`, `is_cfb_office` | `cfb`, `quick-xml`, `thiserror` — **13 crates** |
+| `crypto-ops` | yes | `decrypt_ooxml`, `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_with_params`, `encrypt_ooxml_standard`, `encrypt_ooxml_standard_with_key_bits`, `check_encryptable`, `EncryptParams`, `IntegrityPolicy` / `IntegrityOutcome` | + `aes`, `cbc`, `ecb`, `sha1`, `sha2`, `hmac`, `base64`, `rand`, `secure-gate` — **36 crates** |
+| `legacy-binary` | superset of `crypto-ops` | `decrypt_binary_office` | + `rc4`, `md-5` — **38 crates** |
+| `cli` | via `crypto-ops` | the `msoffice-crypto` binary | + `clap`, `serde_json`, `rpassword`/`rtoolbox` (**Apache-2.0-only**) — **49 crates** |
+
+Everything reachable from a library build is dual MIT/Apache-2.0 or more permissive.
+`rpassword` and `rtoolbox` are **Apache-2.0-only** and arrive with the CLI's non-echoing
+prompt under `cli`; CI fails if either reaches the default graph. It matters because this
+crate is offered as `MIT OR Apache-2.0` and the point of a dual offer is that you may take
+*either*. `deny.toml` records the same finding beside the allow-list.
+
 ## How it's verified
 
 A round-trip through this crate's own `decrypt` proves only that it agrees with itself.
@@ -314,15 +323,22 @@ remediated by the `quick-xml` floor in `Cargo.toml`.
 
 Rust **1.85**, checked by a dedicated CI job rather than declared and hoped for.
 
-## Sibling
+## Sibling crate
 
-[`odf-crypto`](https://github.com/Slurp9187/odf-crypto) does the same job for OpenDocument.
-The two crates are shaped alike on purpose.
-
+[`odf-crypto`](https://github.com/Slurp9187/odf-crypto) does for OpenDocument what this
+crate does for Microsoft Office — same method, same author, different format family.
 **Compatibility:** this crate tracks `secure-gate` 0.9.x, and **no secure-gate type crosses
 its public API** — the password is `&str` and the plaintext is `Vec<u8>`, by design. A plan
 to put its types on the boundary was withdrawn as a design error, so a consumer on a
 different secure-gate version resolves both side by side without conflict.
+
+## Trademarks
+
+Microsoft, Microsoft Office, Word, Excel and PowerPoint are trademarks of Microsoft
+Corporation. This project is not affiliated with, endorsed by, or sponsored by Microsoft. It
+is an independent implementation of the [MS-OFFCRYPTO] file formats — published by Microsoft
+under the Open Specification Promise, which is a patent promise and grants no trademark
+rights — and uses those names only to describe the formats it reads and writes.
 
 ## Acknowledgements
 
@@ -349,14 +365,6 @@ the work would have been substantially harder without them.
 The arc of the work is in
 [`docs/plans/msoffice-crypto-foundation-2026-09-04.md`](https://github.com/Slurp9187/msoffice-crypto/blob/main/docs/plans/msoffice-crypto-foundation-2026-09-04.md)
 and the issues it indexes.
-
-## Trademarks
-
-Microsoft, Microsoft Office, Word, Excel and PowerPoint are trademarks of Microsoft
-Corporation. This project is not affiliated with, endorsed by, or sponsored by Microsoft. It
-is an independent implementation of the [MS-OFFCRYPTO] file formats — published by Microsoft
-under the Open Specification Promise, which is a patent promise and grants no trademark
-rights — and uses those names only to describe the formats it reads and writes.
 
 ## License
 
