@@ -157,6 +157,67 @@ Three of those eighteen had never been confirmed by any shipping Office reader b
 The default `agile_sha512_256_default.docx` is byte-identical to the committed golden
 (41 984 / `b4cc009e…`), so the manual pass covers the regression as well as the new tuples.
 
+**LibreOffice, by hand, over the same eighteen files: 8 of 18 — and every one of the ten
+refusals has a citation.** Run by the owner immediately after the Word pass, on the same
+artifacts, which is what makes the comparison worth anything.
+
+| refused | cause | LibreOffice source (MPL-2.0, read for behaviour only) |
+| --- | --- | --- |
+| the six off-allowlist agile tuples | the four-tuple allowlist: AES-128/SHA-1, AES-128/SHA-384, AES-192/SHA-384, AES-256/SHA-512 and nothing else | `AgileEngine.cxx:574-612` |
+| `agile_default_salt17`, `agile_default_salt32` | the IV's **truncate** branch is not implemented | `AgileEngine.cxx:260` |
+| `standard_aes192`, `standard_aes256` | the standard path is AES-128 only | `Standard2007Engine.cxx:311, :319` |
+
+**The allowlist prediction was confirmed exactly rather than approximately.** The grid above
+predicted LibreOffice would refuse AES-256/SHA-256 and AES-256/SHA-384. It refuses those and
+four more, and the eight that pass are precisely the four allowlisted tuples across the four
+default-tuple files. Ten of ten agile rows match the documented list. A prediction that
+survives at that resolution is worth more than the two cells it was written for.
+
+**The salt rows are a new finding about LibreOffice and the mirror image of ours.**
+§2.3.4.12: "pad the array of bytes by appending `0x36` until the array is `blockSize` bytes.
+**If the array of bytes is larger than `blockSize` bytes, truncate the array to `blockSize`
+bytes.**" `AgileEngine.cxx:260` resizes the IV to `roundUp(size, blockSize)` filled with
+`0x36` — correct for a short salt, and for a long one it rounds *up* where the spec says
+truncate. So `saltSize` 17 yields a 32-byte IV where the format says 16, and 32 stays 32.
+That is exactly the split the owner measured: `salt8` is the pad branch and opens; 17 and 32
+are the truncate branch and do not.
+
+Worth stating the symmetry plainly. This release fixed a defect of ours that was invisible at
+`saltSize` 16 because padded and unpadded coincide there; LibreOffice carries one that is
+invisible at 16 because `roundUp(16, 16) == 16`. **Two implementations, the same blind spot,
+created by the same fact — that every real writer emits a 16-byte salt and nothing else has
+ever been exercised.** Ours was found by Word refusing a file; theirs by us writing one nobody
+had written before.
+
+**Neither refusal says "unsupported", and one of them is actively misleading.** The two
+failure modes produce two different wrong sentences, both recorded verbatim by the owner:
+
+* The off-allowlist tuples raise LibreOffice's **generic corruption dialog** — *"The file
+  'agile_sha256_128.docx' is corrupt and therefore cannot be opened. LibreOffice can try to
+  repair the file. The corruption could be the result of document manipulation or of
+  structural document damage due to data transmission. We recommend that you do not trust
+  the content of the repaired document."*
+* `saltSize` 17 and 32 raise **"password is incorrect"**, on the correct password.
+
+The file is conforming and Word opens it. So a user is told either that their document may
+have been **tampered with** and should not be trusted, or that they typed their password
+wrong — when the truth in both cases is that this reader implements a subset.
+
+**This is the defect this release spent itself eliminating, one layer out.** `EncryptParams`'
+four-way `EncryptParamProblem` exists so that a bound *this crate* imposes is never reported
+as something the format forbids; `Error::UnsupportedAlgorithm` now cites §2.3.4.10's clause so
+a consumer can say "the format permits this value and permits us not to support it". The same
+distinction, unmade, is what produces "your file is corrupt, do not trust it" for a file that
+is neither corrupt nor untrustworthy. Recorded here without smugness: this crate shipped the
+identical confusion in a typed error and in a doc comment within the last two days, and both
+were caught by someone outside it.
+
+**What it means for a caller, and it is not "LibreOffice is wrong".** A tuple outside those
+four, or a salt size other than 16, produces a conforming file that real Word opens and
+LibreOffice does not. That is a reader-support fact a caller needs before choosing a tuple,
+and it is why `README.md` now separates *writable* from *externally accepted*. The default
+tuple opens in both, in Word, Excel and PowerPoint, and is what `encrypt_ooxml` writes.
+
 **The finding this run existed for, and it was ours.** `saltSize` 8 and 17 were refused by
 **real Word** — `0x800A1520`, "the password is incorrect", on the right password. A Word
 refusal is never a reader limitation, so the two-case procedure applies and the default
