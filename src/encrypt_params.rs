@@ -283,16 +283,23 @@ pub struct EncryptParams {
     /// truncated if long. `ST_SaltSize` is `1..=65536` here as it is there, so the spec
     /// permits any of those lengths and has a rule for every one of them.
     ///
-    /// **The writer does not yet apply that fit, so today only 16 works.**
-    /// `agile_encrypt::generate` hands the raw salt to `aes_cbc_encrypt` as the IV, and
-    /// `agile::check_cbc_lengths` refuses anything that is not 16 bytes — a refusal, not
-    /// a fit, and one raised a frame below this type's own checks. The decrypt side does
-    /// apply it (`agile.rs` puts the parsed salt through `hash::fit_iv`), so a
-    /// non-16-byte salt is readable here and not writable. Wiring `fit_iv` into the three
-    /// `aes_cbc_encrypt` calls in `agile_encrypt::generate` is what a salt size other
-    /// than 16 needs before it can be written; until that lands, [`Self::validate`]
-    /// accepting the spec's whole range is a statement about the format and not a promise
-    /// about this writer.
+    /// **The writer applies that fit**, so the whole range is writable.
+    /// `agile_encrypt::generate` puts this salt through `hash::fit_iv` once and uses the
+    /// result as the IV for all three password blobs, which is what the decrypt side has
+    /// always done (`agile::AgileParams::password_blob_iv`). For one release it did not:
+    /// the raw salt went to `aes_cbc_encrypt`, and `agile::check_cbc_lengths` would have
+    /// refused anything but 16 bytes. At 16 the fit is the identity, so the two paths
+    /// agreed by coincidence and no test could see the difference until this field made
+    /// the length a caller's choice.
+    ///
+    /// **Writable is not the same as opened**, and the distinction is the honest one
+    /// here: no external reader has been measured on a salt size that is not a multiple
+    /// of 16. It changes the `0x00` pad on `encryptedVerifierHashInput`
+    /// (`roundUp(saltSize, blockSize)`), and Word is documented rejecting wrong pad
+    /// *bytes* twice elsewhere in this format — `0x800A1520` on the verifier value,
+    /// `0x800A1066` on the integrity blobs, thirteen measured variants deep. Until that
+    /// measurement exists, a non-multiple is a conforming file this crate writes and
+    /// nobody has confirmed anyone opens.
     pub password_salt_size: u32,
 }
 
@@ -309,7 +316,9 @@ impl Default for EncryptParams {
     /// base64 values — see `encryption_info`'s module header for that measurement and
     /// `encryption_info_tests` for the byte-identity proof it feeds.
     ///
-    /// * `spin_count`: 100 000, `encryption_info::OFFICE_SPIN_COUNT`.
+    /// * `spin_count`: 100 000, named once as `encryption_info::OFFICE_SPIN_COUNT` and
+    ///   read from there rather than retyped. That constant is also what the writer's own
+    ///   doc cites, so the two cannot drift apart into a claim and a number.
     /// * `hash`: SHA-512, and with it a 64-byte `hashSize`.
     /// * both `keyBits`: 256 — AES-256 for the package key and for the KEK alike. Office
     ///   writes them equal; the spec does not require it (see the type's doc), and the
@@ -323,7 +332,7 @@ impl Default for EncryptParams {
     /// invalidates that evidence and needs its own gate run, not just a green test suite.
     fn default() -> Self {
         Self {
-            spin_count: 100_000,
+            spin_count: crate::encryption_info::OFFICE_SPIN_COUNT,
             hash: HashAlgorithm::Sha512,
             key_data_key_bits: 256,
             password_key_bits: 256,
@@ -343,14 +352,19 @@ impl EncryptParams {
     /// always going to be refused. On an interactive path that question cannot be taken
     /// back once it has been asked.
     ///
-    /// **No encrypt entry point takes an [`EncryptParams`] yet.** This type, and this
-    /// function, landed before the writers were threaded to accept them; until that
-    /// lands, `validate` is callable and correct but nothing in the crate calls it. Said
-    /// plainly because the alternative — documenting the intended arrangement as though
-    /// it existed — is how a doc comment becomes a claim a reader cannot check. When the
-    /// threading lands, every entry point taking an `EncryptParams` calls this itself, so
-    /// that a caller running it early asks the same function the same question rather
-    /// than maintaining a second copy of the rules.
+    /// **[`crate::encrypt_ooxml_with_params`] is the public entry point that takes one**,
+    /// and it does not maintain a second copy of these rules: the tuple travels down
+    /// intact and is judged by this function. `agile_encrypt::encrypt` calls it before
+    /// the payload ceiling and before the first RNG draw, `agile_encrypt::generate`
+    /// sizes every draw from the same value, and `encryption_info::write` takes and
+    /// re-checks it, so every length asserted and every number written comes from a
+    /// tuple that has been through here. [`crate::encrypt_ooxml`] is that same call with
+    /// [`EncryptParams::default`] supplied for the caller — one line, so the default
+    /// path and the parameterised path are the same code rather than two that agree.
+    ///
+    /// So a caller running this early asks the identical function the identical
+    /// question, which is the whole point of it being public: the answer it gets is the
+    /// answer the encryption will give.
     ///
     /// An `Ok(())` is not a promise the encryption succeeds — the payload ceiling and the
     /// system RNG are still ahead — only that the parameters are not what stops it.

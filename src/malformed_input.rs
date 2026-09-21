@@ -938,7 +938,15 @@ fn agile_key_data_may_name_a_different_hash_from_the_password_encryptor() {
     const PASSWORD: &str = "testpass";
     const SPIN: u32 = 1_000; // the KDF is not what this exercises
     let mut rng = chacha20::ChaCha12Rng::from_seed([0x5Au8; 32]);
-    let m = crate::agile_encrypt::generate(PASSWORD, SPIN, &mut rng).unwrap();
+    let m = crate::agile_encrypt::generate(
+        PASSWORD,
+        crate::EncryptParams {
+            spin_count: SPIN,
+            ..Default::default()
+        },
+        &mut rng,
+    )
+    .unwrap();
 
     // Three segments, so indices 0, 1 and 2 all take part -- a one-segment package
     // would only ever exercise LE32(0).

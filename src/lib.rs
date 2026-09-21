@@ -10,10 +10,11 @@
 //!
 //! The public surface is re-exported at the crate root. Detection types
 //! ([`Classification`], [`Family`], [`IntegrityDeclaration`]) compile into every build.
-//! `decrypt_ooxml`, `encrypt_ooxml`, `check_encryptable`, `Error`, `IntegrityPolicy` and
-//! `IntegrityOutcome` exist only under `crypto-ops`; `decrypt_binary_office` exists
-//! only under `legacy-binary`. Those names are not linked from this page because this
-//! crate-level document renders in the detection-only build, where they are absent.
+//! `decrypt_ooxml`, `encrypt_ooxml`, `encrypt_ooxml_with_params`, `check_encryptable`,
+//! `EncryptParams`, `Error`, `IntegrityPolicy` and `IntegrityOutcome` exist only under
+//! `crypto-ops`; `decrypt_binary_office` exists only under `legacy-binary`. Those names
+//! are not linked from this page because this crate-level document renders in the
+//! detection-only build, where they are absent.
 //!
 //! - **Agile encryption** (Office 2010+, `vMajor=4` `vMinor=4`): AES-CBC in the files this
 //!   crate reads and writes ([MS-OFFCRYPTO] §2.3.4.10 also names CFB and other ciphers;
@@ -82,9 +83,10 @@
 //! all. `cargo add msoffice-crypto` installs that and nothing more.
 //!
 //! **Decryption and encryption are the `crypto-ops` feature.** `decrypt_ooxml`,
-//! `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_standard`,
-//! `check_encryptable`, the `Decrypted` struct and the `IntegrityPolicy` /
-//! `IntegrityOutcome` enums live behind it, together with `aes`, `cbc`, `ecb`, `sha1`,
+//! `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_with_params`,
+//! `encrypt_ooxml_standard`, `check_encryptable`, the `Decrypted` and `EncryptParams`
+//! structs and the `IntegrityPolicy` / `IntegrityOutcome` enums live behind it,
+//! together with `aes`, `cbc`, `ecb`, `sha1`,
 //! `sha2`, `hmac`, `base64` and `rand`:
 //!
 //! ```toml
@@ -150,10 +152,14 @@
 //! Under **`crypto-ops`**: a package is at most **1 GiB** in either direction — the same
 //! ceiling refuses an oversized `EncryptedPackage` on read and an oversized `package` on
 //! write, so a file this crate writes is a file it can read back. `spinCount` is capped
-//! at **2^21**, deliberately far below the 10 000 000 the spec permits and about 21× the
-//! 100 000 Office writes; uncapped it is roughly fifty minutes of one core, which no
-//! `Result` can report. Agile key sizes are 128, 192 or 256 bits, salts 1..=65536 bytes,
-//! and the standard path accepts AES-128 only.
+//! at **10 000 000**, `ST_SpinCount`'s own `maxInclusive` ([MS-OFFCRYPTO] §2.3.4.10):
+//! about seven seconds of one core, against the fifty minutes an uncapped `u32::MAX`
+//! buys, which no `Result` can report. A caller wanting a tighter rule than the
+//! format's has what it needs before a single round runs — [`classify()`] reports the
+//! declared spin count unvalidated — and that is where such a rule belongs, because a
+//! ceiling imposed here is one the caller cannot loosen for a document its owner
+//! already holds. Agile key sizes are 128, 192 or 256 bits, salts 1..=65536 bytes, and
+//! the standard path accepts AES-128 only.
 //!
 //! Under **`legacy-binary`**: RC4 key sizes 40..=128 bits (the spec's own range,
 //! [MS-OFFCRYPTO] § 2.3.5.1) and an XOR-obfuscation password of at most 15 characters,
@@ -250,13 +256,15 @@ mod agile_encrypt;
 #[cfg(feature = "crypto-ops")]
 mod dataspaces;
 /// The encryption parameters a caller may choose, and the one function that judges them.
-/// Public through the [`EncryptParams`] re-export below — the type is *to be* an input to
-/// the encrypt path rather than a decision this crate makes alone, which is why it is a
+/// Public through the [`EncryptParams`] re-export below — the type is an input to the
+/// encrypt path rather than a decision this crate makes alone, which is why it is a
 /// module of its own and not a private struct inside `agile_encrypt`.
 ///
-/// The writers do not take one yet: the type and its validator landed ahead of the
-/// threading. See `EncryptParams::validate`, which says the same thing where a caller
-/// reading the rendered docs will meet it.
+/// The threading is complete: [`encrypt_ooxml_with_params`] takes one from the caller,
+/// `agile_encrypt::generate` sizes every draw from it, and `encryption_info::write`
+/// re-checks the same value and writes it out — so the document cannot describe a tuple
+/// other than the one that produced its blobs. [`encrypt_ooxml`] is that same path with
+/// [`EncryptParams::default`] supplied for the caller.
 #[cfg(feature = "crypto-ops")]
 mod encrypt_params;
 /// Serialise the agile `EncryptionInfo` stream — the inverse of `agile`'s parser, and the
@@ -572,14 +580,22 @@ pub fn check_encryptable(package: &[u8]) -> Result<(), Error> {
 /// own random inputs could be recovered: the `EncryptionInfo` document and the two
 /// `dataIntegrity` blobs reproduce Word's, Excel's and PowerPoint's exactly.
 ///
-/// **The profile is fixed, and both halves of that are load-bearing for a caller.** The
-/// spin count is 100 000 with no parameter to change it — there is no overload, no
-/// builder and no environment variable, because the one tuple Office writes is the whole
-/// point of this function. And a `<dataIntegrity>` element is written **unconditionally**:
-/// every artifact this function produces declares one, so a consumer checking
-/// [`Classification::data_integrity`] on agile output from here may assert
-/// [`IntegrityDeclaration::Declared`] and know the assertion cannot fail. Neither
-/// guarantee extends to [`encrypt_ooxml_standard`], whose format defines no such element.
+/// **This function's profile is fixed.** The spin count is 100 000 and the rest of the
+/// tuple is Office 16's, with no parameter here to change any of it — no builder, no
+/// environment variable — because the one tuple Office writes is the whole point of
+/// *this* entry point, and a caller reading this signature can predict the bytes without
+/// tracing a configuration. That is a statement about this function and not about the
+/// crate: [`encrypt_ooxml_with_params`] takes an [`EncryptParams`], and this function is
+/// one line delegating to it with [`EncryptParams::default`], so "the default path and
+/// the parameterised path are the same code" is a fact rather than a claim.
+///
+/// **A `<dataIntegrity>` element is written unconditionally, and that guarantee is *not*
+/// scoped to this function.** Every agile artifact this crate produces declares one —
+/// from here or from [`encrypt_ooxml_with_params`], under every `EncryptParams` tuple —
+/// so a consumer checking [`Classification::data_integrity`] on agile output from this
+/// crate may assert [`IntegrityDeclaration::Declared`] and know the assertion cannot
+/// fail. It does not extend to [`encrypt_ooxml_standard`], whose format defines no such
+/// element.
 ///
 /// The session key, block keys and spin hash are held in `secure-gate` wrappers and
 /// zeroized on drop; the password is `&str` and the input and output are plain bytes, by
@@ -615,17 +631,120 @@ pub fn check_encryptable(package: &[u8]) -> Result<(), Error> {
 ///
 /// # See Also
 ///
-/// [`encrypt_ooxml_standard`] writes the Office 2007 format for a reader that cannot
-/// open agile files. Prefer this function unless that constraint applies.
+/// [`encrypt_ooxml_with_params`] is the same write path with the tuple chosen by the
+/// caller. [`encrypt_ooxml_standard`] writes the Office 2007 format for a reader that
+/// cannot open agile files. Prefer this function unless one of those constraints
+/// applies.
 #[cfg(feature = "crypto-ops")]
 pub fn encrypt_ooxml(package: &[u8], password: &str) -> Result<Vec<u8>, Error> {
+    // One line, deliberately. The measured Office 16 tuple is `EncryptParams::default`,
+    // and delegating rather than repeating the call is what makes "the default path is
+    // the parameterised path" checkable by reading one line instead of by comparing two
+    // argument lists that could drift.
+    encrypt_ooxml_with_params(package, password, EncryptParams::default())
+}
+
+/// Encrypt an OOXML package with a password and an [`EncryptParams`] tuple of the
+/// caller's choosing.
+///
+/// [`encrypt_ooxml`] is this function with [`EncryptParams::default`] — literally: that
+/// function's body is one call to this one. Everything [`encrypt_ooxml`] documents about
+/// the container, the `secure-gate` wrapping of the key schedule, the system CSPRNG and
+/// writing nothing on error holds here unchanged, and so does the **unconditional
+/// `<dataIntegrity>` element**: it is written for every tuple, so a consumer may assert
+/// [`IntegrityDeclaration::Declared`] on agile output from this function exactly as it
+/// may on output from that one.
+///
+/// What changes is the six values in the `EncryptionInfo` document — the spin count, the
+/// hash, the two `keyBits` and the two `saltSize` — and the lengths of the blobs those
+/// imply. [`EncryptParams`] documents each field against the [MS-OFFCRYPTO] §2.3.4.10
+/// attribute it is, including why `keyBits` and `saltSize` are two fields each while the
+/// hash is one; `hashSize` and `blockSize` are absent from the type because the format
+/// derives them.
+///
+/// **Ask first if the answer is expensive.** [`EncryptParams::validate`] is this
+/// function's own parameter check, callable on its own, and [`check_encryptable`] is the
+/// same for `package`. Between them a caller learns that a call would be refused without
+/// having prompted for a password. This function runs both itself — `package` first,
+/// then the parameters, both before the first byte is drawn from the RNG.
+///
+/// A `password_salt_size` other than 16 is **written**, not refused. §2.3.4.12 fits that
+/// salt to the block length before using it as the three password blobs' IV — padding a
+/// short one with `0x36`, truncating a long one — and this writer applies that fit, as
+/// the reader always has. At 16 the fit is the identity, which is why nothing caught its
+/// absence until the salt size became a caller's choice.
+///
+/// What [`EncryptParams::validate`] accepts is therefore what this function writes,
+/// across the spec's whole `1..=65536`. **What no external reader has been measured on
+/// is a salt size that is not a multiple of 16**, which changes the pad on
+/// `encryptedVerifierHashInput`; Word is documented rejecting wrong pad bytes elsewhere
+/// in this format. That is an evidence gap, not a refusal, and it is recorded as one.
+///
+/// # Errors
+///
+/// Every error [`encrypt_ooxml`] returns, plus:
+///
+/// - [`Error::EncryptParams`] — `params` is not a tuple this crate will write. The
+///   payload names the parameter ([`EncryptParam`]), whose rule it broke
+///   ([`EncryptParamProblem`] — the format's, the cipher's, or this crate's) and one
+///   value that would have been accepted
+///
+/// # Examples
+///
+/// A tuple that is not the default, round-tripped through the ordinary decrypt path:
+///
+/// ```
+/// use msoffice_crypto::{
+///     classify, decrypt_ooxml, encrypt_ooxml_with_params, EncryptParams, HashAlgorithm,
+///     IntegrityDeclaration,
+/// };
+///
+/// let package = include_bytes!("../tests/fixtures/plain.docx");
+/// let sealed = encrypt_ooxml_with_params(
+///     package,
+///     "testpass",
+///     EncryptParams {
+///         hash: HashAlgorithm::Sha384,
+///         key_data_key_bits: 192,
+///         spin_count: 1_000,
+///         ..Default::default()
+///     },
+/// )?;
+///
+/// // The tuple reached the file — `classify` reads the numbers back out of it — and
+/// // the integrity guarantee is not tuple-dependent.
+/// let class = classify(&sealed);
+/// let key_data = class.key_data.expect("agile files declare <keyData>");
+/// assert_eq!(key_data.key_bits, Some(192));
+/// assert_eq!(key_data.hash, Some(HashAlgorithm::Sha384));
+/// assert_eq!(
+///     class.password_key.and_then(|p| p.spin_count),
+///     Some(1_000)
+/// );
+/// assert_eq!(class.data_integrity, IntegrityDeclaration::Declared);
+/// assert_eq!(decrypt_ooxml(&sealed, "testpass")?, package);
+/// # Ok::<(), msoffice_crypto::Error>(())
+/// ```
+///
+/// # See Also
+///
+/// [`encrypt_ooxml`] for the tuple Office 16 writes, which is what any given reader is
+/// most likely to have been tested against. [`EncryptParams::validate`] to ask before
+/// paying for a password.
+#[cfg(feature = "crypto-ops")]
+pub fn encrypt_ooxml_with_params(
+    package: &[u8],
+    password: &str,
+    params: EncryptParams,
+) -> Result<Vec<u8>, Error> {
+    // `params` by value, not by reference, on the `decrypt_ooxml_with_policy` precedent
+    // above: six `Copy` scalars are no larger than the pointer to them, and a caller
+    // that built the tuple inline has nothing left to borrow it from.
     check_encryptable(package)?;
-    agile_encrypt::encrypt(
-        package,
-        password,
-        encryption_info::OFFICE_SPIN_COUNT,
-        &mut rand::rngs::SysRng,
-    )
+    // `agile_encrypt::encrypt` calls `params.validate()` itself, before the payload
+    // ceiling and before the first draw. Not repeated here: two copies of one question
+    // are two places for the answer to change.
+    agile_encrypt::encrypt(package, password, params, &mut rand::rngs::SysRng)
 }
 
 /// Encrypt an OOXML package in the Office 2007 format, ECMA-376 standard encryption.

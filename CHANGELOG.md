@@ -54,6 +54,134 @@ Full matrix green in all five feature columns — `cargo test`, `cargo clippy -D
 over licences, advisories, bans and sources, and `tools/audit_claims.py`. Every column
 reported **0 ignored**, so no corpus fixture is missing.
 
+### The agile write tuple is the caller's, within the range [MS-OFFCRYPTO] defines
+
+`encrypt_ooxml_with_params(package, password, EncryptParams { .. })` joins `encrypt_ooxml`,
+which is now one line delegating with `EncryptParams::default()` — so the default path and
+the parameterised path are the same code as a fact rather than a claim.
+
+**The reason is fidelity, not a feature request.** §2.3.4.10 defines agile encryption as a
+parameter space; this crate wrote one point in it. The read path has honoured four hashes and
+three key sizes since GH #11/#13, so the crate could *read* far more of the format than it
+could *write*, an asymmetry with no basis in the spec. No consumer asked for this and none is
+waiting on it.
+
+**`keyBits` and `saltSize` are two fields each, and that is the spec's shape rather than a
+convenience.** §2.3.4.13 step 1 sizes the package key from `Encryptor.KeyData.keyBits`;
+§2.3.4.11 sizes the password-derived key-encrypting key from `PasswordKeyEncryptor.keyBits`.
+Explicitly namespaced, different quantities, and no sentence anywhere makes them equal. One
+field would have encoded a constraint the spec denies and made an AES-256 KEK wrapping an
+AES-128 package key inexpressible — a file Word reads. `hash` stays one field because
+§2.3.4.10 *does* carry that MUST, and so does `cipherAlgorithm`; that asymmetry is the
+evidence the split was derived rather than chosen.
+
+**Ten writable combinations, not twelve.** `keyBits / 8` must fit the named hash's digest, so
+SHA-1's 20 bytes admit 128 alone — `(Sha1, 192)` and `(Sha1, 256)` are refused as
+`UnusableCombination`. All ten are round-tripped through the public reader under
+`IntegrityPolicy::Require`, each with a wrong-password control.
+
+**One length was wrong and is now right.** `encryptedKeyValue` is
+`roundUp(keyData.keyBits / 8, blockSize)`, not `keyBits / 8`: AES-192 puts a 24-byte key in a
+32-byte blob with a zero tail. The reader has always asserted this (`agile.rs:1160-1170`) and
+`agile_aes192_sha384.docx` carries it, so the writer would have refused its own output the
+moment a caller chose 192.
+
+**And one step was missing entirely.** The three password blobs' CBC IV is the salt *fitted*
+to `blockSize` — padded with `0x36` if short, truncated if long (§2.3.4.12). The reader has
+always done this; the writer passed the raw salt. At the only salt size that existed, 16, the
+fit is the identity, so the two agreed by coincidence and nothing could see the difference
+until the length became a caller's choice.
+
+`EncryptParams` is deliberately **not** `#[non_exhaustive]`: that attribute forbids
+struct-expression syntax from another crate, and `..Default::default()` is struct-expression
+syntax. The update form is the compatibility contract instead, and
+`tests/encrypt_entry_points.rs` — a separate crate — is the compile-time proof.
+
+**Writable is not the same as opened.** A `saltSize` that is not a multiple of 16 changes the
+pad on `encryptedVerifierHashInput`, and no external reader has been measured on one. Word is
+documented rejecting wrong pad *bytes* twice elsewhere in this format. That gap is recorded in
+the rustdoc rather than papered over.
+
+### `spinCount` is bounded at the spec's number, and was bounded below it on the read path
+
+`limits::SPIN_COUNT_MAX` was `1 << 21`. §2.3.4.10 declares `ST_SpinCount` as
+`minInclusive="0"`, `maxInclusive="10000000"`, and the prose says "It MUST NOT be greater than
+10,000,000". So a `.docx` declaring any spin count between 2,097,152 and 10,000,000 was
+conforming, opened in Word, and was refused here — **on the decrypt path**, which makes it a
+defect rather than a conservative default. Encryption must not protect data from its owner.
+
+**The margin was defended with arithmetic that does not hold.** Three figures in the
+superseded comment disagreed with each other: `u32::MAX` rounds at ~50 minutes and `1 << 21`
+at ~1.5 s both imply ~0.70 µs per round, from which the spec's 10,000,000 is about **7
+seconds** — not the "minutes of one core" claimed. "~7 µs per SHA-512 round pair" was ten
+times high, and "21x under 10,000,000" was 4.8x. Every error ran in the direction that made
+the margin look necessary. `tools/audit_claims.py` cannot catch this: it checks that citations
+resolve, not that sums add up.
+
+Where the denial-of-service policy belongs is the caller, which already has what it needs:
+`classify` reports `spin_count` unbounded and unvalidated before a single round runs, so any
+threshold is one comparison on data this crate hands over free. A ceiling imposed here is one
+a caller cannot loosen.
+
+Raised by the downstream consumer asking which bounds were the format's and which were ours —
+a question the crate could not answer from its own documentation, which is why `limits.rs` now
+opens with a provenance table labelling every bound **spec**, **cipher** or **margin**.
+
+### Two secrets no longer reach a bare `Vec` on the decrypt path
+
+Both were in the default `crypto-ops` build, on every decrypt, in published rc.2 and rc.3.
+Neither is attacker-reachable by choice of input; both are heap residue, the class
+[`docs/design/heap-residue.md`](docs/design/heap-residue.md) describes — a `Vec` that grows
+frees the old block unwiped, and the wrapper cannot reach what was abandoned before it
+existed.
+
+The **UTF-16LE password buffer** in `agile::spin_hash` and `standard::derive_standard_key` was
+built with `encode_utf16().flat_map(..).collect()`. `EncodeUtf16`'s `size_hint` lower bound is
+`len.div_ceil(3)`, so `collect` reserved a fraction of the true length and the `Vec` grew.
+Measured with a counting `GlobalAlloc` rather than argued: `"testpass"` abandoned one 8-byte
+block holding `t\0e\0s\0t\0`; `"correct horse battery staple"` abandoned 60 bytes across two
+reallocations. Now one allocation at the exact length inside a wrapper.
+
+**`derive_block_key`** cut the block key with `digest[..key_len].to_vec()`, leaving the whole
+digest of `H_final` in a bare `Vec` and copying the prefix out rather than writing it in. Now
+`hash::digest_two_into` writes straight into the wrapped slot.
+
+Both seeded goldens are byte-identical, which is the entire proof these changed no output.
+
+**Not fixed, and named rather than carried silently:** `rc4_cryptoapi.rs:262` and
+`rc4_office97.rs:95` hold the identical `collect()` under `legacy-binary`. And the spin loop
+abandons ~100 000 unwiped 64-byte digests per decrypt, whose in-code defence — "intermediate
+hash states, not the key" — is true and is not a security argument: given `H_i`, reaching
+`H_final` costs `spinCount - i` hashes while attacking the password costs `spinCount` *per
+candidate*, so any recovered round is a total break the spin count does nothing to resist.
+`standard::derive_standard_key` already runs its 50 000 rounds over one reused array with no
+heap traffic; the agile path is the outlier.
+
+### The acceptance gate stopped reporting its own build failures as reader refusals
+
+`tools/acceptance_gate.py`'s office-crypto leg runs `cargo run --example`, which compiles this
+crate on the way to running someone else's — and rendered *any* non-zero exit as
+`"right password REFUSED"`. A compile error in an unrelated uncommitted edit therefore came
+back as a sentence about a reader and an artifact. The one leg written specifically so it is
+not this crate marking its own homework (`examples/office_crypto_check.rs:13`) was the one
+coupled to this crate's working tree.
+
+The build is now a separate step; a failure raises `LegCannotRun` and the gate prints
+`GATE: NOT RUN … nothing was proven` and exits 2, never FAIL — the `MutationNotApplicable`
+precedent, whose reasoning already covered this case. The header gained a `tree :` line naming
+HEAD and whether it is dirty.
+
+**The first fix broke the negative control and that was worse.** It assumed the example's
+refusal code was 1; the contract at `examples/office_crypto_check.rs:25-26` says 3, twenty-five
+lines above the code the fix cited. Genuine refusals became `LegCannotRun`, so
+`--expect-fail` — the run whose entire purpose is proving the gate *can* fail — exited 2
+instead of reaching `EXPECTED FAIL`. Found by the downstream consumer within the hour, on that
+control. Both polarities are now verified, and the codes are named constants beside the reason
+guessing them was expensive.
+
+Reported by the downstream consumer, who hit the original on their own artifacts and recorded
+no verdict rather than a contaminated one.
+
 ### `encrypt_ooxml` refuses input it used to accept — the already-encrypted guard is the library's now
 
 **Breaking, and it is a behaviour change rather than an addition.** `encrypt_ooxml` and

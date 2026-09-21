@@ -20,6 +20,45 @@ use rand::SeedableRng;
 const PASSWORD: &str = "testpass";
 const SPIN_COUNT: u32 = 100_000;
 
+/// The tuple every golden below was measured under: `EncryptParams::default`, which is
+/// the measured Office 16 tuple, with `SPIN_COUNT` stated rather than inherited so that
+/// a change to the default's spin count shows up here as a moved golden and not as a
+/// silently different test.
+///
+/// **A golden that moves means the default draw path moved**, and the change is wrong
+/// until proven otherwise — re-measuring is the last thing to do, not the first.
+fn params() -> EncryptParams {
+    EncryptParams {
+        spin_count: SPIN_COUNT,
+        ..Default::default()
+    }
+}
+
+/// Every `(hash, keyBits)` pair this crate will write, stated as a table rather than
+/// computed.
+///
+/// Ten, not twelve. `keyBits / 8` must fit inside the named hash's digest — §2.3.4.11
+/// truncates and this crate refuses to `0x36`-pad the shortfall — so SHA-1's 20 bytes
+/// admit 128 alone, and `(Sha1, 192)` and `(Sha1, 256)` are unwritable.
+///
+/// **Typed literally, never derived from `can_carry_key_bits`.** A table computed from
+/// the predicate it is meant to pin would prove only that the code agrees with itself;
+/// this one disagrees with the code if either moves. The length assertion is what stops
+/// the sweep silently shrinking — a row lost to an edit would otherwise just make the
+/// test faster.
+const EVERY_WRITABLE_TUPLE: [(HashAlgorithm, u32); 10] = [
+    (HashAlgorithm::Sha1, 128),
+    (HashAlgorithm::Sha256, 128),
+    (HashAlgorithm::Sha256, 192),
+    (HashAlgorithm::Sha256, 256),
+    (HashAlgorithm::Sha384, 128),
+    (HashAlgorithm::Sha384, 192),
+    (HashAlgorithm::Sha384, 256),
+    (HashAlgorithm::Sha512, 128),
+    (HashAlgorithm::Sha512, 192),
+    (HashAlgorithm::Sha512, 256),
+];
+
 /// The seed every golden below is measured under. All-zero, so it is obviously arbitrary
 /// and obviously not chosen to make an assertion pass.
 const SEED: [u8; 32] = [0u8; 32];
@@ -44,7 +83,7 @@ fn hex(bytes: &[u8]) -> String {
 /// same seed and say in the commit what moved and why.
 #[test]
 fn the_material_is_byte_exact_under_a_seeded_rng() {
-    let material = generate(PASSWORD, SPIN_COUNT, &mut seeded()).unwrap();
+    let material = generate(PASSWORD, params(), &mut seeded()).unwrap();
 
     assert_eq!(
         hex(&material.password_salt),
@@ -94,13 +133,13 @@ const NO_INTEGRITY_YET: [u8; 64] = [0u8; 64];
 /// verifier worthless.
 #[test]
 fn the_generated_encryptor_verifies_through_the_real_path() {
-    let material = generate(PASSWORD, SPIN_COUNT, &mut seeded()).unwrap();
+    let material = generate(PASSWORD, params(), &mut seeded()).unwrap();
 
     let stream = encryption_info::write(&EncryptionInfoParams {
+        params: params(),
         key_data_salt: &material.key_data_salt,
         encrypted_hmac_key: &NO_INTEGRITY_YET,
         encrypted_hmac_value: &NO_INTEGRITY_YET,
-        spin_count: SPIN_COUNT,
         password_salt: &material.password_salt,
         encrypted_verifier_hash_input: &material.encrypted_verifier_hash_input,
         encrypted_verifier_hash_value: &material.encrypted_verifier_hash_value,
@@ -108,7 +147,7 @@ fn the_generated_encryptor_verifies_through_the_real_path() {
     })
     .expect("generated material must satisfy the writer's own length rules");
 
-    let params = agile::parse_encryption_info(&stream[8..])
+    let parsed = agile::parse_encryption_info(&stream[8..])
         .expect("the writer's output must parse -- that is step 3's contract");
 
     let h_final = agile::spin_hash(
@@ -117,7 +156,7 @@ fn the_generated_encryptor_verifies_through_the_real_path() {
         &material.password_salt,
         SPIN_COUNT,
     );
-    agile::verify_password(&params, &h_final)
+    agile::verify_password(&parsed, &h_final)
         .expect("the password used to generate the encryptor must verify against it");
 
     // The control.
@@ -129,7 +168,7 @@ fn the_generated_encryptor_verifies_through_the_real_path() {
     );
     assert!(
         matches!(
-            agile::verify_password(&params, &wrong),
+            agile::verify_password(&parsed, &wrong),
             Err(Error::WrongPassword)
         ),
         "a wrong password must be refused, and by name"
@@ -149,7 +188,7 @@ fn the_generated_encryptor_verifies_through_the_real_path() {
 /// with no `<dataIntegrity>` element obliged to say so.
 #[test]
 fn every_blob_unwraps_to_what_produced_it() {
-    let material = generate(PASSWORD, SPIN_COUNT, &mut seeded()).unwrap();
+    let material = generate(PASSWORD, params(), &mut seeded()).unwrap();
     let h_final = agile::spin_hash(
         HashAlgorithm::Sha512,
         PASSWORD,
@@ -158,8 +197,16 @@ fn every_blob_unwraps_to_what_produced_it() {
     );
 
     let unwrap_with = |block_key: &[u8; 8], blob: &[u8]| -> Vec<u8> {
-        let key = agile::derive_block_key(HashAlgorithm::Sha512, &h_final, block_key, KEY_BITS)
-            .expect("SHA-512 yields more than 32 bytes");
+        let key = agile::derive_block_key(
+            HashAlgorithm::Sha512,
+            &h_final,
+            block_key,
+            // `p:encryptedKey/@keyBits` -- the password half. `key_data_key_bits` is
+            // the same 256 at the default tuple, and using it here would be the silent
+            // crossing the two fields exist to make visible.
+            params().password_key_bits,
+        )
+        .expect("SHA-512 yields more than 32 bytes");
         key.with_secret(|k| agile::aes_cbc_decrypt(blob, k, &material.password_salt))
             .expect("the blob was encrypted under this key and IV")
     };
@@ -194,9 +241,14 @@ fn every_blob_unwraps_to_what_produced_it() {
     ]
     .iter()
     .map(|bk| {
-        agile::derive_block_key(HashAlgorithm::Sha512, &h_final, bk, KEY_BITS)
-            .unwrap()
-            .with_secret(|k| k.to_vec())
+        agile::derive_block_key(
+            HashAlgorithm::Sha512,
+            &h_final,
+            bk,
+            params().password_key_bits,
+        )
+        .unwrap()
+        .with_secret(|k| k.to_vec())
     })
     .collect();
     let mut unique = keys.clone();
@@ -220,7 +272,7 @@ fn every_blob_unwraps_to_what_produced_it() {
 /// byte position must vary across seeds, which a constant tail cannot do.
 #[test]
 fn the_session_key_is_fully_drawn_never_padded_to_length() {
-    let material = generate(PASSWORD, SPIN_COUNT, &mut seeded()).unwrap();
+    let material = generate(PASSWORD, params(), &mut seeded()).unwrap();
     material.session_key.with_secret(|k| {
         assert_eq!(k.len(), 32, "AES-256 takes 32 bytes");
         assert_ne!(
@@ -237,7 +289,11 @@ fn the_session_key_is_fully_drawn_never_padded_to_length() {
     for seed in 1u8..24 {
         let other = generate(
             PASSWORD,
-            1, // a low spin count: this loop is about the RNG, not the KDF
+            // A low spin count: this loop is about the RNG, not the KDF.
+            EncryptParams {
+                spin_count: 1,
+                ..params()
+            },
             &mut chacha20::ChaCha12Rng::from_seed([seed; 32]),
         )
         .unwrap();
@@ -261,8 +317,8 @@ fn the_session_key_is_fully_drawn_never_padded_to_length() {
 /// written with one password the same salts and the same session key.
 #[test]
 fn the_rng_decides_the_output_and_the_seed_decides_the_rng() {
-    let a = generate(PASSWORD, SPIN_COUNT, &mut seeded()).unwrap();
-    let b = generate(PASSWORD, SPIN_COUNT, &mut seeded()).unwrap();
+    let a = generate(PASSWORD, params(), &mut seeded()).unwrap();
+    let b = generate(PASSWORD, params(), &mut seeded()).unwrap();
     assert_eq!(a.password_salt, b.password_salt);
     assert_eq!(a.key_data_salt, b.key_data_salt);
     assert_eq!(a.encrypted_key_value, b.encrypted_key_value);
@@ -273,7 +329,7 @@ fn the_rng_decides_the_output_and_the_seed_decides_the_rng() {
 
     let c = generate(
         PASSWORD,
-        SPIN_COUNT,
+        params(),
         &mut chacha20::ChaCha12Rng::from_seed([1u8; 32]),
     )
     .unwrap();
@@ -326,7 +382,7 @@ fn the_whole_container_is_byte_exact_under_a_seeded_rng() {
         "/tests/fixtures/plain.docx"
     ))
     .expect("plain.docx is committed");
-    let container = encrypt(&plain, PASSWORD, SPIN_COUNT, &mut seeded()).unwrap();
+    let container = encrypt(&plain, PASSWORD, params(), &mut seeded()).unwrap();
     let digest = hex(&Sha256::digest(&container));
     assert_eq!(
         (container.len(), digest.as_str()),
@@ -335,7 +391,7 @@ fn the_whole_container_is_byte_exact_under_a_seeded_rng() {
     );
 
     // And the same seed reproduces it exactly; a golden that only held once is a fluke.
-    let again = encrypt(&plain, PASSWORD, SPIN_COUNT, &mut seeded()).unwrap();
+    let again = encrypt(&plain, PASSWORD, params(), &mut seeded()).unwrap();
     assert_eq!(container, again);
 }
 
@@ -346,21 +402,230 @@ const GOLDEN_SHA256: &str = "b4cc009e94bddf00c6610e0b897e5ee0a4485bd5bc9e40a0241
 /// Every generated blob is the length step 3's writer demands.
 ///
 /// Stated directly as well as through the writer, because the writer's refusal names a
-/// field and this names the rule: `roundUp(saltSize, blockSize)` for the verifier input,
-/// `roundUp(hashSize, blockSize)` for its hash, `keyBits / 8` for the wrapped key.
+/// field and this names the rule: `roundUp(p:encryptedKey saltSize, blockSize)` for the
+/// verifier input, `roundUp(hashSize, blockSize)` for its hash, and
+/// `roundUp(keyData keyBits / 8, blockSize)` for the wrapped key.
+///
+/// The default tuple first, then three that pull the seven lengths apart. At
+/// AES-256/SHA-512 with 16-byte salts almost every rule coincides -- 16, 64 and 32 are
+/// each produced by more than one formula -- so the default alone cannot tell a correct
+/// derivation from a lucky one.
 #[test]
 fn every_generated_length_is_the_one_the_format_fixes() {
-    let m = generate(PASSWORD, SPIN_COUNT, &mut seeded()).unwrap();
-    assert_eq!(m.password_salt.len(), SALT_LEN);
-    assert_eq!(m.key_data_salt.len(), SALT_LEN);
+    let m = generate(PASSWORD, params(), &mut seeded()).unwrap();
+    assert_eq!(m.password_salt.len(), 16);
+    assert_eq!(m.key_data_salt.len(), 16);
     assert_eq!(m.encrypted_verifier_hash_input.len(), 16); // roundUp(16, 16)
     assert_eq!(m.encrypted_verifier_hash_value.len(), 64); // roundUp(64, 16)
-    assert_eq!(m.encrypted_key_value.len(), SESSION_KEY_LEN);
-    assert_eq!(KEY_BITS, 256);
+    assert_eq!(m.encrypted_key_value.len(), 32); // roundUp(256 / 8, 16)
+    m.session_key.with_secret(|k| assert_eq!(k.len(), 32));
 
     // The two salts are drawn independently. Equal salts would make the crossing bug
     // `AgileParams` is shaped to prevent invisible in every test that uses this material.
     assert_ne!(m.password_salt, m.key_data_salt);
+
+    // Now the tuples where the formulas separate. Each row is the tuple and then
+    // (password salt, keyData salt, verifier input blob, verifier hash blob, wrapped key
+    // blob, session key).
+    for (p, want) in [
+        // Different salt sizes on the two elements, neither a block multiple: the
+        // verifier input blob follows the **password** salt and nothing else, and a
+        // generator reading `key_data_salt_size` there would produce 32 rather than 16.
+        (
+            EncryptParams {
+                password_salt_size: 9,
+                key_data_salt_size: 24,
+                ..params()
+            },
+            (9, 24, 16, 64, 32, 32),
+        ),
+        // AES-192 on `<keyData>` and AES-256 on `<p:encryptedKey>`: a 24-byte session key
+        // in a 32-byte blob. `keyBits / 8` alone would make that blob 24, and
+        // `agile.rs:1160-1170` would refuse the file this crate had just written.
+        (
+            EncryptParams {
+                key_data_key_bits: 192,
+                password_key_bits: 256,
+                ..params()
+            },
+            (16, 16, 16, 64, 32, 24),
+        ),
+        // SHA-1, where `roundUp(hashSize, blockSize)` is 32 rather than the digest's 20 --
+        // the case the default tuple cannot see, 64 already being a multiple of 16.
+        (
+            EncryptParams {
+                hash: HashAlgorithm::Sha1,
+                key_data_key_bits: 128,
+                password_key_bits: 128,
+                ..params()
+            },
+            (16, 16, 16, 32, 16, 16),
+        ),
+    ] {
+        let m = generate(PASSWORD, p, &mut seeded()).unwrap();
+        let got = (
+            m.password_salt.len(),
+            m.key_data_salt.len(),
+            m.encrypted_verifier_hash_input.len(),
+            m.encrypted_verifier_hash_value.len(),
+            m.encrypted_key_value.len(),
+            m.session_key.with_secret(|k| k.len()),
+        );
+        assert_eq!(got, want, "{p:?}");
+    }
+}
+
+/// **A tuple the caller chose survives the round trip, through the public reader.**
+///
+/// The point of threading `EncryptParams` this far down: `encrypt` writes it,
+/// `decrypt_ooxml_with_policy` reads the file back under the fail-closed default, and the
+/// `dataIntegrity` HMAC -- computed over the ciphertext under `<keyData>`'s hash and salt
+/// -- has to verify. A writer that sized any of the seven blobs from the wrong element
+/// fails here, at the reader, instead of producing a file only this crate could open.
+///
+/// Three of these are cases the default tuple hides:
+///
+/// * **`saltSize` 8 and 40** -- both sides of `hash::fit_iv`. The three password blobs
+///   take the salt as their CBC IV, and [MS-OFFCRYPTO] §2.3.4.12's third step pads a short
+///   one with `0x36` and truncates a long one. Until the `fit_iv` call landed in
+///   `generate` this side handed AES the raw salt: 8 bytes was an IV-length refusal out of
+///   `check_cbc_lengths`, and 40 bytes was encrypted under an IV the reader -- which has
+///   always gone through `AgileParams::password_blob_iv` -- does not reproduce. Neither is
+///   reachable at the default 16, where `fit_iv` is the identity, which is why nothing
+///   caught it.
+/// * **AES-192 on `<keyData>`** -- 24 bytes of key in a 32-byte `encryptedKeyValue`.
+/// * **SHA-1** -- a 20-byte digest in a 32-byte verifier blob, and a 32-byte
+///   `encryptedHmacKey`, which is §3.11's worked example rather than §2.3.4.14 step 2's
+///   `saltSize`.
+///
+/// The wrong password is the control on every row: a round trip alone would pass on a
+/// verifier that accepted anything.
+///
+/// The hand-picked rows above are joined by [`EVERY_WRITABLE_TUPLE`], so the sweep is
+/// exhaustive over the `(hash, keyBits)` space rather than a selection from it. That
+/// matters because the interesting cases are the ones nobody would think to pick: the
+/// first version of this test covered two of the ten, and neither was SHA-256.
+#[test]
+fn a_caller_chosen_tuple_round_trips_through_the_public_reader() {
+    let plain = plain_docx();
+    for p in [
+        params(),
+        EncryptParams {
+            password_salt_size: 8,
+            ..params()
+        },
+        EncryptParams {
+            password_salt_size: 40,
+            ..params()
+        },
+        EncryptParams {
+            key_data_salt_size: 24,
+            password_salt_size: 9,
+            ..params()
+        },
+        EncryptParams {
+            key_data_key_bits: 192,
+            ..params()
+        },
+        EncryptParams {
+            hash: HashAlgorithm::Sha1,
+            key_data_key_bits: 128,
+            password_key_bits: 128,
+            ..params()
+        },
+        EncryptParams {
+            hash: HashAlgorithm::Sha384,
+            key_data_key_bits: 192,
+            password_key_bits: 256,
+            key_data_salt_size: 20,
+            password_salt_size: 24,
+            ..params()
+        },
+    ]
+    .into_iter()
+    .chain(EVERY_WRITABLE_TUPLE.iter().map(|&(hash, key_bits)| {
+        EncryptParams {
+            hash,
+            key_data_key_bits: key_bits,
+            password_key_bits: key_bits,
+            // A cheap spin count, and the reason it is safe to make it cheap: what this
+            // sweep is for is the hash/keyBits coupling and the seven lengths it moves,
+            // none of which `spinCount` participates in -- it is a loop count over
+            // `H_final` and the rows would be identical at 100 000. Ten tuples times
+            // three key derivations at Office's default is about a minute of SHA for no
+            // additional fact. The default spin count is round-tripped by every other
+            // test in this file, including both goldens.
+            spin_count: 4,
+            ..Default::default()
+        }
+    })) {
+        let container = encrypt(&plain, PASSWORD, p, &mut seeded())
+            .unwrap_or_else(|e| panic!("{p:?} must be writable: {e}"));
+        let crate::Decrypted {
+            package: back,
+            integrity: outcome,
+        } = crate::decrypt_ooxml_with_policy(
+            &container,
+            PASSWORD,
+            crate::IntegrityPolicy::default(),
+        )
+        .unwrap_or_else(|e| panic!("{p:?} must read back: {e}"));
+        assert_eq!(outcome, crate::IntegrityOutcome::Verified, "{p:?}");
+        assert_eq!(back, plain, "{p:?}");
+
+        assert!(
+            matches!(
+                crate::decrypt_ooxml(&container, "not the password"),
+                Err(Error::WrongPassword)
+            ),
+            "{p:?}"
+        );
+    }
+}
+
+/// The plaintext behind `encryptedKeyValue` is the session key **zero-padded** to the
+/// blob -- not the key alone, and not a `0x36` pad.
+///
+/// AES-192 is the only supported tuple where the three are distinguishable: 24 bytes of
+/// key in a 32-byte blob leave 8 bytes something has to choose. Zero is what
+/// `tools/gen_agile_fixtures.py:63-78` writes and what the thirteen measured variants at
+/// `integrity.rs:453-466` carry. `0x36` is the plausible wrong answer -- it is the pad
+/// byte two sentences earlier in §2.3.4.12, and herumi's `normalizeKey` uses it -- and no
+/// round-trip test could tell the two apart, because this crate's reader ignores the tail.
+///
+/// Unwrapped through `agile`'s own `derive_block_key` and `aes_cbc_decrypt`, so this is
+/// the reader's view of the blob rather than a restatement of what the writer did.
+#[test]
+fn the_wrapped_key_blob_is_the_session_key_with_a_zero_tail() {
+    let p = EncryptParams {
+        key_data_key_bits: 192,
+        ..params()
+    };
+    let m = generate(PASSWORD, p, &mut seeded()).unwrap();
+    assert_eq!(m.encrypted_key_value.len(), 32, "roundUp(192 / 8, 16)");
+
+    let h_final = agile::spin_hash(p.hash, PASSWORD, &m.password_salt, p.spin_count);
+    let key = agile::derive_block_key(
+        p.hash,
+        &h_final,
+        &agile::BLOCK_KEY_VALUE,
+        p.password_key_bits,
+    )
+    .expect("SHA-512 carries 256 bits");
+    let plaintext = key
+        .with_secret(|k| {
+            agile::aes_cbc_decrypt(
+                &m.encrypted_key_value,
+                k,
+                &crate::hash::fit_iv(&m.password_salt, 16),
+            )
+        })
+        .expect("the blob was wrapped under this key and IV");
+
+    assert_eq!(plaintext.len(), 32);
+    m.session_key
+        .with_secret(|sk| assert_eq!(&plaintext[..24], sk, "the first keyBits / 8 bytes"));
+    assert_eq!(&plaintext[24..], &[0u8; 8], "and a zero tail, not 0x36");
 }
 
 // ---- the public entry point, end to end (GH #6 step 6) --------------------------------
@@ -472,7 +737,7 @@ fn encrypt_ooxml_output_classifies_as_the_tuple_office_writes() {
 /// second, and nothing else covers the container-and-HMAC half of it.
 #[test]
 fn an_empty_package_round_trips() {
-    let container = encrypt(&[], PASSWORD, SPIN_COUNT, &mut seeded()).unwrap();
+    let container = encrypt(&[], PASSWORD, params(), &mut seeded()).unwrap();
     let crate::Decrypted {
         package: back,
         integrity: outcome,

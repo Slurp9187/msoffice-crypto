@@ -296,10 +296,13 @@ mod crypto {
     /// trusting the file; it is not licence to lock an owner out of their own document.
     ///
     /// The write path uses the same constant, which keeps `encryption_info::write`'s
-    /// "could not be read back" claim true. The writer emits the hardcoded
-    /// `encryption_info::OFFICE_SPIN_COUNT` (100 000) regardless. Standard encryption
-    /// needs no entry here: its spin count is the hardcoded `standard::SPIN_COUNT`, not a
-    /// file field.
+    /// "could not be read back" claim true — and that now matters, because the writer no
+    /// longer emits one hardcoded value. `EncryptParams::spin_count` is a caller's
+    /// choice across this whole range, defaulting to
+    /// `encryption_info::OFFICE_SPIN_COUNT` (100 000, the measured Office figure), so
+    /// this ceiling is the only thing standing between a caller and a file this crate
+    /// could not read back. Standard encryption needs no entry here: its spin count is
+    /// the hardcoded `standard::SPIN_COUNT`, fixed by §2.3.4.7 and not a file field.
     ///
     /// **No floor, and that is also the spec's answer** — `minInclusive="0"`.
     /// `spinCount="0"` makes a weak file, not a dangerous one: the stretching its writer

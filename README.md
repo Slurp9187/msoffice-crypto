@@ -103,7 +103,7 @@ The whole feature surface, and what each one costs:
 | Feature | Adds crypto? | What it enables | Dependencies |
 | --- | --- | --- | --- |
 | *(none — the default)* | no | `classify`, `is_cfb_office` | `cfb`, `quick-xml`, `thiserror` |
-| `crypto-ops` | yes | `decrypt_ooxml`, `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_standard`, `check_encryptable`, and the `IntegrityPolicy` / `IntegrityOutcome` enums | + `aes`, `cbc`, `ecb`, `sha1`, `sha2`, `hmac`, `base64`, `rand`, `secure-gate` |
+| `crypto-ops` | yes | `decrypt_ooxml`, `decrypt_ooxml_with_policy`, `encrypt_ooxml`, `encrypt_ooxml_with_params`, `encrypt_ooxml_standard`, `check_encryptable`, `EncryptParams`, and the `IntegrityPolicy` / `IntegrityOutcome` enums | + `aes`, `cbc`, `ecb`, `sha1`, `sha2`, `hmac`, `base64`, `rand`, `secure-gate` |
 | `legacy-binary` | yes, a superset of `crypto-ops` | `decrypt_binary_office` — 97-2003 `.doc`, `.xls`, `.ppt` | + `rc4`, `md-5` |
 | `cli` | yes (via `crypto-ops`) | the `msoffice-crypto` binary — see [Command line](#command-line) | + `clap`, `serde_json`, `rpassword`/`rtoolbox` (**Apache-2.0-only**) |
 
