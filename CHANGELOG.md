@@ -22,7 +22,7 @@ What survives that move is in two places, deliberately:
 
 ---
 
-## [0.1.0-rc.5] - Unreleased
+## [0.1.0-rc.5] - 2026-09-29
 
 ### The README described a crate two releases old
 
