@@ -19,7 +19,7 @@
 use crate::error::Error;
 use crate::limits::{RC4_ENCRYPTION_HEADER_SIZE_MAX, RC4_KEY_BITS, RC4_KEY_BITS_DEFAULT};
 use crate::rc4::{self, BlockKeySchedule};
-use crate::sensitive::{DerivedKey, PasswordDigest};
+use crate::sensitive::{utf16le_password, DerivedKey, PasswordDigest};
 use secure_gate::RevealSecret;
 use sha1::{Digest, Sha1};
 
@@ -259,17 +259,16 @@ impl CryptoApiKeySchedule {
                 RC4_KEY_BITS.end()
             )));
         }
-        let password_utf16: Vec<u8> = password
-            .encode_utf16()
-            .flat_map(|c| c.to_le_bytes())
-            .collect();
-        let mut hasher = Sha1::new();
-        hasher.update(salt);
-        hasher.update(&password_utf16);
-        Ok(Self {
-            h0: PasswordDigest::new(hasher.finalize().to_vec()),
-            key_bits,
-        })
+        // The UTF-16LE re-encoding is wrapped and scoped to this statement, as in
+        // `standard::derive_standard_key`: see `sensitive::utf16le_password` for the
+        // `collect()` it replaced, which abandoned unwiped prefixes of the password.
+        let h0 = utf16le_password(password).with_secret(|pw| {
+            let mut hasher = Sha1::new();
+            hasher.update(salt);
+            hasher.update(pw);
+            PasswordDigest::new(hasher.finalize().to_vec())
+        });
+        Ok(Self { h0, key_bits })
     }
 
     /// The password check for this header — [MS-OFFCRYPTO] §2.3.5.6.
