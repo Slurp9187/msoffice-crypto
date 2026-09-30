@@ -20,7 +20,7 @@
 
 use crate::error::Error;
 use crate::limits::XOR_PASSWORD_MAX_LEN;
-use crate::sensitive::XorObfuscationArray;
+use crate::sensitive::{AnsiPassword, XorObfuscationArray};
 use secure_gate::{ConstantTimeEq, RevealSecret};
 
 /// `PadArray` — §2.3.7.2.
@@ -121,20 +121,31 @@ impl XorObfuscator {
     /// unit, which is the Windows-1252 byte for the Latin-1 range and is what
     /// msoffcrypto's `ord(ch)` does.
     pub(crate) fn new(password: &str) -> Result<Self, Error> {
-        let bytes: Option<Vec<u8>> = password
-            .chars()
-            .map(|c| u8::try_from(u32::from(c)).ok())
-            .collect();
-        let bytes = match bytes {
-            Some(b) if (1..=XOR_PASSWORD_MAX_LEN).contains(&b.len()) => b,
-            _ => return Err(Error::WrongPassword),
-        };
-        let key = xor_key(&bytes);
-        Ok(Self {
-            array: xor_array(&bytes, key),
-            key,
-            verifier: password_verifier(&bytes),
-        })
+        // Validated before anything is written, so that the bytes -- the password
+        // itself -- go straight into a wrapped fixed slot rather than a `collect()`ed
+        // `Vec` that grows, abandons its earlier blocks and is never wiped.
+        let len = password.chars().count();
+        if !(1..=XOR_PASSWORD_MAX_LEN).contains(&len)
+            || !password.chars().all(|c| u8::try_from(u32::from(c)).is_ok())
+        {
+            return Err(Error::WrongPassword);
+        }
+        let bytes = AnsiPassword::new_with(|slot| {
+            for (out, c) in slot.iter_mut().zip(password.chars()) {
+                // Checked above; the fallback is unreachable, not a substitution.
+                *out = u8::try_from(u32::from(c)).unwrap_or(0);
+            }
+        });
+        Ok(bytes.with_secret(|b| {
+            // `len` is at most 15 and the slot 16, so this never falls back.
+            let b = b.get(..len).unwrap_or_default();
+            let key = xor_key(b);
+            Self {
+                array: xor_array(b, key),
+                key,
+                verifier: password_verifier(b),
+            }
+        }))
     }
 
     /// The password check — §2.3.7.7 — against the `key` and `verificationBytes` a

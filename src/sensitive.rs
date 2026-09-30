@@ -20,8 +20,9 @@
 //! long-lived process that decrypts documents alongside other secrets does.
 //!
 //! Every alias whose length the *file* decides is `Dynamic<Vec<u8>>` rather than
-//! `Fixed<[u8; N]>` — `XorObfuscationArray` is the exception and says so itself, its 16
-//! bytes being the spec's rather than the file's.
+//! `Fixed<[u8; N]>` — the five `Fixed` aliases (`XorObfuscationArray`, and the KDF scratch
+//! buffers `SpinState`, `PadBlock`, `Office97Buffer` and `AnsiPassword`) are the exceptions
+//! and say so themselves, each length being the spec's rather than the file's.
 //!
 //! **That split is two rules, not one, and they carry different weight.** In the
 //! file-decided direction it is not a choice at all: `Fixed<[u8; N]>` needs `N` at compile
@@ -47,13 +48,21 @@
 //! being passed where the other is meant. The separation here buys greppable names, not type
 //! safety, and the rustdoc on the deleted macros said so. Taking the newtypes is a change
 //! worth arguing on its own evidence, not one to smuggle in under a dependency bump.
+//!
+//! **Revisited at twelve.** The secure-gate skill set the ninth alias as the point to
+//! settle this; the rc.5 residue fixes added four at once. They do not move the answer,
+//! because they are not the kind the argument is about: a `Fixed<[u8; N]>` of one size is
+//! a different type from every other size and from every `Dynamic`, so passing a
+//! `SpinState` where a `PadBlock` or a `DerivedKey` is meant is already a compile error.
+//! The one same-shape pair is `AnsiPassword` and `XorObfuscationArray`, both 16 bytes,
+//! both confined to `xor_obfuscation.rs`. The seven interchangeable `Dynamic` roles are
+//! where the question still lives, unchanged.
 
 use secure_gate::Dynamic;
 
-// Gated to match its one alias below: `Fixed` is unused without `legacy-binary`, and the
-// unused import would fail `clippy -- -D warnings` in the other three configurations. The
-// deleted `fixed_alias!` avoided this by being path-qualified at its single call site.
-#[cfg(feature = "legacy-binary")]
+// Ungated since the standard KDF's `SpinState` and `PadBlock` below: `crypto-ops` now
+// declares `Fixed` aliases of its own, not only `legacy-binary`. This module is compiled
+// only with `crypto-ops`, so the detection build still never sees the import.
 use secure_gate::Fixed;
 
 /// The password itself, encoded UTF-16LE — the input every KDF in these formats hashes
@@ -74,7 +83,8 @@ pub(crate) type Utf16Password = Dynamic<Vec<u8>>;
 ///
 /// **Why this function exists at all.** The obvious spelling is
 /// `password.encode_utf16().flat_map(|c| c.to_le_bytes()).collect::<Vec<u8>>()`, and it
-/// was what `agile::spin_hash` and `standard::derive_standard_key` both did. `collect`
+/// was what `agile::spin_hash` and `standard::derive_standard_key` both did — and, until
+/// rc.5, the two RC4 key schedules under `legacy-binary` as well. `collect`
 /// sizes the `Vec` from the iterator's *lower* `size_hint`, and for this iterator that
 /// bound is a fraction of the truth — `Chars` can promise only `len.div_ceil(3)` UTF-16
 /// units for `len` UTF-8 bytes, because a three-byte char yields one unit — so the `Vec`
@@ -135,6 +145,37 @@ pub(crate) type DerivedKey = Dynamic<Vec<u8>>;
 /// `Dynamic`: the length is the spec's, not the file's.
 #[cfg(feature = "legacy-binary")]
 pub(crate) type XorObfuscationArray = Fixed<[u8; 16]>;
+
+/// Standard encryption's iterated password hash `H_i = SHA1(LE32(i) || H_{i-1})`
+/// ([MS-OFFCRYPTO] §2.3.4.7), held across all 50 000 rounds in one reused slot.
+///
+/// **Every round is key-equivalent, not merely an intermediate.** Hashing runs forward
+/// with public inputs, so any `H_i` yields `H_final` — and from it the key — for the
+/// cost of the rounds still to go; the last one is a single SHA-1 away. The spin count
+/// protects the *password* from inversion, not the key from a state captured late.
+/// `Fixed`, and 20 bytes, because SHA-1 is the only hash standard encryption names.
+pub(crate) type SpinState = Fixed<[u8; 20]>;
+
+/// One of standard encryption's two 64-byte blocks, `H_final` XOR 0x36 or 0x5C
+/// ([MS-OFFCRYPTO] §2.3.4.7). Hashing it is the whole of what remains between it and
+/// the key, so it is key-equivalent. The 64 is SHA-1's block size — the spec's, not
+/// the file's.
+pub(crate) type PadBlock = Fixed<[u8; 64]>;
+
+/// Office 97/2000 RC4's 336-byte buffer, `TruncatedHash || salt` sixteen times over
+/// ([MS-OFFCRYPTO] §2.3.6.2): 16 × (5 + 16). `TruncatedHash` is the first five bytes
+/// of `MD5(password)`, so this buffer is the password's hash repeated; and `H0`
+/// itself is written into its tail before being overwritten, so the full MD5 never
+/// sits anywhere this crate cannot wipe. Both lengths are the spec's.
+#[cfg(feature = "legacy-binary")]
+pub(crate) type Office97Buffer = Fixed<[u8; 336]>;
+
+/// The XOR obfuscation password as the bytes §2.3.7.2 hashes — the password itself,
+/// one byte per character. At most 15 (`XOR_PASSWORD_MAX_LEN`), carried with a length
+/// beside it; the sixteenth byte keeps it the same size as [`XorObfuscationArray`]
+/// and is never read. `Fixed` for the reason that alias gives: the bound is the spec's.
+#[cfg(feature = "legacy-binary")]
+pub(crate) type AnsiPassword = Fixed<[u8; 16]>;
 
 /// The session encryption key that actually decrypts `EncryptedPackage`, recovered
 /// by decrypting `encryptedKeyValue` under a [`DerivedKey`]. This is the key an

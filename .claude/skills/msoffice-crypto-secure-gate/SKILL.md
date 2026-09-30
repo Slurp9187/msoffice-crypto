@@ -47,7 +47,7 @@ handing back the plaintext package *is* the function.
 withdrawn as a design error. Do not reopen it without new evidence, and do not move it
 piecemeal.
 
-## The eight aliases
+## The twelve aliases
 
 All in `src/sensitive.rs`, all `pub(crate)`, all plain `type` aliases — **not** newtypes.
 
@@ -61,22 +61,40 @@ All in `src/sensitive.rs`, all `pub(crate)`, all plain `type` aliases — **not*
 | `VerifierPlaintext` | `Dynamic<Vec<u8>>` | decrypted verifier hash input/value, and the drawn verifier on the encrypt side |
 | `IntegrityKey` | `Dynamic<Vec<u8>>` | the HMAC key from `dataIntegrity/@encryptedHmacKey` |
 | `IntegrityTag` | `Dynamic<Vec<u8>>` | the expected package HMAC, and the one we compute |
+| `SpinState` | `Fixed<[u8; 20]>` | standard encryption's iterated SHA-1 `H_i`, one slot reused across all 50 000 rounds |
+| `PadBlock` | `Fixed<[u8; 64]>` | standard encryption's `H_final` XOR 0x36 / 0x5C ladder inputs |
+| `Office97Buffer` | `Fixed<[u8; 336]>` | Office 97/2000 RC4's `TruncatedHash ‖ salt` × 16 buffer, with `H0` finalized into its tail (`legacy-binary`) |
+| `AnsiPassword` | `Fixed<[u8; 16]>` | the XOR obfuscation password's bytes, at most 15, length carried beside it (`legacy-binary`) |
 
 **`Dynamic`, not `Fixed`, and why:** every length here is decided by the *file*. Agile's
 `keyBits` comes out of the `EncryptionInfo` XML and sets the derived-key and session-key length
 (16/24/32); the digest is 20 or 64 bytes depending on the hash the file names.
 
-**`XorObfuscationArray` is the one `Fixed`**, because its 16 bytes are the *spec's*, not the
-file's — the rule applied in the direction the rest of the table does not show. It is
-`legacy-binary`-gated, which makes that the only configuration compiling a `Fixed` at all.
+**The five `Fixed` aliases** (`XorObfuscationArray` and the four KDF scratch buffers added
+in rc.5) are `Fixed` because their lengths are the *spec's*, not the file's. That is the rule
+applied in the direction the `Dynamic` rows do not show. `SpinState` and `PadBlock` compile
+under `crypto-ops`. The other three are `legacy-binary`-gated.
 
-**Seven of the eight are the same nominal type.** `SessionKey` is kept separate from
+**No generic alias.** Each alias names one role with its exact length. A
+`type Scratch<const N: usize> = Fixed<[u8; N]>` would hide the role, and secure-gate 0.9 has
+no alias macros to supply one anyway: they were deleted in rc.10.
+
+**The seven `Dynamic` aliases are the same nominal type.** `SessionKey` is kept separate from
 `DerivedKey` because they have different blast radii — a `DerivedKey` is worthless without the
 password's digest, while a `SessionKey` decrypts the document on its own and survives a
 password change — but that separation buys **readability and grep targets, not compile-time
 safety.** Six interchangeable `Dynamic<Vec<u8>>` roles is past the point where the global skill
 says to settle the newtype question; it stays a deliberate open choice because nothing has yet
 passed the wrong one. Revisit when a ninth appears.
+
+**Revisited at twelve (rc.5), and not settled by it.** The four aliases rc.5 added are all
+`Fixed`, and a `Fixed<[u8; N]>` of one size is a different type from every other size and from
+every `Dynamic`. Passing a `SpinState` where a `PadBlock` or a `DerivedKey` is meant is already a
+compile error, so the new aliases add nothing to the confusion a newtype would prevent. The one
+same-shape pair is `AnsiPassword` and `XorObfuscationArray` (both 16 bytes), and both are
+confined to `xor_obfuscation.rs`. The question is still the `Dynamic` roles' question, and
+`src/sensitive.rs` carries the same reasoning. Revisit when a new `Dynamic` role appears, or
+when a new `Fixed` shares a size with an existing one outside a single module.
 
 ## Tier 1 only
 
@@ -90,17 +108,21 @@ done
 
 | method | files |
 |---|---|
-| `with_secret` | 12 |
-| `new_with` | 8 |
+| `with_secret` | 13 |
+| `new_with` | 10 |
 | `ct_eq` | 6 |
 | `from_rng` | 4 |
-| `with_secret_mut` | **0** |
+| `with_secret_mut` | 2 |
 | `expose_secret` | **0** |
 | `into_inner` | **0** |
 | `from_random` | **0** |
 
 **There is no Tier 2 and no Tier 3 in this crate.** Every secret access is a `with_secret`
-closure, which is what makes "every access is greppable" actually true here — so keep it that
+or `with_secret_mut` closure. `with_secret_mut` arrived in rc.5 for exactly two in-place
+loops: standard's spin over one `SpinState`, and agile's spin writing each round into the
+spare of its two alternating `PasswordDigest`s. That use is scoped Tier 1, so it is not the
+`expose_secret` decision below. Treat each further `with_secret_mut` as a loop that needs
+one, not as a convenience, which is what makes "every access is greppable" actually true here — so keep it that
 way, and treat the first `expose_secret` as a decision to argue for rather than a convenience.
 
 ⚠️ **Grep trap, confirmed here:** a bare `grep into_inner` returns hits in 9 files, every one
@@ -148,12 +170,21 @@ Re-derive from the manifests rather than trusting this list — it was incomplet
   the hasher class directly above it was known, written down, and then not carried across to
   the HMAC path in the same crate.
 - `sha2::compress512` spills its message schedule; `W[0..16]` *is* the message block verbatim.
-- **The spin loop, specific to this format.** `spin_hash` runs `spinCount` (typically 100 000)
-  rounds, each allocating a fresh `Vec` dropped unzeroized — ~100 000 abandoned 64-byte buffers
-  per decrypt. They are *intermediate hash states*, not the key, and inverting SHA-512 to get
-  back to the password is the work the spin count exists to make expensive. **Do not wrap
-  them.** If it ever matters the fix is one reused buffer, not 100 000 wrappers.
-
+- **The spin loops, specific to this format: closed in rc.5, and why the old reasoning was
+  wrong.** Until rc.5 `spin_hash` dropped one unwiped `Vec` per round (up to `spinCount` per
+  decrypt), and `derive_standard_key` kept its state in a bare `[u8; 20]`. This file defended
+  that as *intermediate hash states, not the key*. That argument misses the forward
+  direction. Any `H_i` reaches `H_final` by `spinCount - i` public hashes, while attacking the
+  password costs `spinCount` *per candidate*, so a recovered late round is a total break. Agile
+  now alternates two wrapped `PasswordDigest`s through `hash::digest_two_into`, allocating
+  nothing in the loop. Standard spins one `SpinState` in place via `finalize_into`. The
+  measure of the fix is "every round lands in a wrapper", not "one wrapper per round".
+- **`finalize` output temporaries.** `digest_two_into` copies a stack `Output<H>` into its
+  slot, and in agile's last round that temporary *is* `H_final`. The X1/X2 `Sha1::digest`
+  results in standard's ladder are the same shape. The wrapped values are right, but the
+  temporaries are not reachable without `zeroize` on `GenericArray`, which the crate does not
+  depend on directly. Where one slot is both the hash's input and its output, `finalize_into`
+  removes the temporary (standard's spin, Office 97's `H0`). Use it there.
 ## Enforcement
 
 **None for secure-gate usage.** `tools/audit_claims.py` runs in CI but checks documentation

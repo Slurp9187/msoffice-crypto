@@ -135,8 +135,11 @@ pub(crate) fn verify_password(
         h
     });
     let matches = verifier.with_secret(|v| {
-        let computed = digest(v);
-        verifier_hash.with_secret(|h| computed.as_slice().ct_eq(h))
+        // Wrapped like the value it is compared against: when the password is right,
+        // the two are the same bytes. Both `digest` functions allocate exactly their
+        // digest length, so the wrapper takes the `Vec` by move with nothing left behind.
+        let computed = VerifierPlaintext::new(digest(v));
+        computed.with_secret(|c| verifier_hash.with_secret(|h| c.as_slice().ct_eq(h)))
     });
     if matches {
         Ok(())

@@ -38,10 +38,12 @@
 //! derivations written side by side can.
 use crate::error::Error;
 use crate::limits;
-use crate::sensitive::{utf16le_password, DerivedKey, PasswordDigest, VerifierPlaintext};
+use crate::sensitive::{
+    utf16le_password, DerivedKey, PadBlock, PasswordDigest, SpinState, VerifierPlaintext,
+};
 use aes::{Aes128, Aes192, Aes256};
 use ecb::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyInit};
-use secure_gate::{ConstantTimeEq, RevealSecret};
+use secure_gate::{ConstantTimeEq, RevealSecret, RevealSecretMut};
 use sha1::{Digest, Sha1};
 
 /// `AlgID` values — [MS-OFFCRYPTO] §2.3.2, the `wincrypt.h` `CALG_*` constants. The same
@@ -474,10 +476,13 @@ fn require_sha1(alg_id_hash: u32) -> Result<(), Error> {
 /// [`crate::sensitive::Utf16Password`], wrapped since rc.4 and a bare growing `Vec`
 /// before that — `H_final`, the standard path's [`PasswordDigest`], the value the
 /// secure-gate skill's table places here, and the ladder output, which is the
-/// [`DerivedKey`] itself. The 50 000 intermediate spin states are one reused stack array
-/// rather than a wrapper per round, per the skill's *Residual* section: they are hash
-/// states the spin count exists to make expensive to invert, and only `H_final` derives
-/// anything.
+/// [`DerivedKey`] itself. Since rc.5 the rest is wrapped too: the spin state is one
+/// reused [`SpinState`] slot rather than a bare `[u8; 20]`, and the two ladder inputs are
+/// [`PadBlock`]s. Both were left plain earlier on the reading that intermediate spin
+/// states are only worth inverting to the password — which misses that hashing *forward*
+/// from any of them reaches `H_final` for free, and the last is one SHA-1 from it. What
+/// is still out of reach is inside `sha1`: the hasher's block buffer and its `finalize`
+/// temporaries, which have no zeroize (the skill's *Residue* section).
 pub(crate) fn derive_standard_key(
     password: &str,
     salt: &[u8],
@@ -502,45 +507,63 @@ pub(crate) fn derive_standard_key(
     // change, for the same reason, as `agile::spin_hash`'s first round: `collect()`
     // into a `Vec<u8>` under-reserves and abandons unwiped blocks holding a prefix of
     // the password. See `sensitive::utf16le_password`.
-    let mut h: [u8; SHA1_LEN] = utf16le_password(password).with_secret(|pw| {
-        Sha1::new()
-            .chain_update(salt)
-            .chain_update(pw)
-            .finalize()
-            .into()
+    //
+    // The digest is finalized straight into the wrapped slot rather than returned and
+    // copied in, so there is no named array of it outside the wrapper.
+    let mut h = SpinState::new_with(|h| {
+        utf16le_password(password).with_secret(|pw| {
+            Sha1::new()
+                .chain_update(salt)
+                .chain_update(pw)
+                .finalize_into(h.into());
+        });
     });
 
-    // H_i = SHA1(LE32(i) + H_{i-1})
-    for i in 0u32..SPIN_COUNT {
-        h = Sha1::new()
-            .chain_update(i.to_le_bytes())
-            .chain_update(h)
-            .finalize()
-            .into();
-    }
+    // H_i = SHA1(LE32(i) + H_{i-1}), in place. `chain_update` has copied `H_{i-1}` into
+    // the hasher before `finalize_into` borrows the slot to overwrite it, so one slot
+    // serves every round — and it is wiped on drop, which the bare `[u8; 20]` this was
+    // until rc.5 never was. Every `H_i` is key-equivalent (see `SpinState`), the last
+    // one most of all. `&h[..]`, not the `*h` clippy suggests for an array: `*h` passes
+    // the array by value, a fresh unwiped stack copy of the state every round.
+    h.with_secret_mut(|h| {
+        for i in 0u32..SPIN_COUNT {
+            let hasher = Sha1::new()
+                .chain_update(i.to_le_bytes())
+                .chain_update(&h[..]);
+            hasher.finalize_into(h.into());
+        }
+    });
 
     // H_final = SHA1(H_n + LE32(0)) — the block-0 step (MS-OFFCRYPTO §2.3.4.7).
-    let h_final = PasswordDigest::new(
-        Sha1::new()
-            .chain_update(h)
-            .chain_update(0u32.to_le_bytes())
-            .finalize()
-            .to_vec(),
-    );
+    let h_final = h.with_secret(|h| {
+        PasswordDigest::new(
+            Sha1::new()
+                .chain_update(h)
+                .chain_update(0u32.to_le_bytes())
+                .finalize()
+                .to_vec(),
+        )
+    });
+    drop(h);
 
     // X1 = SHA1(H_final XOR 0x36-pad), X2 = SHA1(H_final XOR 0x5C-pad): 64-byte pads
     // with the digest XOR'd into the first cbHash bytes only. The key is the first
     // `key_size_bytes` of X1 || X2, cut inside the wrapper so nothing is copied out.
+    // Each pad block is one hash from the key, so each is built in a wrapped slot.
     Ok(h_final.with_secret(|hf| {
-        let mut buf1 = [0x36u8; 64];
-        let mut buf2 = [0x5Cu8; 64];
-        for ((b1, b2), byte) in buf1.iter_mut().zip(buf2.iter_mut()).zip(hf.iter()) {
-            *b1 ^= byte;
-            *b2 ^= byte;
-        }
+        let pad = |fill: u8| {
+            PadBlock::new_with(|block| {
+                block.fill(fill);
+                for (b, byte) in block.iter_mut().zip(hf.iter()) {
+                    *b ^= byte;
+                }
+            })
+        };
+        let buf1 = pad(0x36);
+        let buf2 = pad(0x5C);
         let mut derived = Vec::with_capacity(2 * SHA1_LEN);
-        derived.extend_from_slice(&Sha1::digest(buf1));
-        derived.extend_from_slice(&Sha1::digest(buf2));
+        buf1.with_secret(|b| derived.extend_from_slice(&Sha1::digest(b)));
+        buf2.with_secret(|b| derived.extend_from_slice(&Sha1::digest(b)));
         derived.truncate(key_size_bytes);
         DerivedKey::new(derived)
     }))

@@ -42,6 +42,47 @@ first *canonical* heading, so a malformed top section was skipped and a lower on
 its place. It now takes the newest `##` heading whatever its shape and requires that one to
 be canonical.
 
+### The secret residue rc.4 named is closed, and the stack copies with it
+
+rc.4's changelog named two gaps it did not fix (see *Two secrets no longer reach a bare
+`Vec`* below). Both are fixed here, together with the same shapes found by looking for them.
+There is no API change, and every known-answer vector, seeded golden and binary fixture passes
+unchanged. That is the whole of the proof that no output moved.
+
+- **The RC4 key schedules** (`rc4_office97.rs`, `rc4_cryptoapi.rs`, `legacy-binary`) encode
+  the password through `sensitive::utf16le_password`, not the growing `collect()`. Office
+  97's §2.3.6.2 buffer, which is sixteen copies of `MD5(password)[..5]` interleaved with the
+  salt, is built in one wrapped slot. `H0` is finalized into that slot's tail and overwritten
+  there, so the full MD5 no longer sits in a bare array.
+- **`agile::spin_hash`** alternates two wrapped buffers instead of allocating a `Vec` per round
+  and dropping it unwiped. Up to `spinCount` digests per decrypt were abandoned before, and the
+  last of them was one hash from `H_final`. The loop now allocates nothing.
+- **`standard::derive_standard_key`** held its spin state and its two `H_final`-XOR-pad blocks
+  in bare stack arrays that were never wiped. They are now `SpinState` and `PadBlock`, and each
+  digest is finalized straight into the wrapped slot.
+- **`XorObfuscator::new`** built the password's bytes with an `Option<Vec<u8>>` `collect()`.
+  The password is validated first, then written into a fixed `AnsiPassword` slot.
+- **The verifier digest** computed in `agile::verify_password` and `rc4::verify_password` is
+  wrapped, as the decrypted value it is compared against already was.
+
+Four `Fixed` aliases are new in `sensitive.rs`: `SpinState`, `PadBlock`, `Office97Buffer` and
+`AnsiPassword`. They are plain type aliases, one per role, because secure-gate 0.9 has no alias
+macros. `sensitive.rs` records why twelve aliases still do not settle the newtype question.
+
+A test reads the production half of both RC4 files and fails if either calls `encode_utf16()`
+itself or stops calling `utf16le_password(password)`. Restoring either file from rc.4 fails it,
+and the failure names the file. The stack wipes have no test, because a wipe of a stack slot
+cannot be observed from safe Rust. They rest on `Fixed`'s `Drop`.
+
+**What is still out of reach:**
+
+- the `sha1`, `sha2` and `md-5` hashers' internal block buffers, which hold their input until
+  `finalize` and have no zeroize feature at 0.10;
+- the `finalize` output temporaries inside `hash::digest_two_into`, including the round that
+  produces agile's `H_final`, and the X1/X2 digests of standard's ladder;
+- the `sha2` message-schedule spill;
+- whatever register or stack copies codegen makes.
+
 ## [0.1.0-rc.4] - 2026-09-21
 ### Evidence for this release
 

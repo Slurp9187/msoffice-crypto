@@ -21,7 +21,8 @@
 
 use crate::error::Error;
 use crate::rc4::{self, BlockKeySchedule};
-use crate::sensitive::{DerivedKey, PasswordDigest};
+use crate::sensitive::{utf16le_password, DerivedKey, Office97Buffer, PasswordDigest};
+use md5::digest::Output;
 use md5::{Digest, Md5};
 use secure_gate::RevealSecret;
 
@@ -29,6 +30,13 @@ use secure_gate::RevealSecret;
 /// `EncryptedVerifier`(16), `EncryptedVerifierHash`(16). 52 bytes, no size field.
 const HEADER_LEN: usize = 52;
 const SALT_LEN: usize = 16;
+
+/// `TruncatedHash` — the first 40 bits of `H0` (§2.3.6.2).
+const TRUNCATED_LEN: usize = 5;
+/// One `TruncatedHash || salt` repetition.
+const REPEAT_LEN: usize = TRUNCATED_LEN + SALT_LEN;
+/// Sixteen repetitions: the 336 bytes `H1` is the MD5 of.
+const BUFFER_LEN: usize = 16 * REPEAT_LEN;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Office97Header {
@@ -92,20 +100,37 @@ pub(crate) struct Office97KeySchedule {
 
 impl Office97KeySchedule {
     pub(crate) fn new(password: &str, salt: &[u8; SALT_LEN]) -> Self {
-        let password_utf16: Vec<u8> = password
-            .encode_utf16()
-            .flat_map(|c| c.to_le_bytes())
-            .collect();
-        let h0 = Md5::digest(&password_utf16);
-        let mut buffer = Vec::with_capacity(16 * (5 + SALT_LEN));
-        for _ in 0..16 {
-            buffer.extend_from_slice(&h0[..5]);
-            buffer.extend_from_slice(salt);
-        }
-        let h1 = Md5::digest(&buffer);
-        Self {
-            truncated_h1: PasswordDigest::new(h1[..5].to_vec()),
-        }
+        // The whole §2.3.6.2 buffer is built inside one wrapped slot, and `H0` with it:
+        // it is finalized into the slot's last 16 bytes, copied out five bytes at a time
+        // into every repetition, and finally overwritten by the last repetition's salt.
+        // So neither the UTF-16LE password (see `sensitive::utf16le_password` for the
+        // `collect()` this replaced) nor `MD5(password)` nor the repeated
+        // `TruncatedHash` is ever in storage this crate does not wipe. The typed closure
+        // argument is what ties `BUFFER_LEN` to `Office97Buffer`: a mismatch is a
+        // compile error, not a short copy.
+        let buffer = Office97Buffer::new_with(|b: &mut [u8; BUFFER_LEN]| {
+            let (body, last) = b.split_at_mut(BUFFER_LEN - REPEAT_LEN);
+            let (_, h0) = last.split_at_mut(TRUNCATED_LEN);
+            utf16le_password(password).with_secret(|pw| {
+                Md5::new()
+                    .chain_update(pw)
+                    .finalize_into(Output::<Md5>::from_mut_slice(h0));
+            });
+            // `last` is `[5 unwritten | H0]`; `H0[..5]` is `last[5..10]`.
+            let truncated = TRUNCATED_LEN..2 * TRUNCATED_LEN;
+            for chunk in body.chunks_exact_mut(REPEAT_LEN) {
+                let (t, s) = chunk.split_at_mut(TRUNCATED_LEN);
+                t.copy_from_slice(&last[truncated.clone()]);
+                s.copy_from_slice(salt);
+            }
+            // Overlapping, and `copy_within` is memmove: the last repetition's own five
+            // bytes come from inside it, then its salt overwrites the rest of `H0`.
+            last.copy_within(truncated, 0);
+            last[TRUNCATED_LEN..].copy_from_slice(salt);
+        });
+        let truncated_h1 =
+            buffer.with_secret(|b| PasswordDigest::new(Md5::digest(b)[..TRUNCATED_LEN].to_vec()));
+        Self { truncated_h1 }
     }
 
     /// The password check — §2.3.6.4: the same shape as CryptoAPI's, with MD5.

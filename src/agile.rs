@@ -49,7 +49,7 @@ use aes::{Aes128, Aes192, Aes256};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use cbc::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
 use quick_xml::{events::Event, Reader};
-use secure_gate::{ConstantTimeEq, RevealSecret};
+use secure_gate::{ConstantTimeEq, RevealSecret, RevealSecretMut};
 
 // Block key constants — verified against office-crypto reference implementation.
 // The two dataIntegrity constants live in `integrity.rs` beside their only user.
@@ -490,8 +490,12 @@ pub(crate) fn verify_password(params: &AgileParams, h_final: &PasswordDigest) ->
     // which is `>= salt_len`, and the blob's length was checked equal to it.
     let salt_len = params.password_salt_size as usize;
     let matches = verifier_input.with_secret(|vi| {
-        let computed = hash.digest(&vi[..salt_len]);
-        verifier_hash.with_secret(|vh| computed.as_slice().ct_eq(&vh[..digest_len]))
+        // Wrapped like the value it is compared against: when the password is right,
+        // the two are the same bytes. `digest` allocates exactly `digest_len`, so the
+        // wrapper takes it by move with nothing left behind.
+        let computed = VerifierPlaintext::new(hash.digest(&vi[..salt_len]));
+        computed
+            .with_secret(|c| verifier_hash.with_secret(|vh| c.as_slice().ct_eq(&vh[..digest_len])))
     });
     if !matches {
         return Err(Error::WrongPassword);
@@ -619,17 +623,29 @@ pub(crate) fn spin_hash(
     // `sensitive::utf16le_password` and not `collect()` — see that function for the
     // reallocation the collect abandoned, and `docs/design/heap-residue.md` for why an
     // abandoned block is unreachable to every wrapper in the crate.
-    let mut h = utf16le_password(password).with_secret(|pw| hash.digest_two(salt, pw));
+    let len = hash.digest_len();
+    let mut current = PasswordDigest::new_with(len, |slot| {
+        utf16le_password(password).with_secret(|pw| hash.digest_two_into(salt, pw, slot));
+    });
 
     // H_i = H(LE32(i) + H_{i-1})  — counter PREPENDED
+    //
+    // Two wrapped buffers, alternated: each round reads one and writes the other, then
+    // the two swap (the wrappers swap, not their bytes). Until rc.5 each round
+    // allocated a fresh `Vec` and dropped the last one unwiped -- up to `spinCount`
+    // abandoned digests per decrypt, on the reading that intermediate states are only
+    // worth inverting. That reading missed the forward direction: any `H_i` reaches
+    // `H_final` by `spinCount - i` public hashes, and the last abandoned one was a
+    // single hash from it. Now both buffers are wiped on drop, and the loop allocates
+    // nothing.
+    let mut next = PasswordDigest::new_with(len, |_| {});
     for i in 0u32..spin_count {
-        h = hash.digest_two(&i.to_le_bytes(), &h);
+        current.with_secret(|prev| {
+            next.with_secret_mut(|out| hash.digest_two_into(&i.to_le_bytes(), prev, out));
+        });
+        std::mem::swap(&mut current, &mut next);
     }
-
-    // Moved, not copied: the final digest goes into the wrapper's own buffer
-    // and every earlier round's `h` is dropped as a plain Vec. Those rounds are
-    // intermediate hash states, not the key -- only H_final derives block keys.
-    PasswordDigest::new(h)
+    current
 }
 
 /// Derive a block key: `Hp(H_final || block_key)` truncated to `key_bits / 8` bytes.

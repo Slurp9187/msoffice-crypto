@@ -127,7 +127,7 @@ impl HashAlgorithm {
     /// rather than an 8-byte block key: the two `dataIntegrity` IVs and the three block
     /// keys append an 8-byte constant, the package IVs a 4-byte little-endian segment
     /// index, the spin hash's first round the UTF-16LE password and its later rounds the
-    /// previous digest.
+    /// previous digest (the spin hash through [`Self::digest_two_into`], since rc.5).
     pub(crate) fn digest_two(self, first: &[u8], second: &[u8]) -> Vec<u8> {
         macro_rules! run {
             ($d:ty) => {{
@@ -157,12 +157,16 @@ impl HashAlgorithm {
     /// See `docs/design/heap-residue.md` for why the abandoned block is beyond the
     /// wrapper's reach.
     ///
-    /// **`digest_two` is not reimplemented in terms of this, deliberately.** Its three
-    /// callers all want an owned digest of the natural length, and one of them is
-    /// `spin_hash`'s loop, which runs `spinCount` — up to 10 000 000 — times per
-    /// decrypt. Routing that through a slot it would then have to allocate anyway buys
-    /// nothing and puts a second shape in the hot path. The two share the format's
-    /// `H(a || b)` and nothing else, and a test below pins them to the same bytes.
+    /// **`digest_two` is not reimplemented in terms of this, deliberately.** Its
+    /// remaining callers want an owned digest of the natural length, and routing that
+    /// through a slot they would then have to allocate anyway buys nothing. The two
+    /// share the format's `H(a || b)` and nothing else, and a test below pins them to
+    /// the same bytes.
+    ///
+    /// `spin_hash` was one of those callers until rc.5 and is now this function's
+    /// second: its loop, which runs `spinCount` — up to 10 000 000 — times per decrypt,
+    /// alternates between two wrapped slots of exactly `digest_len` bytes, so there the
+    /// slot is not allocated per call at all, and every round lands somewhere wiped.
     ///
     /// # Contract
     ///
