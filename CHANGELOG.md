@@ -123,6 +123,20 @@ Two signals were found not to discriminate:
 
 So neither is what the check rests on.
 
+The encrypt path did not change in this release. The four-reader gate (`tools/acceptance_gate.py`)
+was still re-run on this tree's `encrypt_ooxml` artifact, SHA-256 `8af66b43…6ddf2e`, on
+2026-10-14:
+
+| reader | verdict |
+| --- | --- |
+| Word 16.0.19127 | PASS: opened with the password, content matches; wrong password refused `0x800A1520` |
+| LibreOffice 26.8.0.3 | PASS: opened, content matches; wrong password refused |
+| msoffcrypto-tool 6.0.0 | PASS: byte-identical, `dataIntegrity` HMAC verifies, wrong password refused |
+| office-crypto 0.3 | PASS: byte-identical |
+
+The Word leg ran under Windows PowerShell through `MSOFFICE_CRYPTO_PWSH=powershell.exe`,
+because this machine has no `pwsh`, in a second invocation on the same artifact.
+
 ## [0.1.0-rc.5] - 2026-09-29
 
 ### The README described a crate two releases old
