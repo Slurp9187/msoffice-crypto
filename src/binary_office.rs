@@ -86,6 +86,9 @@ pub(crate) struct BinaryVerdict {
     pub(crate) key_bits: Option<u32>,
     /// XOR obfuscation rather than an RC4 family. A different scheme, not a weaker one.
     pub(crate) xor_obfuscated: bool,
+    /// An edition before 97: Word 6.0/95 (`nFib` 0x0065 to 0x0069) or a BIFF5 workbook
+    /// (Excel 5.0/95, in a `Book` stream). Set by [`probe`] for every verdict.
+    pub(crate) pre_97: bool,
 }
 
 // ---- stream names --------------------------------------------------------------------
@@ -138,12 +141,33 @@ pub(crate) fn workbook_stream_name<F: Read + Seek>(
 /// error, because a caller of `classify` gets a verdict for every input.
 pub(crate) fn probe(data: &[u8]) -> Option<BinaryVerdict> {
     let mut cfb = cfb::CompoundFile::open(Cursor::new(data)).ok()?;
-    match format_of(&cfb)? {
+    let mut verdict = match format_of(&cfb)? {
         BinaryFormat::Word => probe_word(&mut cfb),
         BinaryFormat::Excel => probe_excel(&mut cfb),
         BinaryFormat::PowerPoint => probe_powerpoint(&mut cfb),
-    }
+    }?;
+    verdict.pre_97 = match verdict.format {
+        BinaryFormat::Word => word_is_pre_97(&mut cfb),
+        BinaryFormat::Excel => workbook_stream_name(&cfb) == Some(BOOK),
+        BinaryFormat::PowerPoint => false,
+    };
+    Some(verdict)
 }
+
+/// `FibBase.nFib` in Word 6.0/95's range — LibreOffice's ranges
+/// (`sw/source/filter/ww8/ww8scan.cxx:5862-5876`, MPL, behaviour only): 0x0065-0x0068
+/// Word 6.0, 0x0069 Word 95, 0x006A and up Word 97 and later, which write 0x00C1. A
+/// value below the range is neither -- earlier Word has another `wIdent` -- and is left
+/// to the Word 97 walk, as before this check existed.
+pub(crate) fn word_is_pre_97<F: Read + Seek>(cfb: &mut cfb::CompoundFile<F>) -> bool {
+    read_capped(cfb, WORD_DOCUMENT, 4)
+        .filter(|fib| le16(fib, 0) == Some(FIB_W_IDENT))
+        .and_then(|fib| le16(&fib, 2))
+        .is_some_and(|n_fib| WORD95_N_FIB.contains(&n_fib))
+}
+
+/// Word 6.0/95's `nFib` values — see [`word_is_pre_97`].
+pub(crate) const WORD95_N_FIB: core::ops::RangeInclusive<u16> = 0x0065..=0x0069;
 
 /// Read at most `cap` bytes of a stream. A stream shorter than `cap` is not an error.
 fn read_capped<F: Read + Seek>(
@@ -277,6 +301,7 @@ fn probe_word<F: Read + Seek>(cfb: &mut cfb::CompoundFile<F>) -> Option<BinaryVe
             version: None,
             key_bits: None,
             xor_obfuscated: false,
+            pre_97: false,
         });
     }
     if fib.obfuscated() {
@@ -287,6 +312,7 @@ fn probe_word<F: Read + Seek>(cfb: &mut cfb::CompoundFile<F>) -> Option<BinaryVe
             version: None,
             key_bits: None,
             xor_obfuscated: true,
+            pre_97: false,
         });
     }
 
@@ -301,6 +327,7 @@ fn probe_word<F: Read + Seek>(cfb: &mut cfb::CompoundFile<F>) -> Option<BinaryVe
         version,
         key_bits,
         xor_obfuscated: false,
+        pre_97: false,
     })
 }
 
@@ -484,6 +511,7 @@ fn probe_excel<F: Read + Seek>(cfb: &mut cfb::CompoundFile<F>) -> Option<BinaryV
             version: None,
             key_bits: None,
             xor_obfuscated: false,
+            pre_97: false,
         }),
         // FILEPASS is the marker; its body only says which scheme. A body cut short by
         // the cap or by truncation leaves the marker's meaning intact, so that is
@@ -498,6 +526,7 @@ fn probe_excel<F: Read + Seek>(cfb: &mut cfb::CompoundFile<F>) -> Option<BinaryV
                     version: None,
                     key_bits: None,
                     xor_obfuscated: true,
+                    pre_97: false,
                 },
                 Some(_) => {
                     let (version, key_bits) = body
@@ -510,6 +539,7 @@ fn probe_excel<F: Read + Seek>(cfb: &mut cfb::CompoundFile<F>) -> Option<BinaryV
                         version,
                         key_bits,
                         xor_obfuscated: false,
+                        pre_97: false,
                     }
                 }
                 None => BinaryVerdict {
@@ -518,6 +548,7 @@ fn probe_excel<F: Read + Seek>(cfb: &mut cfb::CompoundFile<F>) -> Option<BinaryV
                     version: None,
                     key_bits: None,
                     xor_obfuscated: false,
+                    pre_97: false,
                 },
             })
         }
@@ -538,6 +569,7 @@ fn unreadable_excel() -> BinaryVerdict {
         version: None,
         key_bits: None,
         xor_obfuscated: false,
+        pre_97: false,
     }
 }
 
@@ -786,6 +818,7 @@ fn probe_powerpoint<F: Read + Seek>(cfb: &mut cfb::CompoundFile<F>) -> Option<Bi
             version: None,
             key_bits: None,
             xor_obfuscated: false,
+            pre_97: false,
         });
     }
 
@@ -802,6 +835,7 @@ fn probe_powerpoint<F: Read + Seek>(cfb: &mut cfb::CompoundFile<F>) -> Option<Bi
         version,
         key_bits,
         xor_obfuscated: false,
+        pre_97: false,
     })
 }
 
@@ -817,5 +851,6 @@ fn unreadable_powerpoint() -> BinaryVerdict {
         version: None,
         key_bits: None,
         xor_obfuscated: false,
+        pre_97: false,
     }
 }

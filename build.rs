@@ -5,8 +5,9 @@
 //! `include` in `Cargo.toml` ships `src/**/*.rs`, which carries this crate's `#[cfg(test)]`
 //! modules — `classify_tests.rs`, `legacy_malformed.rs`, the `tests` modules inside
 //! `lib.rs`, `integrity.rs`, `encryption_info.rs` and `standard_encrypt.rs`. Since
-//! 2026-09-05 it ships **2 of the 19 fixtures**, because the other 17 were two thirds of
-//! the `.crate` and the repository is where the evidence is checked.
+//! 2026-09-05 it ships **2 fixtures** — of 19 then, of 24 at 0.1.0-rc.6 — because the
+//! other 17 were two thirds of the `.crate` and the repository is where the evidence is
+//! checked.
 //!
 //! Those two facts together meant `cargo test` on the published crate reported **30
 //! failures**, every one of them `fixture ... must be present -- these tests are not
@@ -55,15 +56,20 @@ const WITHHELD_FIXTURES: &[&str] = &[
     "agile_aes256_sha256.docx",
     "agile_aes256_sha384.docx",
     "excel16_agile.xlsx",
+    "excel95_plain.xls",
+    "excel97_encprops.xls",
     "excel97_password.xls",
     "excel97_plain.xls",
     "excel97_xor.xls",
     "plain_content.txt",
     "powerpoint16_agile.pptx",
+    "powerpoint97_encprops.ppt",
     "powerpoint97_password.ppt",
+    "powerpoint97_picture.ppt",
     "powerpoint97_plain.ppt",
     "standard_encrypted.docx",
     "word16_agile.docx",
+    "word97_encprops.doc",
     "word97_password.doc",
     "word97_plain.doc",
 ];

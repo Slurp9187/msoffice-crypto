@@ -1,6 +1,6 @@
 [package]
 name = "msoffice-crypto"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 edition = "2021"
 description = "Microsoft Office document encryption per MS-OFFCRYPTO: detect, decrypt and encrypt (agile and Office 2007 standard), with key material that zeroizes on drop and a detection build that links no cryptography. Not affiliated with Microsoft."
 rust-version = "1.85"
@@ -33,9 +33,10 @@ autobins = false
 #   - NOTICE carries the BSD-3 attribution herumi/msoffice requires for the ported encrypt
 #     path, and the MIT chains for office-crypto and msoffcrypto-tool.
 #   - build.rs decides whether the corpus-dependent tests are `#[ignore]`d. Without it the
-#     published crate's `cargo test` reports 30 failures -- the fixtures-are-not-optional
-#     rule firing against a tarball that deliberately ships 2 of the 19 fixtures. Shipping
-#     the script and not the corpus is the point: it is what turns those 30 into an honest
+#     published crate's `cargo test` reports one failure per corpus-dependent test (30
+#     when this was written, 42 at 0.1.0-rc.6) -- the fixtures-are-not-optional rule firing
+#     against a tarball that deliberately ships 2 of the 24 fixtures. Shipping the script
+#     and not the corpus is the point: it is what turns those failures into an honest
 #     "ignored, needs the fixture corpus" instead of red.
 #   - SECURITY.md is where a reader who has only the tarball finds out how to report a
 #     flaw, and -- more usefully -- what this crate counts as one. A panic on a crafted
@@ -45,13 +46,13 @@ autobins = false
 #   - The two fixtures are the ones `classify`'s doc examples pull in with `include_bytes!`
 #     (src/classify.rs:340, :362). Without them `cargo test --doc` does not *compile* on an
 #     unpacked tarball -- a compile error, not a skipped test. Both are python-docx output
-#     rather than Office's, so unlike the other seventeen they carry no document metadata
+#     rather than Office's, so unlike the Office-written fixtures they carry no document metadata
 #     from whoever generated them.
 #
 # README.md is included automatically by `readme = "README.md"`.
 #
-# What this deliberately drops: tests/*.rs, examples/*.rs and the other seventeen fixtures,
-# which were ~666 KB raw and two thirds of the .crate. A consumer therefore cannot re-run
+# What this deliberately drops: tests/*.rs, examples/*.rs and the other twenty-two fixtures;
+# the seventeen there were when the cut was made were ~666 KB raw and two thirds of the .crate. A consumer therefore cannot re-run
 # the fixture suite from the tarball alone; the repository is where the evidence is checked,
 # and CHANGELOG.md is where the external readers' verdicts are recorded. That is a
 # reversal of the earlier posture -- see docs/design/development-record.md section 2.4.

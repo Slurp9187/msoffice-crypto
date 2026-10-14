@@ -95,7 +95,7 @@
 //! `sha2`, `hmac`, `base64` and `rand`:
 //!
 //! ```toml
-//! msoffice-crypto = { version = "0.1.0-rc.5", features = ["crypto-ops"] }
+//! msoffice-crypto = { version = "0.1.0-rc.6", features = ["crypto-ops"] }
 //! ```
 //!
 //! <div class="warning">
@@ -134,7 +134,7 @@
 //! nothing modern needs — to that build alone:
 //!
 //! ```toml
-//! msoffice-crypto = { version = "0.1.0-rc.5", features = ["legacy-binary"] }
+//! msoffice-crypto = { version = "0.1.0-rc.6", features = ["legacy-binary"] }
 //! ```
 //!
 //! # Bounds on untrusted input
@@ -224,6 +224,7 @@
 mod binary_office;
 mod cfb_reader;
 mod classify;
+mod data_space_map;
 mod error;
 mod limits;
 
@@ -231,6 +232,8 @@ mod limits;
 // three cipher families, and one module per application format. A `//` comment, not a
 // `///` one: this describes the eight modules below, and as rustdoc it would become
 // `excel97`'s alone and be prepended to that module's own header.
+#[cfg(feature = "legacy-binary")]
+mod encrypted_summary;
 #[cfg(feature = "legacy-binary")]
 mod excel97;
 #[cfg(feature = "legacy-binary")]
@@ -939,9 +942,14 @@ pub fn encrypt_ooxml_standard_with_key_bits(
 /// in an `EncryptionInfo` stream, and their plaintext is not a package but the same CFB
 /// container with its encrypted streams replaced: the `WordDocument`, table and `Data`
 /// streams of a `.doc`; the `Workbook` stream of a `.xls`; the `PowerPoint Document`
-/// stream of a `.ppt`. The result is what `msoffcrypto-tool -d` writes, byte for byte on
-/// every fixture in `tests/fixtures/`, and what Word, Excel and PowerPoint open without a
-/// password.
+/// and `Pictures` streams of a `.ppt`. Where the document properties were encrypted
+/// (RC4 CryptoAPI with `fDocProps` clear), the stream that carried them is replaced by
+/// the two property-set streams it held. **Nothing the password covers is left
+/// encrypted**: content of a kind this crate does not decrypt is refused, never passed
+/// through, so the output can stand in for the original. The main streams are what
+/// `msoffcrypto-tool -d` writes, byte for byte on every fixture in `tests/fixtures/`; the
+/// pictures and properties it leaves encrypted, and Word, Excel and PowerPoint open the
+/// result without a password and show both.
 ///
 /// Which format is decided by the streams the container holds ([`classify()`] reports the
 /// same answer in [`Document`]), and which scheme by the format's own marker: the FIB's
@@ -963,7 +971,8 @@ pub fn encrypt_ooxml_standard_with_key_bits(
 ///
 /// - [`Error::NotACfbFile`] — `data` is not a CFB container
 /// - [`Error::MissingStream`] — the container carries none of the three
-///   formats' streams, or a stream is shorter than its header
+///   formats' streams, or a stream is shorter than its header, or the header says the
+///   properties are encrypted and the stream carrying them is absent
 /// - [`Error::NotEncrypted`] — the document carries no password-to-open
 /// - [`Error::WrongPassword`] — the verifier did not match. Every scheme has
 ///   one: the RC4 families' encrypted verifier, XOR's 16-bit `verificationBytes`
@@ -977,6 +986,10 @@ pub fn encrypt_ooxml_standard_with_key_bits(
 /// - [`Error::BadParameters`] — a length or offset the file declares is out of
 ///   range: an `lKey` past the table stream, a record length past the workbook, a persist
 ///   offset past the presentation, a `KeySize` outside 40..=128, a `FILEPASS` out of order
+/// - [`Error::UnsupportedEncryptedContent`] — encrypted content the format permits and
+///   no Office build was measured writing: a storage, or a stream other than the two
+///   property sets, inside the encrypted summary stream; a `Pictures` record that is not
+///   a blip [MS-ODRAW] defines
 /// - [`Error::Io`] — rewriting a stream inside the in-memory container failed
 ///
 /// # Examples
@@ -1012,6 +1025,15 @@ pub fn decrypt_binary_office(data: &[u8], password: &str) -> Result<Vec<u8>, Err
         return Err(Error::NotACfbFile);
     }
     let mut container = legacy_container::LegacyContainer::open(data)?;
+    // Before the format walk: an IRM binary document's own streams are a placeholder
+    // whose markers say "unencrypted", so the walk would answer `NotEncrypted` and a
+    // caller would keep the placeholder in place of the document.
+    if container.rights_managed() {
+        return Err(Error::UnsupportedEncryptedContent(
+            "rights-managed (IRM) content, whose key a rights-management server holds; \
+             no password opens it",
+        ));
+    }
     match container.format() {
         Some(binary_office::BinaryFormat::Word) => word97::decrypt(&mut container, password)?,
         Some(binary_office::BinaryFormat::Excel) => excel97::decrypt(&mut container, password)?,
@@ -1100,6 +1122,17 @@ pub fn decrypt_ooxml_with_policy(
 ) -> Result<Decrypted, Error> {
     if !is_cfb_office(data) {
         return Err(Error::NotACfbFile);
+    }
+    // A rights-managed package has an `EncryptedPackage` and no `EncryptionInfo`; without
+    // this the answer would be a missing stream, which sends the holder looking for
+    // damage that is not there.
+    if data_space_map::rights_management(data).is_some() {
+        return Err(Error::UnsupportedAlgorithm {
+            what: "\\x06DataSpaces\\DataSpaceMap",
+            name: "rights management (IRM): the key is held by a rights-management \
+                   server, and no password opens it"
+                .to_string(),
+        });
     }
 
     let streams = cfb_reader::read_cfb_streams(data)?;

@@ -80,7 +80,7 @@ SHA-256 the script prints first. Then check `tasklist` for a leaked `WINWORD`, `
 ## 3. Verify the tarball, which is not the repository
 
 The `include` allowlist ships `src/**`, both licences, `NOTICE`, `SECURITY.md` and exactly
-two fixtures. Everything else — `tests/*.rs`, `examples/`, the other seventeen fixtures,
+two fixtures. Everything else — `tests/*.rs`, `examples/`, the other twenty-two fixtures,
 `docs/`, `tools/` — is repository-only, on purpose.
 
 ```bash
@@ -149,7 +149,7 @@ lose tests outright, because the `tests/*.rs` integration files are not in the `
 allowlist and so do not exist in the tarball at all.
 
 **The ignored count is a check, not an accident.** `build.rs` sets `cfg(fixture_corpus)`
-when it finds any of the seventeen withheld fixtures, and the corpus-dependent tests carry
+when it finds any of the twenty-two withheld fixtures, and the corpus-dependent tests carry
 `#[cfg_attr(not(fixture_corpus), ignore = "…")]`. So:
 
 - **A tarball reporting 0 ignored** means the corpus leaked into the allowlist — check

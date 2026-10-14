@@ -4,8 +4,11 @@
 //! Unlike an encrypted OOXML file, whose plaintext is a ZIP pulled out of one stream, a
 //! `.doc`, `.xls` or `.ppt` is decrypted in place: the same CFB, the same directory, the
 //! same summary streams, with the encrypted streams' bytes replaced by their plaintext.
-//! Every scheme here is a stream cipher or a byte transformation, so each stream keeps
-//! its length, and the rewrite touches nothing but the sectors those streams own — which
+//! Every scheme here is a stream cipher or a byte transformation, so each decrypted stream
+//! keeps its length. The one change of shape is a file whose properties were encrypted:
+//! `encrypted_summary` removes the stream that carried them and writes the two
+//! property-set streams back. Otherwise the rewrite touches nothing but the sectors the
+//! decrypted streams own — which
 //! is what makes the Word and Excel results byte-identical to `msoffcrypto-tool -d`'s,
 //! measured on every fixture (its `olefile.write_stream` does the same in-place
 //! overwrite). The `.ppt` output is the one exception and differs from that tool's by
@@ -42,6 +45,16 @@ impl LegacyContainer {
 
     pub(crate) fn workbook_stream_name(&self) -> Option<&'static str> {
         binary_office::workbook_stream_name(&self.cfb)
+    }
+
+    /// Whether the container is rights-managed: `data_space_map` says how that is read.
+    pub(crate) fn rights_managed(&mut self) -> bool {
+        crate::data_space_map::rights_management_in(&mut self.cfb).is_some()
+    }
+
+    /// Whether the `WordDocument` stream is Word 6.0/95's — `binary_office::word_is_pre_97`.
+    pub(crate) fn word_is_pre_97(&mut self) -> bool {
+        binary_office::word_is_pre_97(&mut self.cfb)
     }
 
     pub(crate) fn exists(&self, name: &str) -> bool {
@@ -81,6 +94,35 @@ impl LegacyContainer {
         stream.seek(SeekFrom::Start(0))?;
         stream.write_all(bytes)?;
         stream.flush()?;
+        Ok(())
+    }
+
+    /// Write `bytes` as the whole of stream `name`: in place when the stream exists at that
+    /// length — the directory entry and its timestamps survive, as [`Self::overwrite`]
+    /// keeps them — and otherwise as a new stream replacing any old one. The one caller is
+    /// `encrypted_summary`, whose property-set streams come back at whatever length Office
+    /// encrypted them.
+    pub(crate) fn replace(&mut self, name: &'static str, bytes: &[u8]) -> Result<(), Error> {
+        let same_length = self
+            .cfb
+            .entry(name)
+            .is_ok_and(|e| e.is_stream() && e.len() == bytes.len() as u64);
+        if same_length {
+            return self.overwrite(name, bytes);
+        }
+        let mut stream = self.cfb.create_stream(name)?;
+        stream.write_all(bytes)?;
+        stream.flush()?;
+        Ok(())
+    }
+
+    /// Remove stream `name`; [`Error::MissingStream`] when there is none.
+    pub(crate) fn remove(&mut self, name: &'static str) -> Result<(), Error> {
+        let what = name.trim_start_matches('/');
+        if !self.cfb.is_stream(name) {
+            return Err(Error::MissingStream(what));
+        }
+        self.cfb.remove_stream(name)?;
         Ok(())
     }
 

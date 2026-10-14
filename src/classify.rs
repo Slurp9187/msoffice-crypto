@@ -40,6 +40,7 @@ use quick_xml::{events::Event, Reader};
 
 use crate::binary_office;
 use crate::cfb_reader;
+use crate::data_space_map;
 // Ungated, as in `cfb_reader`: the *type* exists in every build and only its re-export is
 // behind `crypto-ops`. `classify_cfb` matches one variant of it to tell "the container
 // would not open" from "it opened and carried no EncryptionInfo".
@@ -139,6 +140,19 @@ pub enum Document {
     ExcelBinary,
     /// PowerPoint 97-2003 binary (`.ppt`).
     PowerPointBinary,
+    /// Word 6.0/95 binary (`.doc`): a `WordDocument` stream whose FIB's `nFib` is 0x0065
+    /// to 0x0069. Word 97 and later write 0x00C1; Word 6.0 wrote 0x0065 to 0x0068 and
+    /// Word 95 0x0069 (LibreOffice's reader, `sw/source/filter/ww8/ww8scan.cxx:5862-5876`,
+    /// MPL, behaviour only). Its layout and its encryption are not the ones [MS-DOC]
+    /// describes, and `decrypt_binary_office` refuses it by name.
+    ///
+    /// Until 0.1.0-rc.6 such a file was [`Document::WordBinary`].
+    Word95Binary,
+    /// Excel 5.0/95 binary (`.xls`): a BIFF5 workbook, in a `Book` stream rather than
+    /// BIFF8's `Workbook`. Refused by `decrypt_binary_office` by name.
+    ///
+    /// Until 0.1.0-rc.6 such a file was [`Document::ExcelBinary`].
+    Excel95Binary,
     /// Not recognised.
     Unknown,
 }
@@ -250,6 +264,17 @@ pub enum Family {
     /// the source: this crate's own CLI, and a downstream consumer writing refusal copy
     /// who reached for `version.is_none()` and would have shipped two wrong sentences.
     Unsupported,
+    /// Information Rights Management ([MS-OFFCRYPTO] §2.2): the content is encrypted
+    /// under a rights-management policy whose key a rights-management server holds. No
+    /// password opens it, so no offline implementation does, and that is the format's
+    /// property rather than a gap here.
+    ///
+    /// Reported for an OOXML package under the `DRMEncryptedDataSpace` data space, and for
+    /// a `.doc`, `.xls` or `.ppt` whose real content is in a `\x09DRMContent` stream. The
+    /// second kind carries an **unencrypted placeholder document** beside it, so before
+    /// 0.1.0-rc.6 it classified as [`Family::Unencrypted`] — the claim this variant
+    /// exists to stop. Neither decrypt function opens either kind; both refuse by name.
+    Irm,
     /// Nothing could be determined — not a container this crate reads, or one whose
     /// `EncryptionInfo` stream is missing, truncated or unparsable.
     Unknown,
@@ -553,6 +578,7 @@ impl Classification {
                 | Family::Rc4
                 | Family::XorObfuscation
                 | Family::Unsupported
+                | Family::Irm
         )
     }
 
@@ -704,6 +730,12 @@ fn is_zip(data: &[u8]) -> bool {
 }
 
 fn classify_cfb(data: &[u8]) -> Classification {
+    // Rights management first: neither kind is what the rest of this function would
+    // call it. An IRM package has no `EncryptionInfo`, and an IRM binary document carries
+    // a placeholder whose own markers say "unencrypted".
+    if let Some(kind) = data_space_map::rights_management(data) {
+        return classify_irm(data, kind);
+    }
     // No `EncryptionInfo` does not mean "unreadable". The 97-2003 binary formats are CFB
     // containers too and carry their encryption inside their own records, so ask them
     // before giving up -- otherwise an encrypted `.doc` classifies identically to a
@@ -750,6 +782,38 @@ fn classify_cfb(data: &[u8]) -> Classification {
     }
 }
 
+/// A rights-managed container. The document is the format's claim for an ECMA-376 one,
+/// and whatever the placeholder beside the protected content is for a binary one.
+fn classify_irm(data: &[u8], kind: data_space_map::RightsManagement) -> Classification {
+    let document = match kind {
+        data_space_map::RightsManagement::Ecma376 => Document::OoxmlPackage,
+        data_space_map::RightsManagement::Binary => binary_office::probe(data)
+            .map_or(Document::Unknown, |v| binary_document(v.format, v.pre_97)),
+    };
+    Classification {
+        container: Container::Cfb,
+        document,
+        version: None,
+        family: Family::Irm,
+        key_data: None,
+        password_key: None,
+        // The rights-management transform's integrity is not one this crate can see.
+        data_integrity: IntegrityDeclaration::Unknown,
+        container_read: ContainerRead::Opened,
+    }
+}
+
+/// The [`Document`] a binary format and edition are.
+fn binary_document(format: binary_office::BinaryFormat, pre_97: bool) -> Document {
+    match (format, pre_97) {
+        (binary_office::BinaryFormat::Word, false) => Document::WordBinary,
+        (binary_office::BinaryFormat::Word, true) => Document::Word95Binary,
+        (binary_office::BinaryFormat::Excel, false) => Document::ExcelBinary,
+        (binary_office::BinaryFormat::Excel, true) => Document::Excel95Binary,
+        (binary_office::BinaryFormat::PowerPoint, _) => Document::PowerPointBinary,
+    }
+}
+
 /// Classify a CFB container that carries no `EncryptionInfo`: a 97-2003 binary document,
 /// or something this crate does not recognise at all.
 ///
@@ -763,11 +827,7 @@ fn classify_binary(data: &[u8]) -> Classification {
         return unknown(Container::Cfb, ContainerRead::Opened);
     };
 
-    let document = match v.format {
-        binary_office::BinaryFormat::Word => Document::WordBinary,
-        binary_office::BinaryFormat::Excel => Document::ExcelBinary,
-        binary_office::BinaryFormat::PowerPoint => Document::PowerPointBinary,
-    };
+    let document = binary_document(v.format, v.pre_97);
 
     let family = match (v.encrypted, v.xor_obfuscated, v.version) {
         // Recognised the format, could not reach its encryption marker. Saying

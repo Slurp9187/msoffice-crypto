@@ -43,7 +43,8 @@
 //! does.
 //!
 //! **margin** — every read cap ([`ENCRYPTION_INFO_READ_CAP`], [`BINARY_HEADER_READ_CAP`],
-//! [`BIFF_SCAN_CAP`], [`CURRENT_USER_READ_CAP`], [`PPT_PERSIST_DIRECTORY_READ_CAP`],
+//! [`BIFF_SCAN_CAP`], [`CURRENT_USER_READ_CAP`], [`DATA_SPACE_MAP_READ_CAP`],
+//! [`PPT_PERSIST_DIRECTORY_READ_CAP`],
 //! [`RC4_ENCRYPTION_HEADER_SIZE_MAX`], [`ENCRYPTION_HEADER_STRUCTURE_MAX`]),
 //! [`crypto::PAYLOAD_CEILING`] and its two aliases. Each names its margin over the
 //! largest real value in its own comment.
@@ -116,6 +117,16 @@ pub(crate) const BIFF_SCAN_CAP: usize = 1 << 20;
 /// stream is 32. 256 is generous and still refuses to materialise a hostile stream that
 /// merely claims the name.
 pub(crate) const CURRENT_USER_READ_CAP: usize = 256;
+
+/// Bytes of `\x06DataSpaces\DataSpaceMap` that are read when looking for rights
+/// management.
+///
+/// The map this crate writes for standard encryption is 112 bytes, one entry
+/// (`dataspaces::data_space_map`); an IRM file's carries one entry per protected stream,
+/// and the spec's two IRM shapes each have one. 4096 is over thirty times that one-entry
+/// map, and a longer map is not read at all — `classify` then reports what the rest of
+/// the container says, which for a hostile map is no worse than its not being there.
+pub(crate) const DATA_SPACE_MAP_READ_CAP: usize = 4096;
 
 /// Ceiling on `EncryptionHeaderSize` — the same `EncryptionHeader` of [MS-OFFCRYPTO]
 /// §2.3.2, used by RC4 CryptoAPI (§2.3.5.1) and by ECMA-376 standard encryption (§2.3.4.5).

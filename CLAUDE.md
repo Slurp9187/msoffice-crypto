@@ -205,16 +205,18 @@ spec or in a permissive reference. Cite where it came from.
 ## Testing Rules
 
 - **Fixtures are not optional.** A missing fixture fails the test; it does not skip.
-  Fixtures live in `tests/fixtures/` and the password is `testpass`. Of the nineteen, the
+  Fixtures live in `tests/fixtures/` and the password is `testpass`. Of the twenty-four, the
   `include` allowlist ships **two** — the ones `classify`'s doc examples pull in with
-  `include_bytes!` — because the other seventeen were two thirds of the `.crate`.
+  `include_bytes!` — because the rest (seventeen, when the cut was made) were two thirds of
+  the `.crate`.
 - **The corpus tests are `#[ignore]`d where there is no corpus, never skipped silently.**
-  `build.rs` sets `cfg(fixture_corpus)` when it finds any of the seventeen withheld
-  fixtures, and the 33 corpus-dependent tests carry
+  `build.rs` sets `cfg(fixture_corpus)` when it finds any of the twenty-two withheld
+  fixtures, and the 42 corpus-dependent tests carry
   `#[cfg_attr(not(fixture_corpus), ignore = "…")]`. So the published crate's `cargo test` is
-  green with them reported as **ignored, with a reason**, while this repository runs all 33.
+  green with them reported as **ignored, with a reason**, while this repository runs all 42.
   (The count is a moving figure, not an invariant -- it was thirty until the v0.1.0-rc.3
-  classify work added three. The invariant is the two-way read below, which does not depend
+  classify work added three, and the rc.6 pictures, properties and IRM work took it to 42,
+  measured on the unpacked `.crate` as 42 ignored and here as 0. The invariant is the two-way read below, which does not depend
   on it.) An early `return` on a missing file would be the anti-pattern above wearing a hat.
   **Read the ignored count in both directions:** 0 in a tarball means the corpus leaked into
   the allowlist; anything but 0 here means a fixture is missing. A partial corpus counts as
@@ -243,6 +245,7 @@ spec or in a permissive reference. Cite where it came from.
 ```
 src/lib.rs             public API: classify, is_cfb_office, decrypt_ooxml, decrypt_ooxml_with_policy, check_encryptable, encrypt_ooxml, encrypt_ooxml_with_params, encrypt_ooxml_standard, decrypt_binary_office   (+ lib_tests.rs)
 src/classify.rs        detection; NEVER panics, returns Unknown        (+ classify_tests.rs)
+src/data_space_map.rs  rights management (IRM), read from \x06DataSpaces\DataSpaceMap   (+ data_space_map_tests.rs)
 src/binary_office.rs   legacy .doc/.xls/.ppt recognition, and the FIB / BIFF / persist-directory readers both probe and decrypt share
 src/agile.rs           ECMA-376 agile decrypt: parse, KDF, verifier, package
 src/standard.rs        ECMA-376 standard decrypt: parse, KDF, verifier, package — and the ECB helper the writer shares
@@ -262,12 +265,13 @@ src/encryption_info.rs the EncryptionInfo serialiser, byte-identical to Office's
 src/agile_encrypt.rs   the agile key schedule, the package encryptor, and the assembly behind encrypt_ooxml   (+ agile_encrypt_tests.rs)
 src/rc4.rs             RC4 over a wrapped key, the per-block loop, the verifier check   (legacy-binary, as are the seven below)
 src/rc4_cryptoapi.rs   RC4 CryptoAPI: header structure, key generation, password check  ([MS-OFFCRYPTO] 2.3.5)
+src/encrypted_summary.rs the encrypted summary stream back into the two property-set streams  (2.3.5.4)
 src/rc4_office97.rs    Office 97/2000 RC4: MD5 key generation, password check           (2.3.6)
 src/xor_obfuscation.rs XOR obfuscation Method 1: verifier, array, transformation       (2.3.7)
 src/legacy_container.rs the CFB a binary document is decrypted inside: capped reads, in-place rewrites
 src/word97.rs          the Word 97 walk: FIB, table stream, Data stream
 src/excel97.rs         the Excel 97 walk: FILEPASS, the record set kept in the clear
-src/powerpoint97.rs    the PowerPoint 97 walk: persist directory, CryptSession10Container, per-object keys
+src/powerpoint97.rs    the PowerPoint 97 walk: persist directory, CryptSession10Container, per-object keys, Pictures
 src/legacy_malformed.rs hostile-input tests for the three walks, on tampered fixtures and synthetic streams
 tests/real_office_fixtures.rs   the Office-written fixtures against an independent oracle
 tests/legacy_binary_fixtures.rs the binary fixtures, byte for byte against msoffcrypto-tool's output

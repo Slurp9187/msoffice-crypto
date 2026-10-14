@@ -250,7 +250,11 @@ def main():
             if m.group(1) != msrv:
                 flag("E MSRV disagrees with Cargo.toml",
                      f"{name}:{line_of(txt, m.start())} says {m.group(1)}, Cargo.toml says {msrv}")
-        for m in re.finditer(r'msoffice-crypto = \{ version = "([^"]+)"', txt):
+        # Both dependency forms. Only the table form was matched until 0.1.0-rc.6, so
+        # README's detection-only line, `msoffice-crypto = "..."`, stayed at rc.5 through
+        # the rc.6 bump with this check green. A full X.Y.Z only: RELEASING.md's `"0.1"` is
+        # the example of a requirement that does *not* match a pre-release.
+        for m in re.finditer(r'msoffice-crypto = (?:\{ version = )?"(\d+\.\d+\.\d+[^"]*)"', txt):
             if m.group(1) != pkg:
                 flag("E package version disagrees with Cargo.toml",
                      f"{name}:{line_of(txt, m.start())} says {m.group(1)}, Cargo.toml says {pkg}")

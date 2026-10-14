@@ -335,3 +335,267 @@ fn every_truncation_of_every_legacy_fixture_survives_without_panicking() {
         }
     }
 }
+
+// ---- Pictures and encrypted properties (0.1.0-rc.6) ------------------------------------
+//
+// The four fixtures `tools/gen_password_binary_fixtures.ps1` writes: a `.ppt` with three
+// pictures and its properties in the clear, and a `.doc`, `.xls` and `.ppt` with pictures
+// and their properties encrypted. Before rc.6 the decrypt handed all four back with the
+// pictures (the `.ppt`s) or the properties (the three `*_encprops`) still ciphertext.
+
+/// The Title the generator gives every one of the four.
+const PROBE_TITLE: &[u8] = b"msoffice-crypto summary probe";
+/// The value of the custom property it adds, which only `DocumentSummaryInformation`
+/// carries.
+const PROBE_CUSTOM: &[u8] = b"document summary probe";
+
+/// `(fixture, document, encrypted summary stream if the properties are encrypted)`.
+const RICH: &[(&str, Document, Option<&str>)] = &[
+    ("powerpoint97_picture.ppt", Document::PowerPointBinary, None),
+    (
+        "word97_encprops.doc",
+        Document::WordBinary,
+        Some("/encryption"),
+    ),
+    (
+        "excel97_encprops.xls",
+        Document::ExcelBinary,
+        Some("/encryption"),
+    ),
+    (
+        "powerpoint97_encprops.ppt",
+        Document::PowerPointBinary,
+        Some("/EncryptedSummary"),
+    ),
+];
+
+/// msoffcrypto-tool 6.0.0's output, per stream, for the streams it decrypts. It leaves
+/// the encrypted summary stream as it found it and does not read the two `.ppt`s at all
+/// — it fails rewriting `Current User` ("data must be the same size as the existing
+/// stream") — so for those the independent check is PowerPoint, in
+/// `tools/office_com_check_binary.ps1`.
+const RICH_ORACLE_STREAMS: &[(&str, &str, &str)] = &[
+    (
+        "word97_encprops.doc",
+        "/WordDocument",
+        "252434b549566273cd338e843c44df024d4f875327007519140fa99a32ce88bc",
+    ),
+    (
+        "word97_encprops.doc",
+        "/1Table",
+        "21c4d6a274e0bb533cfffc62c9dc042e30f5025920a736bcf97e778644e68c63",
+    ),
+    (
+        "word97_encprops.doc",
+        "/Data",
+        "bbe2aae2908264a4a2298a2449f1ff6ca0dc85f6fe843b31e86a69b58dfaf1ed",
+    ),
+    (
+        "excel97_encprops.xls",
+        "/Workbook",
+        "bb6fe01e0b3603638a23efd837a93909627e5c538ea4eb42a781ea8e070847d2",
+    ),
+];
+
+fn read_stream(cfb: &mut cfb::CompoundFile<Cursor<Vec<u8>>>, name: &str) -> Option<Vec<u8>> {
+    let mut stream = cfb.open_stream(name).ok()?;
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(&mut stream, &mut out).ok()?;
+    Some(out)
+}
+
+fn open(data: Vec<u8>) -> cfb::CompoundFile<Cursor<Vec<u8>>> {
+    cfb::CompoundFile::open(Cursor::new(data)).expect("the output must be a CFB container")
+}
+
+/// CRC-32 as PNG computes it (ISO 3309), for checking each chunk of a decrypted PNG.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in bytes {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// Every chunk of a PNG has the CRC it declares, ending at `IEND` — the strongest check
+/// short of decoding that the bytes are the picture and not RC4 noise in its shape.
+fn assert_png_intact(png: &[u8], what: &str) {
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "{what}: PNG signature");
+    let mut at = 8;
+    loop {
+        let len = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+        let chunk = &png[at + 4..at + 8 + len];
+        let crc = u32::from_be_bytes(png[at + 8 + len..at + 12 + len].try_into().unwrap());
+        assert_eq!(crc32(chunk), crc, "{what}: CRC of the chunk at {at}");
+        at += 12 + len;
+        if &chunk[..4] == b"IEND" {
+            break;
+        }
+    }
+    assert_eq!(at, png.len(), "{what}: nothing after IEND");
+}
+
+/// The blips in a decrypted `Pictures` stream, as `(recType, recInstance, data after the
+/// fixed fields)`, read with [MS-ODRAW]'s layout and nothing of this crate's.
+fn plain_blips(pictures: &[u8]) -> Vec<(u16, u16, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < pictures.len() {
+        let ver_inst = u16::from_le_bytes([pictures[at], pictures[at + 1]]);
+        let rec_type = u16::from_le_bytes([pictures[at + 2], pictures[at + 3]]);
+        let len = u32::from_le_bytes(pictures[at + 4..at + 8].try_into().unwrap()) as usize;
+        let body = &pictures[at + 8..at + 8 + len];
+        let instance = ver_inst >> 4;
+        let uids = if instance & 1 == 1 { 32 } else { 16 };
+        let metafile = matches!(rec_type, 0xF01A..=0xF01C);
+        let fixed = if metafile { uids + 34 } else { uids + 1 };
+        if metafile {
+            // OfficeArtMetafileHeader.cbSave: the size of the compressed data that follows.
+            let cb_save = u32::from_le_bytes(body[uids + 28..uids + 32].try_into().unwrap());
+            assert_eq!(
+                cb_save as usize,
+                len - fixed,
+                "metafile cbSave against its data"
+            );
+        }
+        out.push((rec_type, instance, body[fixed..].to_vec()));
+        at += 8 + len;
+    }
+    assert_eq!(at, pictures.len(), "the records must tile the stream");
+    out
+}
+
+/// The headline: every picture and every property comes back in the clear, the stream
+/// that carried the properties is gone, and the result is an unencrypted document.
+#[test]
+fn pictures_and_encrypted_properties_come_back_in_the_clear() {
+    for (name, document, summary_stream) in RICH {
+        let data = fixture(name);
+        let mut input = open(data.clone());
+        let plain = decrypt_binary_office(&data, PASSWORD)
+            .unwrap_or_else(|e| panic!("{name} must decrypt: {e}"));
+        let mut out = open(plain.clone());
+
+        // Properties.
+        if let Some(stream) = summary_stream {
+            assert!(
+                input.is_stream(stream),
+                "{name}: the fixture carries {stream}"
+            );
+            assert!(
+                !input.is_stream("/\u{5}SummaryInformation"),
+                "{name}: with properties encrypted, Office writes no SummaryInformation"
+            );
+            assert!(!out.exists(stream), "{name}: {stream} must be removed");
+        }
+        let si = read_stream(&mut out, "/\u{5}SummaryInformation")
+            .unwrap_or_else(|| panic!("{name}: SummaryInformation must be present"));
+        assert_eq!(
+            &si[..4],
+            b"\xFE\xFF\x00\x00",
+            "{name}: a property set's byte order"
+        );
+        assert!(
+            si.windows(PROBE_TITLE.len()).any(|w| w == PROBE_TITLE),
+            "{name}: the Title must be readable in SummaryInformation"
+        );
+        let dsi = read_stream(&mut out, "/\u{5}DocumentSummaryInformation").unwrap();
+        assert_eq!(
+            &dsi[..4],
+            b"\xFE\xFF\x00\x00",
+            "{name}: DocumentSummaryInformation"
+        );
+        assert!(
+            dsi.windows(PROBE_CUSTOM.len()).any(|w| w == PROBE_CUSTOM),
+            "{name}: the custom property must be readable in DocumentSummaryInformation"
+        );
+        if summary_stream.is_some() {
+            let stub = read_stream(&mut input, "/\u{5}DocumentSummaryInformation").unwrap();
+            assert_ne!(
+                dsi, stub,
+                "{name}: the stub must be replaced by the real stream"
+            );
+        }
+
+        // Pictures.
+        if *document == Document::PowerPointBinary {
+            let pictures = read_stream(&mut out, "/Pictures").unwrap();
+            let blips = plain_blips(&pictures);
+            let kinds: Vec<(u16, u16)> = blips.iter().map(|(t, i, _)| (*t, *i)).collect();
+            assert_eq!(
+                kinds,
+                [(0xF01E, 0x6E0), (0xF01D, 0x46A), (0xF01A, 0x3D4)],
+                "{name}: a PNG, a JPEG and an EMF, as the generator inserts them"
+            );
+            assert_png_intact(&blips[0].2, name);
+            let jpeg = &blips[1].2;
+            assert_eq!(&jpeg[..2], b"\xFF\xD8", "{name}: JPEG SOI");
+            assert_eq!(&jpeg[jpeg.len() - 2..], b"\xFF\xD9", "{name}: JPEG EOI");
+        }
+
+        let c = classify(&plain);
+        assert_eq!(c.document, *document, "{name}");
+        assert_eq!(c.family, Family::Unencrypted, "{name}");
+
+        let out_path = std::env::temp_dir().join(format!("msoffice_crypto_decrypted_{name}"));
+        std::fs::write(&out_path, &plain).expect("the artifact must be writable");
+    }
+}
+
+/// The streams the independent implementation also decrypts agree with it byte for byte;
+/// the ones it leaves encrypted are checked above against their own formats instead.
+#[test]
+fn the_rich_fixtures_main_streams_match_msoffcrypto() {
+    for (name, stream, expected) in RICH_ORACLE_STREAMS {
+        let plain = decrypt_binary_office(&fixture(name), PASSWORD).unwrap();
+        let bytes = read_stream(&mut open(plain), stream)
+            .unwrap_or_else(|| panic!("{name}: {stream} must be present"));
+        assert_eq!(sha256_hex(&bytes), *expected, "{name}: {stream}");
+    }
+}
+
+/// The negative control for the four: the right password is what made them decrypt.
+#[test]
+fn the_rich_fixtures_refuse_a_wrong_password() {
+    for (name, document, _) in RICH {
+        let got = decrypt_binary_office(&fixture(name), "wrongpass").map(|p| p.len());
+        assert!(
+            matches!(got, Err(Error::WrongPassword)),
+            "{name}: expected WrongPassword, got {got:?}"
+        );
+        let c = classify(&fixture(name));
+        assert_eq!(c.document, *document, "{name}");
+        assert_eq!(c.family, Family::Rc4CryptoApi, "{name}");
+    }
+}
+
+/// The truncation sweep over the four, whose decrypt now reaches two more parsers: the
+/// `Pictures` walk and the encrypted summary stream.
+#[test]
+fn every_truncation_of_the_rich_fixtures_survives_without_panicking() {
+    for (name, _, _) in RICH {
+        let data = fixture(name);
+        let len = data.len();
+        for cut in [
+            0usize,
+            8,
+            512,
+            4096,
+            len / 4,
+            len / 2,
+            3 * len / 4,
+            len - 512,
+            len - 1,
+        ] {
+            let _ = decrypt_binary_office(&data[..cut], PASSWORD);
+            let _ = classify(&data[..cut]);
+        }
+    }
+}

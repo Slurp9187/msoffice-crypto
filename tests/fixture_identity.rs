@@ -25,7 +25,7 @@
 //!
 //! | where | which fixtures | visible to a raw scan? |
 //! |---|---|---|
-//! | `SummaryInformation` → `Author` / `LastAuthor` | every binary `.doc` / `.xls` / `.ppt` | **yes** — outside the encrypted region even in the password-protected ones |
+//! | `SummaryInformation` → `Author` / `LastAuthor` | every binary `.doc` / `.xls` / `.ppt` | **yes** — outside the encrypted region in the password-protected ones, except the three `*_encprops`, whose properties are encrypted and are reachable only through the decrypt |
 //! | `WriteAccess` (BIFF `0x005C`) in `Workbook` | every `.xls` | only while the workbook is unencrypted |
 //! | `SttbSavedBy` in `1Table`, UTF-16LE | every `.doc` | only while the document is unencrypted |
 //! | `docProps/core.xml` | the three Office-written agile packages | **no** — the payload is ciphertext, and `core.xml` is deflated inside it |
@@ -52,8 +52,13 @@ const OFFICE_WRITTEN: &[&str] = &[
     "excel97_plain.xls",
     "excel97_password.xls",
     "excel97_xor.xls",
+    "excel95_plain.xls",
     "powerpoint97_plain.ppt",
     "powerpoint97_password.ppt",
+    "powerpoint97_picture.ppt",
+    "word97_encprops.doc",
+    "excel97_encprops.xls",
+    "powerpoint97_encprops.ppt",
 ];
 
 /// `[MS-OLEPS]` §2.18: `Author` and `LastAuthor` in the `SummaryInformation` property set.

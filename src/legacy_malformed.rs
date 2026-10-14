@@ -748,3 +748,516 @@ fn something_that_is_not_a_binary_document_is_named() {
         Err(Error::NotACfbFile)
     ));
 }
+
+// ---- The encrypted summary stream ([MS-OFFCRYPTO] §2.3.5.4) ----------------------------
+//
+// Synthetic streams, encrypted here under a fixed salt with the crate's own RC4 (which
+// is its own inverse), so every field the parser reads can be set on purpose. The shape
+// is what Office writes — measured on the three `*_encprops` fixtures — and the control
+// `a_well_formed_encrypted_summary_decrypts` is that shape unpoisoned.
+
+mod encrypted_summary_input {
+    use crate::encrypted_summary::{
+        decrypt_stream, DOCUMENT_SUMMARY_INFORMATION, SUMMARY_INFORMATION,
+    };
+    use crate::rc4::decrypt_with_block;
+    use crate::rc4_cryptoapi::CryptoApiKeySchedule;
+    use crate::Error;
+
+    fn schedule() -> CryptoApiKeySchedule {
+        CryptoApiKeySchedule::new(super::PASSWORD, &[7u8; 16], 128).unwrap()
+    }
+
+    struct Desc {
+        offset: u32,
+        size: u32,
+        block: u16,
+        name: &'static str,
+        flags: u8,
+    }
+
+    fn descriptor_bytes(d: &Desc) -> Vec<u8> {
+        let units: Vec<u16> = d.name.encode_utf16().collect();
+        let mut out = Vec::new();
+        out.extend_from_slice(&d.offset.to_le_bytes());
+        out.extend_from_slice(&d.size.to_le_bytes());
+        out.extend_from_slice(&d.block.to_le_bytes());
+        out.push(units.len() as u8);
+        out.push(d.flags);
+        out.extend_from_slice(&[0; 4]);
+        for u in units {
+            out.extend_from_slice(&u.to_le_bytes());
+        }
+        out.extend_from_slice(&[0, 0]);
+        out
+    }
+
+    /// `streams` are written after the 8-byte prefix, each encrypted under the block its
+    /// descriptor names; `array_plain` and `prefix_plain` are encrypted under block 0.
+    fn assemble(
+        streams: &[(&[u8], u16)],
+        array_plain: &[u8],
+        prefix_plain: Option<[u32; 2]>,
+    ) -> Vec<u8> {
+        let s = schedule();
+        let mut body = Vec::new();
+        for (plain, block) in streams {
+            let mut b = plain.to_vec();
+            decrypt_with_block(&s, &mut b, u32::from(*block)).unwrap();
+            body.extend_from_slice(&b);
+        }
+        let array_offset = 8 + body.len() as u32;
+        let [off, size] = prefix_plain.unwrap_or([array_offset, array_plain.len() as u32]);
+        let mut prefix = [off.to_le_bytes(), size.to_le_bytes()].concat();
+        decrypt_with_block(&s, &mut prefix, 0).unwrap();
+        let mut array = array_plain.to_vec();
+        decrypt_with_block(&s, &mut array, 0).unwrap();
+        [prefix, body, array].concat()
+    }
+
+    fn array(count: u32, descs: &[Desc]) -> Vec<u8> {
+        let mut out = count.to_le_bytes().to_vec();
+        for d in descs {
+            out.extend_from_slice(&descriptor_bytes(d));
+        }
+        out
+    }
+
+    const SI: &[u8] = b"\xFE\xFF\x00\x00summary information";
+    const DSI: &[u8] = b"\xFE\xFF\x00\x00document summary information";
+
+    fn office_shape() -> Vec<Desc> {
+        vec![
+            Desc {
+                offset: 8,
+                size: SI.len() as u32,
+                block: 0,
+                name: "\u{5}SummaryInformation",
+                flags: 1,
+            },
+            Desc {
+                offset: 8 + SI.len() as u32,
+                size: DSI.len() as u32,
+                block: 1,
+                name: "\u{5}DocumentSummaryInformation",
+                flags: 1,
+            },
+        ]
+    }
+
+    fn run(
+        streams: &[(&[u8], u16)],
+        array_plain: &[u8],
+        prefix: Option<[u32; 2]>,
+    ) -> Result<Vec<(&'static str, Vec<u8>)>, Error> {
+        decrypt_stream(&assemble(streams, array_plain, prefix), &schedule())
+    }
+
+    fn bad_naming<T: std::fmt::Debug>(got: &Result<T, Error>, needle: &str) -> bool {
+        matches!(got, Err(Error::BadParameters(m)) if m.contains(needle))
+    }
+
+    #[test]
+    fn a_well_formed_encrypted_summary_decrypts() {
+        let got = run(&[(SI, 0), (DSI, 1)], &array(2, &office_shape()), None).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], (SUMMARY_INFORMATION, SI.to_vec()));
+        assert_eq!(got[1], (DOCUMENT_SUMMARY_INFORMATION, DSI.to_vec()));
+    }
+
+    #[test]
+    fn the_prefix_and_the_array_must_lie_inside_the_stream() {
+        let s = schedule();
+        let got = decrypt_stream(&[0u8; 7], &s);
+        assert!(bad_naming(&got, "alone take 8"), "{got:?}");
+
+        let arr = array(2, &office_shape());
+        let end = 8 + (SI.len() + DSI.len()) as u32;
+        // Past the end by one byte.
+        let got = run(
+            &[(SI, 0), (DSI, 1)],
+            &arr,
+            Some([end, arr.len() as u32 + 1]),
+        );
+        assert!(bad_naming(&got, "does not lie between"), "{got:?}");
+        // Inside the prefix.
+        let got = run(&[(SI, 0), (DSI, 1)], &arr, Some([4, arr.len() as u32]));
+        assert!(bad_naming(&got, "does not lie between"), "{got:?}");
+        // Wrapping.
+        let got = run(&[(SI, 0), (DSI, 1)], &arr, Some([u32::MAX, u32::MAX]));
+        assert!(bad_naming(&got, "does not lie between"), "{got:?}");
+        // Too small for its count.
+        let got = run(&[(SI, 0), (DSI, 1)], &arr, Some([end, 3]));
+        assert!(bad_naming(&got, "its count alone"), "{got:?}");
+    }
+
+    #[test]
+    fn the_count_is_bounded_by_the_array_before_any_descriptor_is_read() {
+        // A count the array could hold at its smallest descriptors, but these are not the
+        // smallest: the third runs off the end, and is named.
+        let got = run(&[(SI, 0), (DSI, 1)], &array(3, &office_shape()), None);
+        assert!(bad_naming(&got, "descriptor 2 is truncated"), "{got:?}");
+        // One it could not hold however short the names: refused before the loop.
+        let got = run(&[(SI, 0), (DSI, 1)], &array(1_000, &office_shape()), None);
+        assert!(
+            bad_naming(&got, "EncryptedStreamDescriptorCount is 1000"),
+            "{got:?}"
+        );
+        let got = run(
+            &[(SI, 0), (DSI, 1)],
+            &array(u32::MAX, &office_shape()),
+            None,
+        );
+        assert!(
+            bad_naming(&got, "EncryptedStreamDescriptorCount"),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn a_name_must_fit_the_array_and_be_terminated() {
+        let mut arr = array(2, &office_shape());
+        arr[4 + 10] = 200; // the first NameSize, past the array
+        let got = run(&[(SI, 0), (DSI, 1)], &arr, None);
+        assert!(
+            bad_naming(&got, "runs past the descriptor array"),
+            "{got:?}"
+        );
+
+        let mut arr = array(2, &office_shape());
+        let nul = 4 + 16 + 2 * "\u{5}SummaryInformation".encode_utf16().count();
+        arr[nul] = b'x';
+        let got = run(&[(SI, 0), (DSI, 1)], &arr, None);
+        assert!(bad_naming(&got, "not NUL-terminated"), "{got:?}");
+    }
+
+    #[test]
+    fn a_storage_or_a_foreign_stream_is_refused_by_name_not_skipped() {
+        let mut descs = office_shape();
+        descs[1].flags = 0;
+        let got = run(&[(SI, 0), (DSI, 1)], &array(2, &descs), None);
+        assert!(
+            matches!(got, Err(Error::UnsupportedEncryptedContent(m)) if m.contains("storage")),
+            "{got:?}"
+        );
+
+        let mut descs = office_shape();
+        descs[1].name = "\u{5}DocumentSummaryInformatioN";
+        let got = run(&[(SI, 0), (DSI, 1)], &array(2, &descs), None);
+        assert!(
+            matches!(got, Err(Error::UnsupportedEncryptedContent(m)) if m.contains("other than the two")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn stream_extents_are_bounded_unique_and_disjoint() {
+        let mut descs = office_shape();
+        descs[1].name = "\u{5}SummaryInformation";
+        let got = run(&[(SI, 0), (DSI, 1)], &array(2, &descs), None);
+        assert!(bad_naming(&got, "already named"), "{got:?}");
+
+        let mut descs = office_shape();
+        descs[1].size += 1; // into the descriptor array
+        let got = run(&[(SI, 0), (DSI, 1)], &array(2, &descs), None);
+        assert!(
+            bad_naming(&got, "does not lie between the prefix"),
+            "{got:?}"
+        );
+
+        let mut descs = office_shape();
+        descs[0].offset = 0; // over the prefix
+        let got = run(&[(SI, 0), (DSI, 1)], &array(2, &descs), None);
+        assert!(
+            bad_naming(&got, "does not lie between the prefix"),
+            "{got:?}"
+        );
+
+        let mut descs = office_shape();
+        descs[1].offset -= 1; // one byte into the first
+        let got = run(&[(SI, 0), (DSI, 1)], &array(2, &descs), None);
+        assert!(bad_naming(&got, "overlaps"), "{got:?}");
+    }
+
+    /// Each stream is read under its descriptor's block, not under the step-2 text's 0:
+    /// with the second descriptor claiming block 0, its bytes come back as noise.
+    #[test]
+    fn each_stream_is_decrypted_under_its_own_block() {
+        let mut descs = office_shape();
+        descs[1].block = 0;
+        let got = run(&[(SI, 0), (DSI, 1)], &array(2, &descs), None).unwrap();
+        assert_ne!(
+            got[1].1, DSI,
+            "block 1's bytes under block 0 must not decrypt"
+        );
+    }
+
+    /// The fixture whose header has `fDocProps` clear, with its `encryption` stream
+    /// removed: the properties have nowhere to come from, and the decrypt says which
+    /// stream is missing rather than returning a file with no properties at all.
+    #[test]
+    #[cfg_attr(
+        not(fixture_corpus),
+        ignore = "needs the fixture corpus, which the published crate does not ship"
+    )]
+    fn a_missing_encrypted_summary_stream_is_named() {
+        let mut cursor = std::io::Cursor::new(super::fixture("word97_encprops.doc"));
+        {
+            let mut cfb = cfb::CompoundFile::open(&mut cursor).unwrap();
+            cfb.remove_stream("/encryption").unwrap();
+            cfb.flush().unwrap();
+        }
+        let got = crate::decrypt_binary_office(&cursor.into_inner(), super::PASSWORD);
+        assert!(
+            matches!(got, Err(Error::MissingStream(m)) if m.starts_with("encryption")),
+            "{:?}",
+            got.map(|p| p.len())
+        );
+        // Control: the untouched fixture decrypts.
+        assert!(crate::decrypt_binary_office(
+            &super::fixture("word97_encprops.doc"),
+            super::PASSWORD
+        )
+        .is_ok());
+    }
+}
+
+// ---- The PowerPoint `Pictures` stream ([MS-PPT] §2.1.3) --------------------------------
+
+mod pictures_input {
+    use crate::powerpoint97::decrypt_pictures;
+    use crate::rc4::decrypt_with_block;
+    use crate::rc4_cryptoapi::CryptoApiKeySchedule;
+    use crate::Error;
+
+    fn schedule() -> CryptoApiKeySchedule {
+        CryptoApiKeySchedule::new(super::PASSWORD, &[9u8; 16], 128).unwrap()
+    }
+
+    /// One blip record, encrypted field by field the way PowerPoint writes it: the
+    /// header, then each fixed field, then the data, each from a fresh block-0 keystream.
+    fn blip(rec_type: u16, instance: u16, fields: &[&[u8]], rec_len: Option<u32>) -> Vec<u8> {
+        let s = schedule();
+        let body_len: usize = fields.iter().map(|f| f.len()).sum();
+        let ver_inst = instance << 4;
+        let mut header = [
+            ver_inst.to_le_bytes().as_slice(),
+            &rec_type.to_le_bytes(),
+            &rec_len.unwrap_or(body_len as u32).to_le_bytes(),
+        ]
+        .concat();
+        decrypt_with_block(&s, &mut header, 0).unwrap();
+        let mut out = header;
+        for f in fields {
+            let mut f = f.to_vec();
+            decrypt_with_block(&s, &mut f, 0).unwrap();
+            out.extend_from_slice(&f);
+        }
+        out
+    }
+
+    const UID: &[u8] = &[0xAB; 16];
+    const PNG_DATA: &[u8] = b"\x89PNG\r\n\x1a\nnot really a picture";
+
+    fn png() -> Vec<u8> {
+        blip(0xF01E, 0x6E0, &[UID, &[0xFF], PNG_DATA], None)
+    }
+
+    fn bad_naming(got: &Result<(), Error>, needle: &str) -> bool {
+        matches!(got, Err(Error::BadParameters(m)) if m.contains(needle))
+    }
+
+    #[test]
+    fn well_formed_blips_decrypt_field_by_field() {
+        // One UID and a tag; two UIDs (the odd instance) and a metafile header.
+        let header = [0x11u8; 34];
+        let mut stream = [
+            png(),
+            blip(0xF01A, 0x3D5, &[UID, UID, &header, b"emf bytes"], None),
+        ]
+        .concat();
+        decrypt_pictures(&schedule(), &mut stream).unwrap();
+        assert_eq!(&stream[8 + 16 + 1..8 + 16 + 1 + PNG_DATA.len()], PNG_DATA);
+        assert!(stream.ends_with(b"emf bytes"));
+        let emf_at = 8 + 16 + 1 + PNG_DATA.len();
+        assert_eq!(&stream[emf_at + 2..emf_at + 4], &0xF01Au16.to_le_bytes());
+        assert_eq!(&stream[emf_at + 8 + 32..emf_at + 8 + 32 + 34], &header);
+    }
+
+    #[test]
+    fn a_record_must_fit_the_stream() {
+        let mut stream = png();
+        stream.extend_from_slice(&[0; 5]);
+        let got = decrypt_pictures(&schedule(), &mut stream);
+        assert!(bad_naming(&got, "a record header takes 8"), "{got:?}");
+
+        let mut stream = blip(0xF01E, 0x6E0, &[UID, &[0xFF], PNG_DATA], Some(1_000));
+        let got = decrypt_pictures(&schedule(), &mut stream);
+        assert!(bad_naming(&got, "declares 1000 bytes"), "{got:?}");
+
+        let mut stream = blip(0xF01E, 0x6E0, &[&UID[..10]], None);
+        let got = decrypt_pictures(&schedule(), &mut stream);
+        assert!(bad_naming(&got, "shorter than its fixed fields"), "{got:?}");
+    }
+
+    #[test]
+    fn what_is_not_a_known_blip_is_refused_not_left_encrypted() {
+        let mut stream = blip(0xF007, 0x002, &[&[0; 36]], None);
+        let got = decrypt_pictures(&schedule(), &mut stream);
+        assert!(
+            matches!(got, Err(Error::UnsupportedEncryptedContent(m)) if m.contains("OfficeArtFBSE")),
+            "{got:?}"
+        );
+
+        let mut stream = blip(0xF020, 0x6E0, &[UID, &[0xFF]], None);
+        let got = decrypt_pictures(&schedule(), &mut stream);
+        assert!(
+            matches!(got, Err(Error::UnsupportedEncryptedContent(m)) if m.contains("does not define")),
+            "{got:?}"
+        );
+
+        let mut stream = blip(0x1234, 0, &[UID], None);
+        let got = decrypt_pictures(&schedule(), &mut stream);
+        assert!(bad_naming(&got, "neither a blip"), "{got:?}");
+
+        // A PNG with a JPEG's instance.
+        let mut stream = blip(0xF01E, 0x46A, &[UID, &[0xFF]], None);
+        let got = decrypt_pictures(&schedule(), &mut stream);
+        assert!(bad_naming(&got, "does not define for it"), "{got:?}");
+    }
+}
+
+// ---- Rights management and Word 6.0/95, refused by name (0.1.0-rc.6) -----------------
+
+mod refused_by_name {
+    use crate::Error;
+    use std::io::{Cursor, Seek, SeekFrom, Write};
+
+    fn add_stream(data: Vec<u8>, name: &str, bytes: &[u8]) -> Vec<u8> {
+        let mut cursor = Cursor::new(data);
+        {
+            let mut cfb = cfb::CompoundFile::open(&mut cursor).unwrap();
+            cfb.create_stream(name).unwrap().write_all(bytes).unwrap();
+            cfb.flush().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    /// The IRM placeholder is an unencrypted document, so without the rights-management
+    /// check the walk answers `NotEncrypted` and a caller keeps the placeholder.
+    #[test]
+    #[cfg_attr(
+        not(fixture_corpus),
+        ignore = "needs the fixture corpus, which the published crate does not ship"
+    )]
+    fn a_rights_managed_binary_document_is_refused_not_called_unencrypted() {
+        let plain = super::fixture("word97_plain.doc");
+        // Control: the placeholder alone.
+        assert!(matches!(
+            crate::decrypt_binary_office(&plain, super::PASSWORD),
+            Err(Error::NotEncrypted)
+        ));
+        let irm = add_stream(plain, "/\u{9}DRMContent", &[0u8; 512]);
+        let got = crate::decrypt_binary_office(&irm, super::PASSWORD).map(|p| p.len());
+        assert!(
+            matches!(got, Err(Error::UnsupportedEncryptedContent(m)) if m.contains("IRM")),
+            "{got:?}"
+        );
+    }
+
+    /// The Excel 5.0/95 workbook Excel 16 writes: refused by name, not misread as BIFF8
+    /// and not called unencrypted.
+    #[test]
+    #[cfg_attr(
+        not(fixture_corpus),
+        ignore = "needs the fixture corpus, which the published crate does not ship"
+    )]
+    fn an_excel_95_workbook_is_refused_by_name() {
+        let got =
+            crate::decrypt_binary_office(&super::fixture("excel95_plain.xls"), super::PASSWORD)
+                .map(|p| p.len());
+        assert!(
+            matches!(&got, Err(Error::UnsupportedAlgorithm { name, .. }) if name.contains("BIFF5")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(fixture_corpus),
+        ignore = "needs the fixture corpus, which the published crate does not ship"
+    )]
+    fn a_word_95_document_is_refused_by_name() {
+        for (fixture, n_fib, refused) in [
+            ("word97_plain.doc", 0x0069u16, true),
+            ("word97_password.doc", 0x0065, true),
+            // Control: the same edit to a Word 97 nFib is not this refusal.
+            ("word97_password.doc", 0x00C1, false),
+        ] {
+            let mut cursor = Cursor::new(super::fixture(fixture));
+            {
+                let mut cfb = cfb::CompoundFile::open(&mut cursor).unwrap();
+                let mut s = cfb.open_stream("/WordDocument").unwrap();
+                s.seek(SeekFrom::Start(2)).unwrap();
+                s.write_all(&n_fib.to_le_bytes()).unwrap();
+                s.flush().unwrap();
+            }
+            let got = crate::decrypt_binary_office(&cursor.into_inner(), super::PASSWORD)
+                .map(|p| p.len());
+            let is_refusal = matches!(
+                &got,
+                Err(Error::UnsupportedAlgorithm { name, .. }) if name.contains("Word 6.0/95")
+            );
+            assert_eq!(is_refusal, refused, "{fixture} nFib {n_fib:#06x}: {got:?}");
+        }
+    }
+
+    /// An IRM package has no `EncryptionInfo`; the OOXML path names rights management
+    /// rather than a missing stream.
+    #[test]
+    fn a_rights_managed_package_is_refused_by_the_ooxml_path_by_name() {
+        let mut cfb = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+        cfb.create_storage("/\u{6}DataSpaces").unwrap();
+        // One entry: EncryptedPackage -> DRMEncryptedDataSpace.
+        let mut map = 8u32.to_le_bytes().to_vec();
+        map.extend_from_slice(&1u32.to_le_bytes());
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&0u32.to_le_bytes());
+        for text in ["EncryptedPackage", "DRMEncryptedDataSpace"] {
+            let units: Vec<u16> = text.encode_utf16().collect();
+            let mut lp = ((units.len() * 2) as u32).to_le_bytes().to_vec();
+            units
+                .iter()
+                .for_each(|u| lp.extend_from_slice(&u.to_le_bytes()));
+            lp.resize(lp.len() + (4 - lp.len() % 4) % 4, 0);
+            body.extend_from_slice(&lp);
+        }
+        map.extend_from_slice(&((body.len() + 4) as u32).to_le_bytes());
+        map.extend_from_slice(&body);
+        cfb.create_stream("/\u{6}DataSpaces/DataSpaceMap")
+            .unwrap()
+            .write_all(&map)
+            .unwrap();
+        cfb.create_stream("/EncryptedPackage")
+            .unwrap()
+            .write_all(&[0u8; 64])
+            .unwrap();
+        cfb.flush().unwrap();
+        let irm = cfb.into_inner().into_inner();
+
+        let got = crate::decrypt_ooxml(&irm, super::PASSWORD).map(|p| p.len());
+        assert!(
+            matches!(&got, Err(Error::UnsupportedAlgorithm { name, .. }) if name.contains("IRM")),
+            "{got:?}"
+        );
+        // Control: the map removed, the same container is a missing EncryptionInfo.
+        let mut cursor = Cursor::new(irm);
+        {
+            let mut cfb = cfb::CompoundFile::open(&mut cursor).unwrap();
+            cfb.remove_stream("/\u{6}DataSpaces/DataSpaceMap").unwrap();
+            cfb.flush().unwrap();
+        }
+        let got = crate::decrypt_ooxml(&cursor.into_inner(), super::PASSWORD).map(|p| p.len());
+        assert!(matches!(got, Err(Error::MissingStream(_))), "{got:?}");
+    }
+}

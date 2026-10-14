@@ -304,6 +304,8 @@ fn document_name(d: Document) -> &'static str {
         Document::WordBinary => "word-binary",
         Document::ExcelBinary => "excel-binary",
         Document::PowerPointBinary => "powerpoint-binary",
+        Document::Word95Binary => "word95-binary",
+        Document::Excel95Binary => "excel95-binary",
         Document::Unknown => "unknown",
         _ => "unrecognised",
     }
@@ -331,6 +333,7 @@ fn family_name(f: Family) -> &'static str {
         Family::Rc4 => "rc4",
         Family::XorObfuscation => "xor-obfuscation",
         Family::Unsupported => "unsupported",
+        Family::Irm => "irm",
         Family::Unknown => "unknown",
         _ => "unrecognised",
     }
@@ -907,6 +910,15 @@ fn route_for(class: &Classification, policy: IntegrityPolicy) -> Result<Route, R
                 )
             }
         }
+        // Word 6.0/95 and Excel 5.0/95: recognised, and read by no decrypt path in any
+        // build, whatever their encryption says -- the library refuses both by name.
+        Document::Word95Binary | Document::Excel95Binary => refuse(
+            EX_UNSUPPORTED,
+            format!(
+                "a {} document, an edition before 97 that this crate does not read",
+                document_name(class.document)
+            ),
+        ),
         // `Document::Unknown` was answered above, so this is a variant added later.
         _ => refuse(
             EX_UNSUPPORTED,
@@ -1222,7 +1234,7 @@ fn describe(e: &Error) -> String {
 ///
 /// `_` is **7**, not the sibling's 6: 6 asserts a fact about the *file* that a gap in
 /// this table gives no basis for, while 7 says "this tool could not classify the
-/// failure", which is true. A nineteenth variant therefore lands on 7 with no compile
+/// failure", which is true. A twentieth variant therefore lands on 7 with no compile
 /// error here — the enum is `#[non_exhaustive]` and this is a separate crate — so the
 /// coverage half of the proof is the exhaustive canary in `src/error.rs`'s own
 /// `#[cfg(test)]` module, and the value half is `exit_codes_map_every_error_class`.
@@ -1236,6 +1248,10 @@ fn exit_code(e: &Error) -> u8 {
         // `cli` column, and copying the gate off a neighbouring arm breaks that build.
         #[cfg(feature = "legacy-binary")]
         Error::NotEncrypted => EX_REFUSED,
+        // Unsupported, not malformed: the file is consistent about content this build
+        // does not decrypt, and refusing beats handing back that content still encrypted.
+        #[cfg(feature = "legacy-binary")]
+        Error::UnsupportedEncryptedContent(_) => EX_UNSUPPORTED,
         Error::UnsupportedEncryptionVersion(_, _) => EX_UNSUPPORTED,
         Error::XmlParse(_) => EX_MALFORMED,
         Error::WrongPassword => EX_WRONG_PASSWORD,

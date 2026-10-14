@@ -12,9 +12,9 @@ Every encryption format the specification defines — OOXML and the 97-2003 bina
 documents alike — with **key material that zeroizes on drop**. What it writes is a subset
 of what it reads, and the table below says which.
 
-> **Status: release candidates on crates.io, no stable release.** This tree is
-> `0.1.0-rc.5` and is not released; `0.1.0-rc.4` is the newest on the registry. The API is
-> still free to break between candidates.
+> **Status: release candidates on crates.io, no stable release.** The API is still free to
+> break between candidates. The badge above is the newest on the registry; the version this
+> tree builds is the one in `Cargo.toml`.
 
 ## What it does
 
@@ -77,10 +77,10 @@ they cannot open.
 ```toml
 [dependencies]
 # Detection only — no cryptographic dependency.
-msoffice-crypto = "0.1.0-rc.5"
+msoffice-crypto = "0.1.0-rc.6"
 
 # Detection, decryption and encryption.
-msoffice-crypto = { version = "0.1.0-rc.5", features = ["crypto-ops"] }
+msoffice-crypto = { version = "0.1.0-rc.6", features = ["crypto-ops"] }
 ```
 
 Pre-release versions are not matched by ordinary requirements — name the full version as
@@ -160,7 +160,9 @@ that choosing it is a decision.
 
 **`legacy-binary`** is a superset of `crypto-ops` adding RC4 and MD5, and decrypts a
 97-2003 document *in place* — the same CFB container with its encrypted streams replaced,
-which is what Word, Excel and PowerPoint open:
+pictures and encrypted document properties included, which is what Word, Excel and
+PowerPoint open. Nothing the password covers is left encrypted: content of a kind it does
+not decrypt, and rights-managed (IRM) documents, are refused by name:
 
 ```rust,no_run
 use msoffice_crypto::{classify, decrypt_binary_office, Document};
@@ -168,7 +170,8 @@ use msoffice_crypto::{classify, decrypt_binary_office, Document};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = std::fs::read("protected.doc")?;
     if classify(&data).document == Document::WordBinary {
-        // byte for byte what msoffcrypto-tool writes
+        // the main streams byte for byte what msoffcrypto-tool writes; the pictures and
+        // properties it leaves encrypted come back in the clear too
         let doc = decrypt_binary_office(&data, "correct horse battery staple")?;
         std::fs::write("unlocked.doc", doc)?;
     }
@@ -269,7 +272,7 @@ A CLI that returns 1 for everything cannot be scripted.
 | 6 | malformed or hostile file | `MissingStream`, `XmlParse`, `BadParameters`, `CipherError` |
 | 7 | internal invariant violated | `RandomSource` |
 | 8 | **integrity** | `IntegrityCheckFailed`, `IntegrityElementMissing`, `IntegrityUnavailable` |
-| 9 | **unsupported encryption** | `UnsupportedEncryptionVersion`, `UnsupportedAlgorithm`, `Family::Unsupported`, a legacy family without `legacy-binary` |
+| 9 | **unsupported encryption** | `UnsupportedEncryptionVersion`, `UnsupportedAlgorithm`, `UnsupportedEncryptedContent`, `Family::Unsupported`, `Family::Irm`, a Word 6.0/95 or Excel 5.0/95 document, a legacy family without `legacy-binary` |
 
 8 is not folded into 4 or 6, and 9 is not folded into 5, for the reason the library keeps
 `WrongPassword` and `IntegrityCheckFailed` apart: at a process boundary the number is all a

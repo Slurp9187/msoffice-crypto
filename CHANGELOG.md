@@ -22,6 +22,121 @@ What survives that move is in two places, deliberately:
 
 ---
 
+## [0.1.0-rc.6] - Unreleased
+
+### `decrypt_binary_office` no longer hands back ciphertext inside a "plain" file
+
+Two kinds of content the password covers were left encrypted in the output, and nothing
+said so:
+
+- **A `.ppt`'s pictures.** The `Pictures` stream ([MS-PPT] §2.1.3) was never decrypted.
+- **Encrypted document properties.** When an RC4 CryptoAPI header has `fDocProps` clear,
+  in all three formats, the properties travel in an encrypted summary stream
+  ([MS-OFFCRYPTO] §2.3.5.4), and it was copied through as it was.
+
+A caller that kept only the output and dropped the original lost both for good. That is
+what EFV's Strip does, and it found this. Both now come back in the clear:
+- **The pictures** are decrypted in place.
+- **The summary stream** is removed, `\x05SummaryInformation` is written back, and the
+  stub `\x05DocumentSummaryInformation` is replaced by the real one.
+
+msoffcrypto-tool decrypts neither part (`ppt97.py:793-794`, two TODOs), so on these files
+this crate's output is no longer the oracle's. The main streams still match it byte for
+byte, and the test says which streams are compared.
+
+What Office writes is what is decrypted; the format permits more, and that is refused rather
+than passed through. **Breaking:** a new `Error::UnsupportedEncryptedContent(&'static str)`
+(`legacy-binary`, CLI exit 9) for a storage or a foreign stream inside the encrypted summary
+stream, and for a `Pictures` record that is not a blip [MS-ODRAW] defines. A file whose header
+says the properties are encrypted and whose summary stream is missing is
+`Error::MissingStream`.
+
+No permissive implementation exists to port, so the spec's ambiguities were settled on
+Office's own output, measured 2026-10-14 on Microsoft 365 16.0.19127.20800:
+- **The stream's name:** "specified by the application". Word and Excel call it
+  `encryption`, PowerPoint `EncryptedSummary`.
+- **The 8-byte array offset and size are themselves encrypted** under block 0. Read in
+  the clear they are noise.
+- **The two property sets sit at blocks 0 and 1**, as each descriptor says.
+- **Picture fields:** the keystream restarts at every field of every picture, the
+  record header included. Decrypting the body as one run gives noise.
+
+### The fixtures that showed it, and how Office 16 writes them
+
+`tools/gen_password_binary_fixtures.ps1` writes four:
+- `powerpoint97_picture.ppt`: a PNG, a JPEG and an EMF, properties in the clear;
+- `word97_encprops.doc`, `excel97_encprops.xls` and `powerpoint97_encprops.ppt`:
+  pictures and encrypted properties.
+
+Each carries a probe Title and a probe custom property. Office 16 accepts
+`SetPasswordEncryptionOptions`' fourth argument, reads it back as True, and ignores it. It
+honors only the "Encrypt document properties" setting, `EncryptDocProps`, under
+`HKCU\Software\Microsoft\Office\16.0\Common\Security`. The script sets that around the three
+saves and restores it.
+
+### Rights management, Word 6.0/95 and Excel 5.0/95 are named
+
+**Breaking, and silently so for a `match` with a catch-all.** These are the shapes the rc.3
+`OoxmlPackage` narrowing had:
+
+- **`Family::Irm`** (new). A rights-managed document was misreported in two ways before:
+  - An IRM package has no `EncryptionInfo`, so it classified as `Unknown`.
+  - An IRM `.doc`, `.xls` or `.ppt` carries an unencrypted placeholder beside its
+    `\x09DRMContent` stream. It classified as `Unencrypted`, and `decrypt_binary_office`
+    answered `NotEncrypted`, which tells a caller to keep the placeholder in place of the
+    document.
+
+  Both kinds are now read from `\x06DataSpaces\DataSpaceMap` ([MS-OFFCRYPTO] §2.1.6, §2.2).
+  Both decrypt functions refuse them by name: `decrypt_binary_office` with
+  `UnsupportedEncryptedContent`, `decrypt_ooxml` with `UnsupportedAlgorithm`.
+- **`Document::Word95Binary`** (new): `FibBase.nFib` 0x0065 to 0x0069, LibreOffice's
+  ranges (`ww8scan.cxx:5862-5876`). It was `WordBinary`. `decrypt_binary_office` refuses
+  it by name, as `UnsupportedAlgorithm`.
+- **`Document::Excel95Binary`** (new): a BIFF5 workbook in a `Book` stream. It was
+  `ExcelBinary`. The refusal it already had is unchanged.
+
+The CLI spells them `irm`, `word95-binary` and `excel95-binary`.
+
+### Evidence
+
+Real readers, measured 2026-10-14 against Microsoft 365 16.0.19127.20800 with
+`tools/office_com_check_binary.ps1`. Each decrypted artifact opens with no password and must
+show what its encrypted fixture shows with the password: its pictures, its Title, and its
+custom property. That property lives only in `\x05DocumentSummaryInformation`.
+
+| decrypted artifact | SHA-256 | Word / Excel / PowerPoint |
+| --- | --- | --- |
+| `word97_encprops.doc` | `9c65097a…51a13f` | PASS: 1 picture, Title, custom property |
+| `excel97_encprops.xls` | `98cd5b66…04b68e` | PASS: 1 picture, Title, custom property |
+| `powerpoint97_picture.ppt` | `980d45ad…7682e4` | PASS: 3 pictures, exports SHA-256-identical to the control's |
+| `powerpoint97_encprops.ppt` | `afc43b69…069fed` | PASS: 3 pictures, identical exports, Title, custom property |
+
+The same check run on rc.5's output for the same four files fails all four:
+- Word and Excel: the custom property is absent.
+- Both PowerPoint files: every export is the same 407-byte placeholder.
+- `powerpoint97_encprops`: the Title is gone as well.
+
+Two signals were found not to discriminate:
+- **Word's Title:** Word also keeps the Title in the table stream and showed it from
+  rc.5's output.
+- **A non-empty picture export:** PowerPoint exports a placeholder rather than failing.
+
+So neither is what the check rests on.
+
+The encrypt path did not change in this release. The four-reader gate (`tools/acceptance_gate.py`)
+was still re-run on this tree's `encrypt_ooxml` artifact, SHA-256 `8af66b43…6ddf2e`, on
+2026-10-14:
+
+| reader | verdict |
+| --- | --- |
+| Word 16.0.19127 | PASS: opened with the password, content matches; wrong password refused `0x800A1520` |
+| LibreOffice 26.8.0.3 | PASS: opened, content matches; wrong password refused |
+| msoffcrypto-tool 6.0.0 | PASS: byte-identical, `dataIntegrity` HMAC verifies, wrong password refused |
+| office-crypto 0.3 | PASS: byte-identical |
+
+The Word leg ran under Windows PowerShell through `MSOFFICE_CRYPTO_PWSH=powershell.exe`,
+because this machine has no `pwsh`, in a second invocation on the same artifact.
+
 ## [0.1.0-rc.5] - 2026-09-29
 
 ### The README described a crate two releases old
@@ -1531,8 +1646,10 @@ job is parsing bytes an attacker chose — and, as usefully, what does not.
 [MS-OFFCRYPTO]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-offcrypto/
 [MS-CFB]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/
 [MS-PPT]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-ppt/
+[MS-ODRAW]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-odraw/
+[0.1.0-rc.6]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.5...main
 [0.1.0-rc.4]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.3...v0.1.0-rc.4
 [0.1.0-rc.3]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.2...v0.1.0-rc.3
 [0.1.0-rc.2]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.1...v0.1.0-rc.2
 [0.1.0-rc.1]: https://github.com/Slurp9187/msoffice-crypto/tree/v0.1.0-rc.1
-[0.1.0-rc.5]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.4...main
+[0.1.0-rc.5]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.4...v0.1.0-rc.5

@@ -292,6 +292,13 @@ Defer:
 - Extensible, certificate encryptors, IRM
 - encrypt
 
+> **Where that list stands at 0.1.0-rc.6.** *PPT full fidelity* is done: the `Pictures`
+> stream and the RC4 CryptoAPI encrypted summary stream (all three formats) are decrypted,
+> which no other implementation in the table above does. *IRM* and *Office 95* (Word 6.0/95,
+> Excel 5.0/95) are detected and refused by name: `Family::Irm`,
+> `Document::Word95Binary`, `Document::Excel95Binary`. *encrypt* shipped for OOXML in rc.1.
+> Word XOR, extensible encryption and certificate encryptors remain refused.
+
 That covers every password-to-open Office document a user is realistically sent. Encrypt can stay a later crate (`ms-offcrypto-writer` already does modern Agile write).
 
 > **Correction — wrong for this crate, right for the one this was written for.** Encryption is

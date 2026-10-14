@@ -18,7 +18,7 @@
 /// § *Project Status*), and the obligation it leaves is to name the split in the changelog
 /// as a fact.
 ///
-/// Thirteen of the eighteen variants exist only under `crypto-ops`, one only under
+/// Thirteen of the nineteen variants exist only under `crypto-ops`, two only under
 /// `legacy-binary`, and so does the public re-export of the type itself. In a
 /// detection-only build no public function returns a `Result` — [`crate::classify()`]
 /// answers every input and [`crate::is_cfb_office()`] is a `bool` — so the type would be a
@@ -206,6 +206,23 @@ pub enum Error {
     /// internally consistent about something this crate has not implemented.
     #[error("unsupported or inconsistent encryption parameter: {0}")]
     BadParameters(String),
+
+    /// A legacy binary document carries encrypted content of a kind this crate does not
+    /// decrypt, so [`crate::decrypt_binary_office()`] refuses the file rather than return
+    /// one with that content still encrypted.
+    ///
+    /// The alternative is the defect this variant was added to end: until 0.1.0-rc.6 a
+    /// `.ppt`'s pictures and any CryptoAPI file's encrypted properties came back as
+    /// ciphertext inside an output that looked plain, and a caller that kept only the
+    /// output lost them for good. What is decrypted now is what Office writes; what the
+    /// format permits and no Office build was measured writing — a storage inside the
+    /// encrypted summary stream, a stream there other than the two property sets, a
+    /// `Pictures` record that is neither a blip nor a file-block entry — lands here.
+    ///
+    /// The payload is a fixed `&'static str` naming the kind, never file content.
+    #[error("the document holds encrypted content this crate does not decrypt: {0}")]
+    #[cfg(feature = "legacy-binary")]
+    UnsupportedEncryptedContent(&'static str),
 
     /// The file names an algorithm this crate does not implement.
     ///
@@ -826,7 +843,7 @@ impl core::fmt::Display for EncryptParamProblem {
 ///
 /// `src/bin/msoffice-crypto.rs` maps every [`Error`] to an exit code, and its `match`
 /// needs a `_` arm: the enum is `#[non_exhaustive]` and the binary is a separate crate.
-/// A `_` arm produces no diagnostic when a variant is added, so a nineteenth variant
+/// A `_` arm produces no diagnostic when a variant is added, so a twentieth variant
 /// would silently become exit 7 with nothing red anywhere.
 ///
 /// This table duplicates that one **without** a `_` arm, inside the defining crate,
@@ -850,6 +867,8 @@ mod exit_code_canary {
             Error::Io(_) => 2,
             #[cfg(feature = "legacy-binary")]
             Error::NotEncrypted => 5,
+            #[cfg(feature = "legacy-binary")]
+            Error::UnsupportedEncryptedContent(_) => 9,
             #[cfg(feature = "crypto-ops")]
             Error::UnsupportedEncryptionVersion(_, _) => 9,
             #[cfg(feature = "crypto-ops")]

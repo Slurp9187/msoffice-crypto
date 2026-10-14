@@ -68,9 +68,8 @@ pub(crate) struct CryptoApiHeader {
 
 impl CryptoApiHeader {
     /// `fDocProps` set: the document properties are **not** encrypted. When it is clear
-    /// the properties travel in an `EncryptedSummary` stream (§2.3.5.4) that this crate
-    /// does not decrypt — neither does msoffcrypto-tool, whose output this one matches.
-    #[allow(dead_code)]
+    /// they travel in an encrypted summary stream (§2.3.5.4), which `encrypted_summary`
+    /// decrypts back into the two property-set streams.
     pub(crate) fn doc_props_in_the_clear(&self) -> bool {
         self.flags & FLAG_DOC_PROPS != 0
     }
