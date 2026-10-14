@@ -243,6 +243,7 @@ spec or in a permissive reference. Cite where it came from.
 ```
 src/lib.rs             public API: classify, is_cfb_office, decrypt_ooxml, decrypt_ooxml_with_policy, check_encryptable, encrypt_ooxml, encrypt_ooxml_with_params, encrypt_ooxml_standard, decrypt_binary_office   (+ lib_tests.rs)
 src/classify.rs        detection; NEVER panics, returns Unknown        (+ classify_tests.rs)
+src/data_space_map.rs  rights management (IRM), read from \x06DataSpaces\DataSpaceMap   (+ data_space_map_tests.rs)
 src/binary_office.rs   legacy .doc/.xls/.ppt recognition, and the FIB / BIFF / persist-directory readers both probe and decrypt share
 src/agile.rs           ECMA-376 agile decrypt: parse, KDF, verifier, package
 src/standard.rs        ECMA-376 standard decrypt: parse, KDF, verifier, package — and the ECB helper the writer shares
@@ -262,12 +263,13 @@ src/encryption_info.rs the EncryptionInfo serialiser, byte-identical to Office's
 src/agile_encrypt.rs   the agile key schedule, the package encryptor, and the assembly behind encrypt_ooxml   (+ agile_encrypt_tests.rs)
 src/rc4.rs             RC4 over a wrapped key, the per-block loop, the verifier check   (legacy-binary, as are the seven below)
 src/rc4_cryptoapi.rs   RC4 CryptoAPI: header structure, key generation, password check  ([MS-OFFCRYPTO] 2.3.5)
+src/encrypted_summary.rs the encrypted summary stream back into the two property-set streams  (2.3.5.4)
 src/rc4_office97.rs    Office 97/2000 RC4: MD5 key generation, password check           (2.3.6)
 src/xor_obfuscation.rs XOR obfuscation Method 1: verifier, array, transformation       (2.3.7)
 src/legacy_container.rs the CFB a binary document is decrypted inside: capped reads, in-place rewrites
 src/word97.rs          the Word 97 walk: FIB, table stream, Data stream
 src/excel97.rs         the Excel 97 walk: FILEPASS, the record set kept in the clear
-src/powerpoint97.rs    the PowerPoint 97 walk: persist directory, CryptSession10Container, per-object keys
+src/powerpoint97.rs    the PowerPoint 97 walk: persist directory, CryptSession10Container, per-object keys, Pictures
 src/legacy_malformed.rs hostile-input tests for the three walks, on tampered fixtures and synthetic streams
 tests/real_office_fixtures.rs   the Office-written fixtures against an independent oracle
 tests/legacy_binary_fixtures.rs the binary fixtures, byte for byte against msoffcrypto-tool's output
