@@ -9,7 +9,7 @@
 //! crate's `cargo test` reports a missing corpus as "ignored, with a reason" rather than
 //! failing outright, and this file never reaches the tarball at all, so the concern does
 //! not apply — CLAUDE.md's Layout entry for this file says exactly that, and the pinned
-//! `#[cfg_attr(not(fixture_corpus), ignore)]` count of 30 stays untouched by anything
+//! `#[cfg_attr(not(fixture_corpus), ignore)]` count (42 at 0.1.0-rc.6) stays untouched by anything
 //! below.
 //!
 //! S4 makes `decrypt` real: dispatch on the classification, the `legacy-binary` arm

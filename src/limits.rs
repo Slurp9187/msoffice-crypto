@@ -123,8 +123,8 @@ pub(crate) const CURRENT_USER_READ_CAP: usize = 256;
 ///
 /// The map this crate writes for standard encryption is 112 bytes, one entry
 /// (`dataspaces::data_space_map`); an IRM file's carries one entry per protected stream,
-/// and the spec's two IRM shapes each have one. 4096 is over thirty times the measured
-/// entry, and a longer map is not read at all — `classify` then reports what the rest of
+/// and the spec's two IRM shapes each have one. 4096 is over thirty times that one-entry
+/// map, and a longer map is not read at all — `classify` then reports what the rest of
 /// the container says, which for a hostile map is no worse than its not being there.
 pub(crate) const DATA_SPACE_MAP_READ_CAP: usize = 4096;
 

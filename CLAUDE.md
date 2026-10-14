@@ -205,16 +205,18 @@ spec or in a permissive reference. Cite where it came from.
 ## Testing Rules
 
 - **Fixtures are not optional.** A missing fixture fails the test; it does not skip.
-  Fixtures live in `tests/fixtures/` and the password is `testpass`. Of the nineteen, the
+  Fixtures live in `tests/fixtures/` and the password is `testpass`. Of the twenty-four, the
   `include` allowlist ships **two** — the ones `classify`'s doc examples pull in with
-  `include_bytes!` — because the other seventeen were two thirds of the `.crate`.
+  `include_bytes!` — because the rest (seventeen, when the cut was made) were two thirds of
+  the `.crate`.
 - **The corpus tests are `#[ignore]`d where there is no corpus, never skipped silently.**
-  `build.rs` sets `cfg(fixture_corpus)` when it finds any of the seventeen withheld
-  fixtures, and the 33 corpus-dependent tests carry
+  `build.rs` sets `cfg(fixture_corpus)` when it finds any of the twenty-two withheld
+  fixtures, and the 42 corpus-dependent tests carry
   `#[cfg_attr(not(fixture_corpus), ignore = "…")]`. So the published crate's `cargo test` is
-  green with them reported as **ignored, with a reason**, while this repository runs all 33.
+  green with them reported as **ignored, with a reason**, while this repository runs all 42.
   (The count is a moving figure, not an invariant -- it was thirty until the v0.1.0-rc.3
-  classify work added three. The invariant is the two-way read below, which does not depend
+  classify work added three, and the rc.6 pictures, properties and IRM work took it to 42,
+  measured on the unpacked `.crate` as 42 ignored and here as 0. The invariant is the two-way read below, which does not depend
   on it.) An early `return` on a missing file would be the anti-pattern above wearing a hat.
   **Read the ignored count in both directions:** 0 in a tarball means the corpus leaked into
   the allowlist; anything but 0 here means a fixture is missing. A partial corpus counts as

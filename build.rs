@@ -5,8 +5,9 @@
 //! `include` in `Cargo.toml` ships `src/**/*.rs`, which carries this crate's `#[cfg(test)]`
 //! modules — `classify_tests.rs`, `legacy_malformed.rs`, the `tests` modules inside
 //! `lib.rs`, `integrity.rs`, `encryption_info.rs` and `standard_encrypt.rs`. Since
-//! 2026-09-05 it ships **2 of the 19 fixtures**, because the other 17 were two thirds of
-//! the `.crate` and the repository is where the evidence is checked.
+//! 2026-09-05 it ships **2 fixtures** — of 19 then, of 24 at 0.1.0-rc.6 — because the
+//! other 17 were two thirds of the `.crate` and the repository is where the evidence is
+//! checked.
 //!
 //! Those two facts together meant `cargo test` on the published crate reported **30
 //! failures**, every one of them `fixture ... must be present -- these tests are not

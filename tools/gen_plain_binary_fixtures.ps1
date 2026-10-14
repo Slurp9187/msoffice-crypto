@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Generate the four UNENCRYPTED 97-2003 binary fixtures in tests/fixtures/: Word, Excel
-    and PowerPoint 97-2003, and an Excel 5.0/95 workbook..
+    and PowerPoint 97-2003, and an Excel 5.0/95 workbook.
 
 .DESCRIPTION
     word97_plain.doc, excel97_plain.xls and powerpoint97_plain.ppt are the negative
