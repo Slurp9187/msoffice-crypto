@@ -22,7 +22,7 @@ What survives that move is in two places, deliberately:
 
 ---
 
-## [0.1.0-rc.6] - Unreleased
+## [0.1.0-rc.6] - 2026-10-14
 
 ### `decrypt_binary_office` no longer hands back ciphertext inside a "plain" file
 
