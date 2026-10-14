@@ -26,8 +26,12 @@
 //! The parse is tolerant, as everything `classify` runs is: a map it cannot read yields
 //! no names, never an error and never a panic, and a stream over
 //! [`DATA_SPACE_MAP_READ_CAP`] is not read at all. Every length is checked before it
-//! indexes; each entry advances by its own declared length, which is at least the 12
-//! bytes of its fixed fields, so the walk ends.
+//! indexes, and a name is read only from inside its entry's declared extent. That is
+//! also why the walk ends: an entry yields its name only when its extent holds the 8
+//! bytes of fixed fields and a 4-byte length prefix, and the walk then advances past
+//! it; any entry that does not is the end of the walk. (A separate `Length >= 12` check
+//! stood here and was removed: deleting it failed no test, because the extent check
+//! below already refuses everything it refused.)
 
 use crate::cfb_reader::read_capped;
 use crate::limits::DATA_SPACE_MAP_READ_CAP;
@@ -46,8 +50,6 @@ const BINARY_DATA_SPACES: [&str; 2] = ["\u{9}DRMDataSpace", "\u{9}LZXDRMDataSpac
 const HEADER_LENGTH: u32 = 8;
 /// A `DataSpaceMapEntry`'s `Length` and `ReferenceComponentCount`, before its components.
 const ENTRY_FIXED_LEN: usize = 8;
-/// The smallest entry: the fixed fields and an empty `DataSpaceName`'s length prefix.
-const ENTRY_MIN_LEN: usize = ENTRY_FIXED_LEN + 4;
 
 /// Which kind of rights-managed document a container is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,15 +126,15 @@ pub(crate) fn data_space_names(map: &[u8]) -> Vec<String> {
     };
     let mut at = HEADER_LENGTH as usize;
     for _ in 0..count {
-        // `Length` counts the whole entry, itself included (the writer in `dataspaces`
-        // does the same, and Office's 104-byte entry is the measured case).
+        // `Length` counts the whole entry, itself included, as the writer in
+        // `dataspaces` writes it and Word, Excel and PowerPoint read it.
         let Some(entry_len) = le32(map, at).and_then(|n| usize::try_from(n).ok()) else {
             break;
         };
         let Some(end) = at.checked_add(entry_len) else {
             break;
         };
-        if entry_len < ENTRY_MIN_LEN || end > map.len() {
+        if end > map.len() {
             break;
         }
         let Some(components) = le32(map, at + 4) else {
