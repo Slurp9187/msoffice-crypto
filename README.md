@@ -12,9 +12,9 @@ Every encryption format the specification defines — OOXML and the 97-2003 bina
 documents alike — with **key material that zeroizes on drop**. What it writes is a subset
 of what it reads, and the table below says which.
 
-> **Status: release candidates on crates.io, no stable release.** This tree is
-> `0.1.0-rc.5` and is not released; `0.1.0-rc.4` is the newest on the registry. The API is
-> still free to break between candidates.
+> **Status: release candidates on crates.io, no stable release.** The API is still free to
+> break between candidates. The badge above is the newest on the registry; the version this
+> tree builds is the one in `Cargo.toml`.
 
 ## What it does
 
@@ -77,7 +77,7 @@ they cannot open.
 ```toml
 [dependencies]
 # Detection only — no cryptographic dependency.
-msoffice-crypto = "0.1.0-rc.5"
+msoffice-crypto = "0.1.0-rc.6"
 
 # Detection, decryption and encryption.
 msoffice-crypto = { version = "0.1.0-rc.6", features = ["crypto-ops"] }
