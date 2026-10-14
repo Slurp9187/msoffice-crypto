@@ -30,7 +30,7 @@ use crate::error::Error;
 use crate::legacy_container::LegacyContainer;
 use crate::limits::ENCRYPTION_HEADER_STRUCTURE_MAX;
 use crate::rc4::{self, BlockKeySchedule};
-use crate::{rc4_cryptoapi, rc4_office97};
+use crate::{encrypted_summary, rc4_cryptoapi, rc4_office97};
 
 /// [MS-DOC] §2.2.6.2 / §2.2.6.3: 512-byte blocks.
 const BLOCK_SIZE: usize = 0x200;
@@ -77,7 +77,9 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
     };
 
     // [MS-DOC] §2.2.6: EncryptionVersionInfo names the family.
-    let schedule: Box<dyn BlockKeySchedule> = match (
+    // `doc_props_in_the_clear` is false only for a CryptoAPI header with `fDocProps`
+    // clear; Office 97/2000 RC4 has no flags and no encrypted summary.
+    let (schedule, doc_props_in_the_clear): (Box<dyn BlockKeySchedule>, bool) = match (
         binary_office::le16(structure, 0),
         binary_office::le16(structure, 2),
     ) {
@@ -85,14 +87,14 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
             let header = rc4_office97::parse(structure)?;
             let schedule = rc4_office97::Office97KeySchedule::new(password, &header.salt);
             schedule.verify(&header)?;
-            Box::new(schedule)
+            (Box::new(schedule), true)
         }
         (Some(2..=4), Some(2)) => {
             let header = rc4_cryptoapi::parse(structure)?;
             let schedule =
                 rc4_cryptoapi::CryptoApiKeySchedule::new(password, &header.salt, header.key_bits)?;
             schedule.verify(&header)?;
-            Box::new(schedule)
+            (Box::new(schedule), header.doc_props_in_the_clear())
         }
         (Some(major), Some(minor)) => {
             return Err(Error::UnsupportedEncryptionVersion(major, minor))
@@ -124,10 +126,23 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
         None
     };
 
+    let summary = if doc_props_in_the_clear {
+        None
+    } else {
+        Some(encrypted_summary::decrypt(
+            container,
+            schedule.as_ref(),
+            encrypted_summary::WORD_EXCEL_STREAM,
+        )?)
+    };
+
     container.overwrite(WORD_DOCUMENT, &word_plain)?;
     container.overwrite(table_name, &table_plain)?;
     if let Some(data) = data_plain {
         container.overwrite(DATA, &data)?;
+    }
+    if let Some(summary) = summary {
+        summary.write(container)?;
     }
     Ok(())
 }

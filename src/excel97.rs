@@ -36,7 +36,7 @@ use crate::error::Error;
 use crate::legacy_container::LegacyContainer;
 use crate::rc4::{self, BlockKeySchedule};
 use crate::xor_obfuscation::XorObfuscator;
-use crate::{rc4_cryptoapi, rc4_office97};
+use crate::{encrypted_summary, rc4_cryptoapi, rc4_office97};
 
 /// [MS-XLS] §2.2.10: 1024-byte blocks.
 const BLOCK_SIZE: usize = 1024;
@@ -48,7 +48,9 @@ const ENCRYPTION_TYPE_RC4: u16 = 0x0001;
 
 enum Scheme {
     Xor(XorObfuscator),
-    Rc4(Box<dyn BlockKeySchedule>),
+    /// The schedule, and whether the properties are in the clear: false only for a
+    /// CryptoAPI header with `fDocProps` clear.
+    Rc4(Box<dyn BlockKeySchedule>, bool),
 }
 
 /// Decrypt the container in place. The container is left untouched on any error.
@@ -140,7 +142,7 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
         Some(ENCRYPTION_TYPE_RC4) => {
             let structure = &filepass[2..];
             // §2.4.117: the first two bytes of the header structure choose the family.
-            let schedule: Box<dyn BlockKeySchedule> = match (
+            let (schedule, doc_props_in_the_clear): (Box<dyn BlockKeySchedule>, bool) = match (
                 binary_office::le16(structure, 0),
                 binary_office::le16(structure, 2),
             ) {
@@ -148,7 +150,7 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
                     let header = rc4_office97::parse(structure)?;
                     let schedule = rc4_office97::Office97KeySchedule::new(password, &header.salt);
                     schedule.verify(&header)?;
-                    Box::new(schedule)
+                    (Box::new(schedule), true)
                 }
                 (Some(2..=4), Some(2)) => {
                     let header = rc4_cryptoapi::parse(structure)?;
@@ -158,7 +160,7 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
                         header.key_bits,
                     )?;
                     schedule.verify(&header)?;
-                    Box::new(schedule)
+                    (Box::new(schedule), header.doc_props_in_the_clear())
                 }
                 (Some(major), Some(minor)) => {
                     return Err(Error::UnsupportedEncryptionVersion(major, minor))
@@ -169,7 +171,7 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
                     ))
                 }
             };
-            Scheme::Rc4(schedule)
+            Scheme::Rc4(schedule, doc_props_in_the_clear)
         }
         Some(other) => {
             return Err(Error::BadParameters(format!(
@@ -185,7 +187,7 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
 
     let mut plain = book.clone();
     match &scheme {
-        Scheme::Rc4(schedule) => {
+        Scheme::Rc4(schedule, _) => {
             // One keystream over the whole stream; then every byte the format keeps in
             // the clear is restored from the original.
             rc4::decrypt_in_blocks(schedule.as_ref(), &mut plain, BLOCK_SIZE)?;
@@ -218,7 +220,19 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
     plain[fp.body.start - 4..fp.body.start - 2].fill(0);
     plain[fp.body.clone()].fill(0);
 
+    let summary = match &scheme {
+        Scheme::Rc4(schedule, false) => Some(encrypted_summary::decrypt(
+            container,
+            schedule.as_ref(),
+            encrypted_summary::WORD_EXCEL_STREAM,
+        )?),
+        _ => None,
+    };
+
     container.overwrite(name, &plain)?;
+    if let Some(summary) = summary {
+        summary.write(container)?;
+    }
     Ok(())
 }
 

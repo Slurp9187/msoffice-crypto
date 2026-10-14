@@ -205,6 +205,145 @@ try {
     [GC]::Collect(); [GC]::WaitForPendingFinalizers()
 }
 
+# ---- Pictures and encrypted properties (0.1.0-rc.6) -----------------------------------
+# The four fixtures tools/gen_password_binary_fixtures.ps1 writes. The checks above
+# assert text; these assert what the decrypt used to leave encrypted -- the pictures and
+# the document properties -- so a decrypt that dropped either fails here by name.
+#
+# Each encrypted fixture opened WITH the password runs first and is the control: what it
+# shows is the expectation. Each decrypted artifact then opens with NO password and must
+# show the same. Two things that look like evidence and are not, both measured on
+# 0.1.0-rc.5's output, which still had them encrypted:
+#
+#   - the Title. Word also keeps it in the table stream's associated strings and showed
+#     it from rc.5's output; Excel and PowerPoint did not. So every format is checked
+#     for a custom property too, which only \005DocumentSummaryInformation carries.
+#   - a picture that is present and exports. From rc.5's output PowerPoint still showed
+#     three pictures and exported each -- as the same 407-byte placeholder. So each
+#     export is compared, by SHA-256, with the control's export of the same shape.
+$probeTitle = 'msoffice-crypto summary probe'
+$probeCustom = 'document summary probe'
+function Get-Title($item) {
+    $props = $item.BuiltInDocumentProperties
+    $prop = [System.__ComObject].InvokeMember('Item', 'GetProperty', $null, $props, @('Title'))
+    return [string][System.__ComObject].InvokeMember('Value', 'GetProperty', $null, $prop, $null)
+}
+function Get-Custom($item) {
+    try {
+        $props = $item.CustomDocumentProperties
+        $prop = [System.__ComObject].InvokeMember('Item', 'GetProperty', $null, $props, @('msoffice-crypto probe'))
+        return [string][System.__ComObject].InvokeMember('Value', 'GetProperty', $null, $prop, $null)
+    } catch {
+        return '<absent>'
+    }
+}
+function Properties-Ok($item) {
+    $title = Get-Title $item
+    $custom = Get-Custom $item
+    return @{ ok = ($title -eq $probeTitle) -and ($custom -eq $probeCustom); text = "Title = '$title'; custom = '$custom'" }
+}
+
+$word = $null
+try {
+    $word = New-Object -ComObject Word.Application
+    $word.Visible = $false
+    $word.DisplayAlerts = 0
+    foreach ($case in @(
+        @{ label = 'word97 encprops fixture, right password (control)'; path = (Fixture 'word97_encprops.doc'); pw = $Password },
+        @{ label = 'word97 encprops decrypted, NO password'; path = (Artifact 'word97_encprops.doc'); pw = $null }
+    )) {
+        $doc = $null
+        try {
+            if ($case.pw -eq $null) { $doc = $word.Documents.Open($case.path, $false, $true, $false) }
+            else { $doc = $word.Documents.Open($case.path, $false, $true, $false, $case.pw) }
+            $pictures = $doc.InlineShapes.Count
+            $p = Properties-Ok $doc
+            Report $case.label (($pictures -eq 1) -and $p.ok) "opened; pictures = $pictures; $($p.text)"
+        } catch {
+            Report $case.label $false "REFUSED $(HResultHex $_) $($_.Exception.Message)"
+        } finally {
+            if ($doc) { $doc.Close(0); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($doc) }
+        }
+    }
+} finally {
+    if ($word) { $word.Quit(); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($word) }
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+}
+
+$excel = $null
+try {
+    $excel = New-Object -ComObject Excel.Application
+    $excel.Visible = $false
+    $excel.DisplayAlerts = $false
+    foreach ($case in @(
+        @{ label = 'excel97 encprops fixture, right password (control)'; path = (Fixture 'excel97_encprops.xls'); pw = $Password },
+        @{ label = 'excel97 encprops decrypted, NO password'; path = (Artifact 'excel97_encprops.xls'); pw = $null }
+    )) {
+        $wb = $null
+        try {
+            if ($case.pw -eq $null) { $wb = $excel.Workbooks.Open($case.path, 0, $true) }
+            else { $wb = $excel.Workbooks.Open($case.path, 0, $true, 5, $case.pw) }
+            $pictures = $wb.Worksheets.Item(1).Shapes.Count
+            $p = Properties-Ok $wb
+            Report $case.label (($pictures -eq 1) -and $p.ok) "opened; pictures = $pictures; $($p.text)"
+        } catch {
+            Report $case.label $false "REFUSED $(HResultHex $_) $($_.Exception.Message)"
+        } finally {
+            if ($wb) { $wb.Close($false); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($wb) }
+        }
+    }
+} finally {
+    if ($excel) { $excel.Quit(); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($excel) }
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+}
+
+$ppt = $null
+try {
+    $ppt = New-Object -ComObject PowerPoint.Application
+    $expectedExports = @{}
+    foreach ($case in @(
+        @{ label = 'powerpoint97 picture fixture, right password (control)'; fixture = 'powerpoint97_picture.ppt'; path = (Fixture 'powerpoint97_picture.ppt'); pw = $Password },
+        @{ label = 'powerpoint97 picture decrypted, NO password'; fixture = 'powerpoint97_picture.ppt'; path = (Artifact 'powerpoint97_picture.ppt'); pw = $null },
+        @{ label = 'powerpoint97 encprops fixture, right password (control)'; fixture = 'powerpoint97_encprops.ppt'; path = (Fixture 'powerpoint97_encprops.ppt'); pw = $Password },
+        @{ label = 'powerpoint97 encprops decrypted, NO password'; fixture = 'powerpoint97_encprops.ppt'; path = (Artifact 'powerpoint97_encprops.ppt'); pw = $null }
+    )) {
+        $pres = $null
+        try {
+            $name = if ($case.pw -eq $null) { $case.path } else { "$($case.path)::$($case.pw)::" }
+            $pres = $ppt.Presentations.Open($name, -1, 0, 0)
+            # msoPicture = 13. Three: the PNG, the JPEG and the EMF the generator inserts.
+            # ppShapeFormatPNG = 2.
+            $hashes = @()
+            foreach ($shape in $pres.Slides.Item(1).Shapes) {
+                if ($shape.Type -ne 13) { continue }
+                $out = Join-Path ([IO.Path]::GetTempPath()) "msoffice_crypto_reader_export_$($hashes.Count).png"
+                if (Test-Path $out) { Remove-Item $out -Force }
+                $shape.Export($out, 2)
+                $hashes += if (Test-Path $out) { (Get-FileHash $out -Algorithm SHA256).Hash } else { '<no export>' }
+                if (Test-Path $out) { Remove-Item $out -Force }
+            }
+            $p = Properties-Ok $pres
+            if ($case.pw -ne $null) {
+                $expectedExports[$case.fixture] = $hashes
+                $ok = ($hashes.Count -eq 3) -and $p.ok
+                Report $case.label $ok "opened; pictures = $($hashes.Count); $($p.text)"
+            } else {
+                $expected = $expectedExports[$case.fixture]
+                $same = ($expected -ne $null) -and (($hashes -join ',') -eq ($expected -join ','))
+                $short = ($hashes | ForEach-Object { $_.Substring(0, [Math]::Min(12, $_.Length)) }) -join ' '
+                Report $case.label ($same -and $p.ok) "opened; pictures = $($hashes.Count); exports identical to the control: $same ($short); $($p.text)"
+            }
+        } catch {
+            Report $case.label $false "REFUSED $(HResultHex $_) $($_.Exception.Message)"
+        } finally {
+            if ($pres) { $pres.Close(); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($pres) }
+        }
+    }
+} finally {
+    if ($ppt) { $ppt.Quit(); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($ppt) }
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+}
+
 $deadline = (Get-Date).AddSeconds(20)
 do {
     $leaked = Get-Process -Name WINWORD, EXCEL, POWERPNT -ErrorAction SilentlyContinue

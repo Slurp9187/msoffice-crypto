@@ -132,6 +132,11 @@ fn exit_codes_map_every_error_class() {
         exit_code(&Error::UnsupportedEncryptionVersion(4, 3)),
         EX_UNSUPPORTED
     );
+    #[cfg(feature = "legacy-binary")]
+    assert_eq!(
+        exit_code(&Error::UnsupportedEncryptedContent("x")),
+        EX_UNSUPPORTED
+    );
     assert_eq!(exit_code(&Error::XmlParse(String::new())), EX_MALFORMED);
     assert_eq!(exit_code(&Error::WrongPassword), EX_WRONG_PASSWORD);
     assert_eq!(exit_code(&Error::CipherError), EX_MALFORMED);

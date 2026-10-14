@@ -1222,7 +1222,7 @@ fn describe(e: &Error) -> String {
 ///
 /// `_` is **7**, not the sibling's 6: 6 asserts a fact about the *file* that a gap in
 /// this table gives no basis for, while 7 says "this tool could not classify the
-/// failure", which is true. A nineteenth variant therefore lands on 7 with no compile
+/// failure", which is true. A twentieth variant therefore lands on 7 with no compile
 /// error here — the enum is `#[non_exhaustive]` and this is a separate crate — so the
 /// coverage half of the proof is the exhaustive canary in `src/error.rs`'s own
 /// `#[cfg(test)]` module, and the value half is `exit_codes_map_every_error_class`.
@@ -1236,6 +1236,10 @@ fn exit_code(e: &Error) -> u8 {
         // `cli` column, and copying the gate off a neighbouring arm breaks that build.
         #[cfg(feature = "legacy-binary")]
         Error::NotEncrypted => EX_REFUSED,
+        // Unsupported, not malformed: the file is consistent about content this build
+        // does not decrypt, and refusing beats handing back that content still encrypted.
+        #[cfg(feature = "legacy-binary")]
+        Error::UnsupportedEncryptedContent(_) => EX_UNSUPPORTED,
         Error::UnsupportedEncryptionVersion(_, _) => EX_UNSUPPORTED,
         Error::XmlParse(_) => EX_MALFORMED,
         Error::WrongPassword => EX_WRONG_PASSWORD,
