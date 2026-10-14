@@ -47,6 +47,16 @@ impl LegacyContainer {
         binary_office::workbook_stream_name(&self.cfb)
     }
 
+    /// Whether the container is rights-managed: `data_space_map` says how that is read.
+    pub(crate) fn rights_managed(&mut self) -> bool {
+        crate::data_space_map::rights_management_in(&mut self.cfb).is_some()
+    }
+
+    /// Whether the `WordDocument` stream is Word 6.0/95's — `binary_office::word_is_pre_97`.
+    pub(crate) fn word_is_pre_97(&mut self) -> bool {
+        binary_office::word_is_pre_97(&mut self.cfb)
+    }
+
     pub(crate) fn exists(&self, name: &str) -> bool {
         self.cfb.exists(name)
     }

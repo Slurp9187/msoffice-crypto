@@ -304,6 +304,8 @@ fn document_name(d: Document) -> &'static str {
         Document::WordBinary => "word-binary",
         Document::ExcelBinary => "excel-binary",
         Document::PowerPointBinary => "powerpoint-binary",
+        Document::Word95Binary => "word95-binary",
+        Document::Excel95Binary => "excel95-binary",
         Document::Unknown => "unknown",
         _ => "unrecognised",
     }
@@ -331,6 +333,7 @@ fn family_name(f: Family) -> &'static str {
         Family::Rc4 => "rc4",
         Family::XorObfuscation => "xor-obfuscation",
         Family::Unsupported => "unsupported",
+        Family::Irm => "irm",
         Family::Unknown => "unknown",
         _ => "unrecognised",
     }
@@ -907,6 +910,15 @@ fn route_for(class: &Classification, policy: IntegrityPolicy) -> Result<Route, R
                 )
             }
         }
+        // Word 6.0/95 and Excel 5.0/95: recognised, and read by no decrypt path in any
+        // build, whatever their encryption says -- the library refuses both by name.
+        Document::Word95Binary | Document::Excel95Binary => refuse(
+            EX_UNSUPPORTED,
+            format!(
+                "a {} document, an edition before 97 that this crate does not read",
+                document_name(class.document)
+            ),
+        ),
         // `Document::Unknown` was answered above, so this is a variant added later.
         _ => refuse(
             EX_UNSUPPORTED,

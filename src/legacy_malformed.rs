@@ -996,6 +996,10 @@ mod encrypted_summary_input {
     /// removed: the properties have nowhere to come from, and the decrypt says which
     /// stream is missing rather than returning a file with no properties at all.
     #[test]
+    #[cfg_attr(
+        not(fixture_corpus),
+        ignore = "needs the fixture corpus, which the published crate does not ship"
+    )]
     fn a_missing_encrypted_summary_stream_is_named() {
         let mut cursor = std::io::Cursor::new(super::fixture("word97_encprops.doc"));
         {
@@ -1120,5 +1124,123 @@ mod pictures_input {
         let mut stream = blip(0xF01E, 0x46A, &[UID, &[0xFF]], None);
         let got = decrypt_pictures(&schedule(), &mut stream);
         assert!(bad_naming(&got, "does not define for it"), "{got:?}");
+    }
+}
+
+// ---- Rights management and Word 6.0/95, refused by name (0.1.0-rc.6) -----------------
+
+mod refused_by_name {
+    use crate::Error;
+    use std::io::{Cursor, Seek, SeekFrom, Write};
+
+    fn add_stream(data: Vec<u8>, name: &str, bytes: &[u8]) -> Vec<u8> {
+        let mut cursor = Cursor::new(data);
+        {
+            let mut cfb = cfb::CompoundFile::open(&mut cursor).unwrap();
+            cfb.create_stream(name).unwrap().write_all(bytes).unwrap();
+            cfb.flush().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    /// The IRM placeholder is an unencrypted document, so without the rights-management
+    /// check the walk answers `NotEncrypted` and a caller keeps the placeholder.
+    #[test]
+    #[cfg_attr(
+        not(fixture_corpus),
+        ignore = "needs the fixture corpus, which the published crate does not ship"
+    )]
+    fn a_rights_managed_binary_document_is_refused_not_called_unencrypted() {
+        let plain = super::fixture("word97_plain.doc");
+        // Control: the placeholder alone.
+        assert!(matches!(
+            crate::decrypt_binary_office(&plain, super::PASSWORD),
+            Err(Error::NotEncrypted)
+        ));
+        let irm = add_stream(plain, "/\u{9}DRMContent", &[0u8; 512]);
+        let got = crate::decrypt_binary_office(&irm, super::PASSWORD).map(|p| p.len());
+        assert!(
+            matches!(got, Err(Error::UnsupportedEncryptedContent(m)) if m.contains("IRM")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(fixture_corpus),
+        ignore = "needs the fixture corpus, which the published crate does not ship"
+    )]
+    fn a_word_95_document_is_refused_by_name() {
+        for (fixture, n_fib, refused) in [
+            ("word97_plain.doc", 0x0069u16, true),
+            ("word97_password.doc", 0x0065, true),
+            // Control: the same edit to a Word 97 nFib is not this refusal.
+            ("word97_password.doc", 0x00C1, false),
+        ] {
+            let mut cursor = Cursor::new(super::fixture(fixture));
+            {
+                let mut cfb = cfb::CompoundFile::open(&mut cursor).unwrap();
+                let mut s = cfb.open_stream("/WordDocument").unwrap();
+                s.seek(SeekFrom::Start(2)).unwrap();
+                s.write_all(&n_fib.to_le_bytes()).unwrap();
+                s.flush().unwrap();
+            }
+            let got = crate::decrypt_binary_office(&cursor.into_inner(), super::PASSWORD)
+                .map(|p| p.len());
+            let is_refusal = matches!(
+                &got,
+                Err(Error::UnsupportedAlgorithm { name, .. }) if name.contains("Word 6.0/95")
+            );
+            assert_eq!(is_refusal, refused, "{fixture} nFib {n_fib:#06x}: {got:?}");
+        }
+    }
+
+    /// An IRM package has no `EncryptionInfo`; the OOXML path names rights management
+    /// rather than a missing stream.
+    #[test]
+    fn a_rights_managed_package_is_refused_by_the_ooxml_path_by_name() {
+        let mut cfb = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+        cfb.create_storage("/\u{6}DataSpaces").unwrap();
+        // One entry: EncryptedPackage -> DRMEncryptedDataSpace.
+        let mut map = 8u32.to_le_bytes().to_vec();
+        map.extend_from_slice(&1u32.to_le_bytes());
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&0u32.to_le_bytes());
+        for text in ["EncryptedPackage", "DRMEncryptedDataSpace"] {
+            let units: Vec<u16> = text.encode_utf16().collect();
+            let mut lp = ((units.len() * 2) as u32).to_le_bytes().to_vec();
+            units
+                .iter()
+                .for_each(|u| lp.extend_from_slice(&u.to_le_bytes()));
+            lp.resize(lp.len() + (4 - lp.len() % 4) % 4, 0);
+            body.extend_from_slice(&lp);
+        }
+        map.extend_from_slice(&((body.len() + 4) as u32).to_le_bytes());
+        map.extend_from_slice(&body);
+        cfb.create_stream("/\u{6}DataSpaces/DataSpaceMap")
+            .unwrap()
+            .write_all(&map)
+            .unwrap();
+        cfb.create_stream("/EncryptedPackage")
+            .unwrap()
+            .write_all(&[0u8; 64])
+            .unwrap();
+        cfb.flush().unwrap();
+        let irm = cfb.into_inner().into_inner();
+
+        let got = crate::decrypt_ooxml(&irm, super::PASSWORD).map(|p| p.len());
+        assert!(
+            matches!(&got, Err(Error::UnsupportedAlgorithm { name, .. }) if name.contains("IRM")),
+            "{got:?}"
+        );
+        // Control: the map removed, the same container is a missing EncryptionInfo.
+        let mut cursor = Cursor::new(irm);
+        {
+            let mut cfb = cfb::CompoundFile::open(&mut cursor).unwrap();
+            cfb.remove_stream("/\u{6}DataSpaces/DataSpaceMap").unwrap();
+            cfb.flush().unwrap();
+        }
+        let got = crate::decrypt_ooxml(&cursor.into_inner(), super::PASSWORD).map(|p| p.len());
+        assert!(matches!(got, Err(Error::MissingStream(_))), "{got:?}");
     }
 }

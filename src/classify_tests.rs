@@ -1187,3 +1187,192 @@ fn an_unprotected_legacy_binary_document_reports_unencrypted() {
         assert!(t.is_encrypted(), "{twin}");
     }
 }
+
+// ---- Rights management and the editions before 97 (0.1.0-rc.6) -----------------------
+
+/// `fixture` with `streams` added or replaced, storages created as their paths need them.
+fn with_streams(fixture_bytes: Vec<u8>, streams: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write;
+    let mut cursor = std::io::Cursor::new(fixture_bytes);
+    {
+        let mut cfb = cfb::CompoundFile::open(&mut cursor).expect("fixture is a CFB");
+        for (name, bytes) in streams {
+            if let Some((parent, _)) = name.rsplit_once('/') {
+                if !parent.is_empty() && !cfb.exists(parent) {
+                    cfb.create_storage(parent).unwrap();
+                }
+            }
+            let mut s = cfb.create_stream(name).unwrap();
+            s.write_all(bytes).unwrap();
+        }
+        cfb.flush().unwrap();
+    }
+    cursor.into_inner()
+}
+
+/// A one-entry `DataSpaceMap`, as `dataspaces::data_space_map` lays one out.
+fn one_entry_map(component: &str, data_space: &str) -> Vec<u8> {
+    fn lp_p4(text: &str) -> Vec<u8> {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let mut out = ((units.len() * 2) as u32).to_le_bytes().to_vec();
+        for u in units {
+            out.extend_from_slice(&u.to_le_bytes());
+        }
+        out.resize(out.len() + (4 - (out.len() % 4)) % 4, 0);
+        out
+    }
+    let mut body = 1u32.to_le_bytes().to_vec();
+    body.extend_from_slice(&0u32.to_le_bytes());
+    body.extend_from_slice(&lp_p4(component));
+    body.extend_from_slice(&lp_p4(data_space));
+    let mut out = 8u32.to_le_bytes().to_vec();
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&((body.len() + 4) as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+const DATA_SPACE_MAP_PATH: &str = "/\u{6}DataSpaces/DataSpaceMap";
+
+/// An IRM `.doc` carries a placeholder `WordDocument` whose FIB says "not encrypted".
+/// Built from the Office-written plain `.doc` — the placeholder is a real document —
+/// with the binary IRM markers added. Before 0.1.0-rc.6 this was `Unencrypted`.
+#[test]
+#[cfg_attr(
+    not(fixture_corpus),
+    ignore = "needs the fixture corpus, which the published crate does not ship"
+)]
+fn a_rights_managed_binary_document_is_irm_not_unencrypted() {
+    let plain = fixture("word97_plain.doc");
+    // Control: the placeholder alone is what it says.
+    assert_eq!(classify(&plain).family, Family::Unencrypted);
+
+    for (label, irm) in [
+        (
+            "data space and stream",
+            with_streams(
+                plain.clone(),
+                &[
+                    (
+                        DATA_SPACE_MAP_PATH,
+                        &one_entry_map("\u{9}DRMContent", "\u{9}DRMDataSpace"),
+                    ),
+                    ("/\u{9}DRMContent", &[0u8; 512]),
+                ],
+            ),
+        ),
+        (
+            "stream alone",
+            with_streams(plain.clone(), &[("/\u{9}DRMContent", &[0u8; 512])]),
+        ),
+    ] {
+        let c = classify(&irm);
+        assert_eq!(c.container, Container::Cfb, "{label}");
+        assert_eq!(c.document, Document::WordBinary, "{label}");
+        assert_eq!(c.family, Family::Irm, "{label}");
+        assert!(c.is_encrypted(), "{label}");
+        assert!(!c.is_supported(), "{label}");
+    }
+}
+
+/// An IRM package: `EncryptedPackage` under `DRMEncryptedDataSpace`, no `EncryptionInfo`.
+/// Before 0.1.0-rc.6 this was `Unknown`.
+#[test]
+fn a_rights_managed_package_is_irm_not_unknown() {
+    let empty = {
+        let mut cfb = cfb::CompoundFile::create(std::io::Cursor::new(Vec::new())).unwrap();
+        cfb.flush().unwrap();
+        cfb.into_inner().into_inner()
+    };
+    let irm = with_streams(
+        empty.clone(),
+        &[
+            (
+                DATA_SPACE_MAP_PATH,
+                &one_entry_map("EncryptedPackage", "DRMEncryptedDataSpace"),
+            ),
+            ("/EncryptedPackage", &[0u8; 512]),
+        ],
+    );
+    let c = classify(&irm);
+    assert_eq!(c.document, Document::OoxmlPackage);
+    assert_eq!(c.family, Family::Irm);
+    assert!(c.is_encrypted());
+    assert!(!c.is_supported());
+
+    // Control: standard encryption's data space, with its EncryptionInfo absent, is a
+    // container nothing could be determined about -- not rights management.
+    let not_irm = with_streams(
+        empty,
+        &[
+            (
+                DATA_SPACE_MAP_PATH,
+                &one_entry_map("EncryptedPackage", "StrongEncryptionDataSpace"),
+            ),
+            ("/EncryptedPackage", &[0u8; 512]),
+        ],
+    );
+    assert_eq!(classify(&not_irm).family, Family::Unknown);
+}
+
+/// `FibBase.nFib` 0x0065 to 0x0069 is Word 6.0/95; 0x006A and up is Word 97 and later.
+#[test]
+#[cfg_attr(
+    not(fixture_corpus),
+    ignore = "needs the fixture corpus, which the published crate does not ship"
+)]
+fn word_95_is_told_apart_from_word_97_by_n_fib() {
+    for (n_fib, expected) in [
+        // Below Word 6.0's range: neither edition by nFib, left to the Word 97 walk.
+        (0x0064u16, Document::WordBinary),
+        (0x0065, Document::Word95Binary),
+        (0x0069, Document::Word95Binary),
+        (0x006A, Document::WordBinary),
+        (0x00C1, Document::WordBinary),
+    ] {
+        let mut cursor = std::io::Cursor::new(fixture("word97_plain.doc"));
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut cfb = cfb::CompoundFile::open(&mut cursor).unwrap();
+            let mut s = cfb.open_stream("/WordDocument").unwrap();
+            s.seek(SeekFrom::Start(2)).unwrap();
+            s.write_all(&n_fib.to_le_bytes()).unwrap();
+            s.flush().unwrap();
+        }
+        let c = classify(&cursor.into_inner());
+        assert_eq!(c.document, expected, "nFib {n_fib:#06x}");
+        assert!(!c.is_supported() || expected == Document::WordBinary);
+    }
+}
+
+/// A BIFF5 workbook lives in a `Book` stream; BIFF8 in `Workbook`.
+#[test]
+#[cfg_attr(
+    not(fixture_corpus),
+    ignore = "needs the fixture corpus, which the published crate does not ship"
+)]
+fn excel_95_is_told_apart_from_excel_97_by_its_stream() {
+    let xls = fixture("excel97_plain.xls");
+    assert_eq!(classify(&xls).document, Document::ExcelBinary);
+
+    // The same records under BIFF5's stream name, `Workbook` removed.
+    let mut cursor = std::io::Cursor::new(xls);
+    {
+        use std::io::{Read, Write};
+        let mut cfb = cfb::CompoundFile::open(&mut cursor).unwrap();
+        let mut book = Vec::new();
+        cfb.open_stream("/Workbook")
+            .unwrap()
+            .read_to_end(&mut book)
+            .unwrap();
+        cfb.remove_stream("/Workbook").unwrap();
+        cfb.create_stream("/Book")
+            .unwrap()
+            .write_all(&book)
+            .unwrap();
+        cfb.flush().unwrap();
+    }
+    let c = classify(&cursor.into_inner());
+    assert_eq!(c.document, Document::Excel95Binary);
+    assert!(!c.is_supported());
+}

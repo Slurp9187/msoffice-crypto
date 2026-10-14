@@ -224,6 +224,7 @@
 mod binary_office;
 mod cfb_reader;
 mod classify;
+mod data_space_map;
 mod error;
 mod limits;
 
@@ -1024,6 +1025,15 @@ pub fn decrypt_binary_office(data: &[u8], password: &str) -> Result<Vec<u8>, Err
         return Err(Error::NotACfbFile);
     }
     let mut container = legacy_container::LegacyContainer::open(data)?;
+    // Before the format walk: an IRM binary document's own streams are a placeholder
+    // whose markers say "unencrypted", so the walk would answer `NotEncrypted` and a
+    // caller would keep the placeholder in place of the document.
+    if container.rights_managed() {
+        return Err(Error::UnsupportedEncryptedContent(
+            "rights-managed (IRM) content, whose key a rights-management server holds; \
+             no password opens it",
+        ));
+    }
     match container.format() {
         Some(binary_office::BinaryFormat::Word) => word97::decrypt(&mut container, password)?,
         Some(binary_office::BinaryFormat::Excel) => excel97::decrypt(&mut container, password)?,
@@ -1112,6 +1122,17 @@ pub fn decrypt_ooxml_with_policy(
 ) -> Result<Decrypted, Error> {
     if !is_cfb_office(data) {
         return Err(Error::NotACfbFile);
+    }
+    // A rights-managed package has an `EncryptedPackage` and no `EncryptionInfo`; without
+    // this the answer would be a missing stream, which sends the holder looking for
+    // damage that is not there.
+    if data_space_map::rights_management(data).is_some() {
+        return Err(Error::UnsupportedAlgorithm {
+            what: "\\x06DataSpaces\\DataSpaceMap",
+            name: "rights management (IRM): the key is held by a rights-management \
+                   server, and no password opens it"
+                .to_string(),
+        });
     }
 
     let streams = cfb_reader::read_cfb_streams(data)?;

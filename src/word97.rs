@@ -37,6 +37,14 @@ const BLOCK_SIZE: usize = 0x200;
 
 /// Decrypt the container in place. The container is left untouched on any error.
 pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result<(), Error> {
+    if container.word_is_pre_97() {
+        return Err(Error::UnsupportedAlgorithm {
+            what: "WordDocument stream",
+            name: "a Word 6.0/95 document (FibBase.nFib 0x0065 to 0x0069); this crate reads \
+                   Word 97 and later"
+                .to_string(),
+        });
+    }
     let word = container.read(WORD_DOCUMENT)?;
     let fib = FibBase::parse(&word).ok_or(Error::BadParameters(
         "the WordDocument stream does not begin with a FIB (wIdent 0xA5EC)".to_string(),
