@@ -55,6 +55,7 @@ const WITHHELD_FIXTURES: &[&str] = &[
     "agile_aes256_sha256.docx",
     "agile_aes256_sha384.docx",
     "excel16_agile.xlsx",
+    "excel95_plain.xls",
     "excel97_encprops.xls",
     "excel97_password.xls",
     "excel97_plain.xls",

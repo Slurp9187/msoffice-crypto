@@ -52,6 +52,7 @@ const OFFICE_WRITTEN: &[&str] = &[
     "excel97_plain.xls",
     "excel97_password.xls",
     "excel97_xor.xls",
+    "excel95_plain.xls",
     "powerpoint97_plain.ppt",
     "powerpoint97_password.ppt",
     "powerpoint97_picture.ppt",

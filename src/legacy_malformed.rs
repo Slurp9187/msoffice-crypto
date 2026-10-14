@@ -1165,6 +1165,23 @@ mod refused_by_name {
         );
     }
 
+    /// The Excel 5.0/95 workbook Excel 16 writes: refused by name, not misread as BIFF8
+    /// and not called unencrypted.
+    #[test]
+    #[cfg_attr(
+        not(fixture_corpus),
+        ignore = "needs the fixture corpus, which the published crate does not ship"
+    )]
+    fn an_excel_95_workbook_is_refused_by_name() {
+        let got =
+            crate::decrypt_binary_office(&super::fixture("excel95_plain.xls"), super::PASSWORD)
+                .map(|p| p.len());
+        assert!(
+            matches!(&got, Err(Error::UnsupportedAlgorithm { name, .. }) if name.contains("BIFF5")),
+            "{got:?}"
+        );
+    }
+
     #[test]
     #[cfg_attr(
         not(fixture_corpus),

@@ -2,7 +2,7 @@
 //! (plan slice S2) — argument handling, exit codes and the `--json` output, driven as a
 //! subprocess.
 //!
-//! **Outside the `include` allowlist, so it reads all twenty-two Office fixtures directly**
+//! **Outside the `include` allowlist, so it reads all twenty-three Office fixtures directly**
 //! (`Cargo.toml`'s `include` ships only two of nineteen); a missing one fails loudly by
 //! name rather than being skipped, per CLAUDE.md's "fixtures are not optional" rule.
 //! Nothing here carries a `fixture_corpus` gate: that gate exists so the *published*
@@ -65,11 +65,11 @@ const ENV_NAME: &str = "MSOFFICE_CRYPTO_PASSWORD";
 /// Chosen to be absent; every test that depends on its absence also `env_remove`s it.
 const UNSET_ENV_NAME: &str = "MSOFFICE_CRYPTO_DEFINITELY_UNSET_VARIABLE";
 
-/// The twenty-two Office fixtures `tests/fixtures/` is supposed to hold, named explicitly
+/// The twenty-three Office fixtures `tests/fixtures/` is supposed to hold, named explicitly
 /// so a single missing one fails **by name** rather than only moving a count. The
-/// twenty-third entry in that directory, `plain_content.txt`, is not an Office file and is
+/// twenty-fourth entry in that directory, `plain_content.txt`, is not an Office file and is
 /// not listed here.
-const OFFICE_FIXTURE_NAMES: [&str; 22] = [
+const OFFICE_FIXTURE_NAMES: [&str; 23] = [
     "agile_aes128_sha1.docx",
     "agile_aes128_sha384.docx",
     "agile_aes192_sha384.docx",
@@ -77,6 +77,7 @@ const OFFICE_FIXTURE_NAMES: [&str; 22] = [
     "agile_aes256_sha384.docx",
     "agile_encrypted.docx",
     "excel16_agile.xlsx",
+    "excel95_plain.xls",
     "excel97_encprops.xls",
     "excel97_password.xls",
     "excel97_plain.xls",
@@ -229,7 +230,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 /// The Office fixtures, discovered at run time by extension rather than hardcoded as a
-/// list of paths, sorted for a stable iteration order. Asserts `len() == 22` **inside
+/// list of paths, sorted for a stable iteration order. Asserts `len() == 23` **inside
 /// the helper**, so every caller inherits the anti-empty-glob guard rather than each
 /// writing its own count check that could drift from another's.
 fn office_fixtures() -> Vec<PathBuf> {
@@ -622,12 +623,12 @@ fn every_office_fixture_is_present_by_name() {
     for name in OFFICE_FIXTURE_NAMES {
         fixture(name);
     }
-    // And the directory holds *nothing else*: the twenty-two above plus the one non-Office
+    // And the directory holds *nothing else*: the twenty-three above plus the one non-Office
     // entry, `plain_content.txt`. Deliberately not `office_fixtures().len() ==
     // OFFICE_FIXTURE_COUNT` -- that helper asserts its own length internally, so such a
     // line could never be the assertion that fires. This one enumerates the whole
     // directory, which nothing else here does, so it is the check that catches a
-    // twenty-third *document* arriving under an extension office_fixtures()'s filter does
+    // twenty-fourth *document* arriving under an extension office_fixtures()'s filter does
     // not match (`.docm`, `.xlsb`, `.pps`): invisible to the glob, invisible to the loop
     // above, and silently untested by every other test in this file.
     let mut entries: Vec<String> = std::fs::read_dir(fixtures())
@@ -641,7 +642,7 @@ fn every_office_fixture_is_present_by_name() {
     expected.sort();
     assert_eq!(
         entries, expected,
-        "tests/fixtures/ holds something other than the twenty-two Office fixtures and \
+        "tests/fixtures/ holds something other than the twenty-three Office fixtures and \
          plain_content.txt"
     );
 }

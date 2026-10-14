@@ -1345,7 +1345,10 @@ fn word_95_is_told_apart_from_word_97_by_n_fib() {
     }
 }
 
-/// A BIFF5 workbook lives in a `Book` stream; BIFF8 in `Workbook`.
+/// A BIFF5 workbook lives in a `Book` stream; BIFF8 in `Workbook`. Both the file Excel
+/// 16 writes for "Excel 5.0/95 Workbook" (`excel95_plain.xls`, SaveAs `FileFormat` 39,
+/// a `Book` stream whose BOF says version 0x0500) and a BIFF8 workbook whose stream is
+/// merely renamed are `Excel95Binary`: the stream name is the discriminator.
 #[test]
 #[cfg_attr(
     not(fixture_corpus),
@@ -1375,4 +1378,9 @@ fn excel_95_is_told_apart_from_excel_97_by_its_stream() {
     let c = classify(&cursor.into_inner());
     assert_eq!(c.document, Document::Excel95Binary);
     assert!(!c.is_supported());
+
+    let real = classify(&fixture("excel95_plain.xls"));
+    assert_eq!(real.container, Container::Cfb);
+    assert_eq!(real.document, Document::Excel95Binary);
+    assert!(!real.is_supported());
 }

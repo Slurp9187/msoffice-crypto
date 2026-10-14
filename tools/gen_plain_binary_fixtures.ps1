@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    Generate the three UNENCRYPTED 97-2003 binary fixtures in tests/fixtures/.
+    Generate the four UNENCRYPTED 97-2003 binary fixtures in tests/fixtures/: Word, Excel
+    and PowerPoint 97-2003, and an Excel 5.0/95 workbook..
 
 .DESCRIPTION
     word97_plain.doc, excel97_plain.xls and powerpoint97_plain.ppt are the negative
@@ -185,7 +186,28 @@ try {
     [GC]::Collect(); [GC]::WaitForPendingFinalizers()
 }
 
-foreach ($p in @($wordPath, $excelPath, $pptPath)) {
+# ---- Excel 5.0/95 (.xls) --------------------------------------------------------------
+# xlExcel5 = 39. A BIFF5 workbook in a `Book` stream, BOF version 0x0500: the real file
+# behind Document::Excel95Binary, which classify names by that stream and
+# decrypt_binary_office refuses by name. Excel 16 still writes the format.
+[string]$excel95Path = Join-Path $FixtureDir 'excel95_plain.xls'
+Remove-Existing $excel95Path
+$excel = $null; $wb = $null
+try {
+    $excel = New-Object -ComObject Excel.Application
+    $excel.Visible = $false
+    $excel.DisplayAlerts = $false
+    $wb = $excel.Workbooks.Add()
+    $wb.Worksheets.Item(1).Range('A1').Value2 = $text
+    Set-RemovePersonalInformation $wb
+    $wb.SaveAs($excel95Path, 39)
+} finally {
+    if ($wb) { $wb.Close($false); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($wb) }
+    if ($excel) { $excel.Quit(); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($excel) }
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+}
+
+foreach ($p in @($wordPath, $excelPath, $pptPath, $excel95Path)) {
     if (-not (Test-Path $p)) { throw "not written: $p" }
     '{0,-24} {1,8} bytes' -f (Split-Path $p -Leaf), (Get-Item $p).Length
 }
