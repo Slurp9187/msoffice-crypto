@@ -97,25 +97,25 @@ fn hostile_counts_and_lengths_end_the_walk_without_panicking() {
     let one = entry("EncryptedPackage", "DRMEncryptedDataSpace");
 
     // EntryCount far past what the bytes hold.
-    let mut m = map(&[one.clone()]);
+    let mut m = map(std::slice::from_ref(&one));
     m[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
     assert_eq!(data_space_names(&m), ["DRMEncryptedDataSpace"]);
 
     // An entry Length below its own fixed fields, and one of zero, which would not
     // advance the walk.
     for len in [0u32, 11] {
-        let mut m = map(&[one.clone()]);
+        let mut m = map(std::slice::from_ref(&one));
         m[8..12].copy_from_slice(&len.to_le_bytes());
         assert!(data_space_names(&m).is_empty(), "Length {len}");
     }
 
     // ReferenceComponentCount of u32::MAX: the components run out, the entry is dropped.
-    let mut m = map(&[one.clone()]);
+    let mut m = map(std::slice::from_ref(&one));
     m[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
     assert!(data_space_names(&m).is_empty());
 
     // An odd LP-P4 byte count, which UTF-16 cannot have.
-    let mut m = map(&[one.clone()]);
+    let mut m = map(std::slice::from_ref(&one));
     let name_len_at = 8 + 4 + 4 + 4 + lp_p4("EncryptedPackage").len();
     m[name_len_at..name_len_at + 4].copy_from_slice(&41u32.to_le_bytes());
     assert!(data_space_names(&m).is_empty());
