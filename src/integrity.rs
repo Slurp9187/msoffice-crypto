@@ -691,12 +691,22 @@ mod tests {
     fn office_fixture(name: &str) -> (Vec<u8>, crate::agile::AgileParams, SessionKey) {
         let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
         let data = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-        let streams = crate::cfb_reader::read_cfb_streams(&data).expect("an encrypted container");
-        let params = crate::agile::parse_encryption_info(&streams.encryption_info[8..])
+        let mut cfb =
+            cfb::CompoundFile::open(std::io::Cursor::new(&data)).expect("an encrypted container");
+        let info = crate::cfb_reader::read_encryption_info_in(&mut cfb).expect("EncryptionInfo");
+        let mut package = Vec::new();
+        std::io::Read::read_to_end(
+            &mut cfb
+                .open_stream("/EncryptedPackage")
+                .expect("EncryptedPackage"),
+            &mut package,
+        )
+        .expect("EncryptedPackage reads");
+        let params = crate::agile::parse_encryption_info(&info[8..])
             .expect("Office writes a parseable EncryptionInfo");
         let session_key =
             crate::agile::recover_session_key(&params, "testpass").expect("the password");
-        (streams.encrypted_package, params, session_key)
+        (package, params, session_key)
     }
 
     /// **Given Office's own HMAC key, the writer reproduces Office's own blobs, byte for

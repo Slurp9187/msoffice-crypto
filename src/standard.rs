@@ -47,7 +47,7 @@ use aes::{Aes128, Aes192, Aes256};
 use ecb::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyInit};
 use secure_gate::{ConstantTimeEq, RevealSecret, RevealSecretMut};
 use sha1::{Digest, Sha1};
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 /// `AlgID` values — [MS-OFFCRYPTO] §2.3.2, the `wincrypt.h` `CALG_*` constants. The same
 /// four `classify` reads (`classify.rs`), spelled once per module because the detection
@@ -152,39 +152,20 @@ pub(crate) struct StandardParams<'a> {
     pub(crate) key_size_bytes: usize,
 }
 
-/// Decrypt a standard-encryption `EncryptedPackage`.
+/// Decrypt a standard-encryption `EncryptedPackage` from a seekable stream into
+/// `writer`, one 4096-byte step at a time.
 ///
-/// `info` is the EncryptionInfo stream with the 8-byte header stripped
-/// (4-byte version + 4-byte `Flags` copy already consumed by the caller).
-///
-/// On error, no plaintext is produced. This format defines no integrity element.
+/// `info` is the EncryptionInfo stream with the 8-byte header stripped (4-byte version +
+/// 4-byte `Flags` copy already consumed by the caller).
 ///
 /// # Errors
 ///
-/// [`Error::MissingStream`] if the header is truncated;
-/// [`Error::BadParameters`] if `EncryptionHeaderSize` or a sibling field is
-/// out of range; [`Error::UnsupportedAlgorithm`] if `AlgID` names a cipher other than
-/// AES or `AlgIDHash` is not SHA-1; [`Error::WrongPassword`] if the verifier does not
-/// match; [`Error::CipherError`] if an AES-ECB step rejects a block.
-pub(crate) fn decrypt(
-    info: &[u8],
-    encrypted_package: &[u8],
-    password: &str,
-) -> Result<Vec<u8>, Error> {
-    // Sized once at the stream's length, never less than the plaintext, so the buffer
-    // holding the document is never reallocated (`agile::decrypt`'s reason).
-    let mut plaintext = Vec::with_capacity(encrypted_package.len());
-    decrypt_to(
-        info,
-        &mut Cursor::new(encrypted_package),
-        &mut plaintext,
-        password,
-    )?;
-    Ok(plaintext)
-}
-
-/// [`decrypt`] from a seekable `EncryptedPackage` stream into `writer`, one 4096-byte
-/// step at a time.
+/// [`Error::MissingStream`] if the header or the package prefix is truncated;
+/// [`Error::BadParameters`] if `EncryptionHeaderSize` or a sibling field is out of
+/// range, or the declared size exceeds the ciphertext; [`Error::UnsupportedAlgorithm`]
+/// if `AlgID` names a cipher other than AES or `AlgIDHash` is not SHA-1;
+/// [`Error::WrongPassword`] if the verifier does not match; [`Error::Io`] from either
+/// stream.
 ///
 /// One pass: the format defines no integrity element, so there is nothing to check
 /// before plaintext is released, and nothing to read twice for. The password is
@@ -654,7 +635,7 @@ fn decrypt_package_to<S: Read + Seek, W: Write>(
 #[cfg(test)]
 fn decrypt_package(key: &DerivedKey, encrypted_package: &[u8]) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
-    decrypt_package_to(key, &mut Cursor::new(encrypted_package), &mut out)?;
+    decrypt_package_to(key, &mut std::io::Cursor::new(encrypted_package), &mut out)?;
     Ok(out)
 }
 

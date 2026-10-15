@@ -35,6 +35,9 @@
 //! [`legacy::RC4_KEY_BITS`] and [`legacy::RC4_KEY_BITS_DEFAULT`] (§2.3.5.1),
 //! [`legacy::XOR_PASSWORD_MAX_LEN`] (§2.3.7.2, structural — the `InitialCode` table has
 //! exactly 15 entries).
+//! [`crypto::CFB_V3_STREAM_MAX`] is the one **spec** bound from the *container's* spec
+//! rather than this format's ([MS-CFB] §2.6.1). It bounds what this crate writes, not
+//! what it reads: it refuses an input too large to encrypt, never a file.
 //!
 //! **cipher** — [`crypto::AGILE_KEY_BITS_ALLOWED`] (what AES defines; the schema's
 //! `ST_KeyBits` sets `minInclusive="8"` and *no maximum*, being generic across cipher
@@ -46,7 +49,7 @@
 //! [`BIFF_SCAN_CAP`], [`CURRENT_USER_READ_CAP`], [`DATA_SPACE_MAP_READ_CAP`],
 //! [`PPT_PERSIST_DIRECTORY_READ_CAP`],
 //! [`RC4_ENCRYPTION_HEADER_SIZE_MAX`], [`ENCRYPTION_HEADER_STRUCTURE_MAX`]),
-//! [`crypto::PAYLOAD_CEILING`] and its two aliases. Each names its margin over the
+//! [`crypto::PAYLOAD_CEILING`] and its alias. Each names its margin over the
 //! largest real value in its own comment.
 //!
 //! Two bounds the schema states are **not** enforced as ranges here, because the check
@@ -267,15 +270,6 @@ mod crypto {
     /// Seek` over [`crate::segments`] removes the wall, which is what D4 is for.
     pub(crate) const PAYLOAD_CEILING: usize = 1 << 30;
 
-    /// The read cap on `\EncryptedPackage`, aliased to [`PAYLOAD_CEILING`] rather than
-    /// given its own number.
-    ///
-    /// GH #10's pattern 3, from `odf-crypto`: one shared named ceiling per use site, so a
-    /// hostile size cannot allocate past it on one path while another still would. The
-    /// stream read and the plaintext buffer are the two allocation paths here, and they are
-    /// the same figure by construction.
-    pub(crate) const ENCRYPTED_PACKAGE_READ_CAP: usize = PAYLOAD_CEILING;
-
     /// GH #10's pattern 5 — `const`-assert that related constants agree.
     ///
     /// A compile error rather than a test failure, deliberately: "the payload read cap is
@@ -287,8 +281,30 @@ mod crypto {
     /// The second assertion is the one that catches a plausible edit: a ceiling that
     /// drifted down to the 1 MiB header figure would refuse every real document, and every
     /// test in the suite would still pass, because no fixture here is over a megabyte.
+    /// **spec** — the largest stream a version 3 compound file may hold: [MS-CFB] §2.6.1,
+    /// "for a version 3 compound file 512-byte sector size, the value of this field MUST
+    /// be less than or equal to 0x80000000".
+    ///
+    /// Version 3 is what Office writes and what `dataspaces::write_container` builds, so
+    /// this caps `\EncryptedPackage` on the encrypt side. It is never applied to a file
+    /// being read: a reader takes whatever stream the container holds, version 4
+    /// included. A writer that ignored it would not be stopped: `cfb` writes the length as
+    /// a `u64` without checking it against the version, producing a non-conforming file
+    /// between 2 and 4 GiB and, past 4 GiB, one whose length its own V3 reader masks to 32
+    /// bits and reads back short. The cure for a larger package is a version 4 container,
+    /// which needs its own evidence that Word, Excel and PowerPoint open it.
+    pub(crate) const CFB_V3_STREAM_MAX: u64 = 0x8000_0000;
+
+    /// The largest plaintext package a streaming encrypt accepts: the
+    /// [`CFB_V3_STREAM_MAX`]-byte stream less its 8-byte size prefix, rounded down to the
+    /// 16-byte block the plaintext is padded up to. Both formats pad that way, agile per
+    /// segment and standard at the tail, so one figure serves both.
+    pub(crate) const STREAMED_PACKAGE_MAX: u64 = (CFB_V3_STREAM_MAX - 8) / 16 * 16;
+
     const _: () = {
-        assert!(ENCRYPTED_PACKAGE_READ_CAP == PAYLOAD_CEILING);
+        assert!(STREAMED_PACKAGE_MAX == 0x7FFF_FFF0);
+        assert!(8 + STREAMED_PACKAGE_MAX <= CFB_V3_STREAM_MAX);
+        assert!(8 + STREAMED_PACKAGE_MAX + 16 > CFB_V3_STREAM_MAX);
         assert!(PAYLOAD_CEILING > super::ENCRYPTION_INFO_READ_CAP);
         assert!(PAYLOAD_CEILING == 1 << 30);
     };

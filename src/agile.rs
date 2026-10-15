@@ -50,7 +50,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use cbc::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
 use quick_xml::{events::Event, Reader};
 use secure_gate::{ConstantTimeEq, RevealSecret, RevealSecretMut};
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 // Block key constants — verified against office-crypto reference implementation.
 // The two dataIntegrity constants live in `integrity.rs` beside their only user.
@@ -311,6 +311,7 @@ pub(crate) fn recover_session_key(
 /// [`Error::IntegrityCheckFailed`] or [`Error::BadParameters`] from
 /// the HMAC policy; [`Error::CipherError`] if an AES-CBC step rejects a block;
 /// [`Error::MissingStream`] if the package prefix is truncated.
+#[cfg(test)]
 pub(crate) fn decrypt(
     xml_data: &[u8],
     encrypted_package: &[u8],
@@ -323,7 +324,7 @@ pub(crate) fn decrypt(
     let mut plaintext = Vec::with_capacity(encrypted_package.len());
     let outcome = decrypt_to(
         xml_data,
-        &mut Cursor::new(encrypted_package),
+        &mut std::io::Cursor::new(encrypted_package),
         &mut plaintext,
         password,
         policy,
@@ -686,7 +687,7 @@ fn decrypt_package(
     decrypt_package_to(
         encryption_key,
         params,
-        &mut Cursor::new(encrypted_package),
+        &mut std::io::Cursor::new(encrypted_package),
         &mut out,
         None,
     )?;

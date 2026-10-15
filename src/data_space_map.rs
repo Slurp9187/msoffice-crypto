@@ -35,7 +35,7 @@
 
 use crate::cfb_reader::read_capped;
 use crate::limits::DATA_SPACE_MAP_READ_CAP;
-use std::io::{Cursor, Read, Seek};
+use std::io::{Read, Seek};
 
 /// `\x06DataSpaces\DataSpaceMap` — [MS-OFFCRYPTO] §2.1.6.
 const DATA_SPACE_MAP: &str = "/\u{6}DataSpaces/DataSpaceMap";
@@ -62,8 +62,9 @@ pub(crate) enum RightsManagement {
 
 /// Whether `data` is a rights-managed document, and which kind. `None` for anything else,
 /// including a container that does not open.
+#[cfg(test)]
 pub(crate) fn rights_management(data: &[u8]) -> Option<RightsManagement> {
-    let mut cfb = cfb::CompoundFile::open(Cursor::new(data)).ok()?;
+    let mut cfb = cfb::CompoundFile::open(std::io::Cursor::new(data)).ok()?;
     rights_management_in(&mut cfb)
 }
 

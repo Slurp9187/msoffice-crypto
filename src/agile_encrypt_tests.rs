@@ -850,8 +850,10 @@ fn a_package_over_the_ceiling_is_refused_before_any_work() {
     big[..4].copy_from_slice(b"PK\x03\x04");
     let got = crate::encrypt_ooxml(&big, PASSWORD).map(|c| c.len());
     assert!(
-        matches!(&got, Err(Error::BadParameters(msg)) if msg.contains("PAYLOAD_CEILING")),
-        "over the ceiling must be refused by name, got: {got:?}"
+        matches!(&got, Err(Error::PackageTooLarge { len, limit })
+            if *len == crate::limits::PAYLOAD_CEILING as u64 + 1
+                && *limit == crate::limits::PAYLOAD_CEILING as u64),
+        "over the ceiling must be refused as PackageTooLarge, got: {got:?}"
     );
 }
 
@@ -859,7 +861,7 @@ fn a_package_over_the_ceiling_is_refused_before_any_work() {
 ///
 /// A gigabyte of zeros is over the ceiling *and* not a package. Both facts are true, and
 /// which one the caller is told decides whether the message is useful: "these bytes are
-/// not a package" is the primary one, and `BadParameters(… PAYLOAD_CEILING …)` for junk
+/// not a package" is the primary one, and `PackageTooLarge` for junk
 /// would be the worse answer. Reverse the two checks in `crate::encrypt_ooxml` and this
 /// fails with the ceiling message; `a_package_over_the_ceiling_is_refused_before_any_work`
 /// is the control that shows the ceiling is still reachable for input that is a package.

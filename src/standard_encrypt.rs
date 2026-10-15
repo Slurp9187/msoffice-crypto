@@ -629,13 +629,13 @@ pub(crate) fn encrypt<R: TryRng + TryCryptoRng>(
 ) -> Result<Vec<u8>, Error> {
     AesKeySize::new(key_bits)?;
 
+    // The whole-buffer ceiling: this function holds the package and the container in
+    // memory, and `PAYLOAD_CEILING` is what it will read back the same way.
     if package.len() > limits::PAYLOAD_CEILING {
-        return Err(Error::BadParameters(format!(
-            "the package is {} bytes; this crate encrypts at most {} (see \
-             limits::PAYLOAD_CEILING), because that is what it will read back",
-            package.len(),
-            limits::PAYLOAD_CEILING
-        )));
+        return Err(Error::PackageTooLarge {
+            len: package.len() as u64,
+            limit: limits::PAYLOAD_CEILING as u64,
+        });
     }
 
     let mut container = Cursor::new(Vec::new());
@@ -676,6 +676,7 @@ where
     let key_size = AesKeySize::new(key_bits)?;
     let len = reader.seek(SeekFrom::End(0))?;
     reader.seek(SeekFrom::Start(0))?;
+    agile_encrypt::refuse_past_v3_stream(len)?;
 
     let material = generate(password, key_size, rng)?;
     let info = write_encryption_info(

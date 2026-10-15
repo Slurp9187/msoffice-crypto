@@ -1268,6 +1268,8 @@ fn exit_code(e: &Error) -> u8 {
         Error::AlreadyEncrypted { .. } => EX_REFUSED,
         Error::NotAPlainPackage => EX_REFUSED,
         Error::UnknownContainer => EX_NOT_OFFICE,
+        // Not malformed: the file may be fine, and this path will not hold it.
+        Error::PackageTooLarge { .. } => EX_REFUSED,
         // The only **caller** error in the table, and so the only 1. Every other arm is
         // a verdict on a file; this one is raised before a file is opened at all, from
         // the caller's own numbers against this crate's bounds.

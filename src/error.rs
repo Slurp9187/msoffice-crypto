@@ -106,6 +106,7 @@ pub enum Error {
     /// The bytes are not a CFB container: they lack the eight-byte magic, or `cfb`
     /// refused to open them.
     #[error("not a CFB (Compound Binary File) container")]
+    #[cfg(feature = "crypto-ops")]
     NotACfbFile,
 
     /// A binary document handed to [`crate::decrypt_binary_office()`] carries no password-to-open
@@ -506,10 +507,40 @@ pub enum Error {
     #[cfg(feature = "crypto-ops")]
     UnknownContainer,
 
-    /// Reading or writing the in-memory CFB container failed.
+    /// The input is larger than this path will take: `len` bytes against a `limit`.
     ///
-    /// The inner [`std::io::Error`] describes the operation — a flush, a stream write —
-    /// never key material or file content.
+    /// Not a statement that the file is malformed. Two different ceilings report it, and
+    /// `limit` says which, so a caller words the refusal from the field rather than from a
+    /// number it assumed:
+    ///
+    /// - **The whole-buffer functions** ([`crate::encrypt_ooxml`] and the rest that take
+    ///   `&[u8]` or return `Vec<u8>`) stop at 1 GiB, because they hold the whole package
+    ///   in memory. On encrypt `len` is the plaintext package; on decrypt it is the
+    ///   `\EncryptedPackage` stream. The streaming functions (`*_to`) have no such
+    ///   ceiling; that is what they are for.
+    /// - **The streaming encrypt functions** stop at 2 GiB less 16 bytes of plaintext,
+    ///   the most a version 3 compound file can carry: [MS-CFB] §2.6.1 caps every stream
+    ///   at 0x80000000 bytes, and the stream is an 8-byte prefix plus the plaintext padded
+    ///   to a 16-byte block. Version 3 is the container Office writes. `len` is the
+    ///   plaintext package, measured before anything is written.
+    ///
+    /// Until 0.1.0-rc.7 the 1 GiB refusals were [`Self::BadParameters`], whose meaning is
+    /// a parameter *the file* declares. An input's size is not one.
+    #[error("the input is {len} bytes; this path takes at most {limit}")]
+    #[cfg(feature = "crypto-ops")]
+    PackageTooLarge {
+        /// The size measured.
+        len: u64,
+        /// The most this path accepts.
+        limit: u64,
+    },
+
+    /// Reading or writing failed: the caller's reader or writer, or the in-memory CFB
+    /// container the whole-buffer functions build.
+    ///
+    /// A cancelling reader's error comes back here as itself. The inner
+    /// [`std::io::Error`] describes the operation — a flush, a stream write, a length the
+    /// input did not keep to — never key material or file content.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -862,6 +893,7 @@ mod exit_code_canary {
 
     fn exit_code(e: &Error) -> u8 {
         match e {
+            #[cfg(feature = "crypto-ops")]
             Error::NotACfbFile => 3,
             Error::MissingStream(_) => 6,
             Error::BadParameters(_) => 6,
@@ -896,12 +928,17 @@ mod exit_code_canary {
             Error::NotAPlainPackage => 5,
             #[cfg(feature = "crypto-ops")]
             Error::UnknownContainer => 3,
+            #[cfg(feature = "crypto-ops")]
+            Error::PackageTooLarge { .. } => 5,
         }
     }
 
     #[test]
     fn every_error_variant_is_named_in_the_exit_code_table() {
+        #[cfg(feature = "crypto-ops")]
         assert_eq!(exit_code(&Error::NotACfbFile), 3);
+        #[cfg(feature = "crypto-ops")]
+        assert_eq!(exit_code(&Error::PackageTooLarge { len: 2, limit: 1 }), 5);
         assert_eq!(exit_code(&Error::Io(std::io::Error::other("x"))), 2);
         #[cfg(feature = "crypto-ops")]
         assert_eq!(exit_code(&Error::IntegrityElementMissing), 8);

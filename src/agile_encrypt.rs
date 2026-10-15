@@ -380,6 +380,21 @@ pub(crate) fn encrypt_package_to<R: Read, W: Write + ?Sized>(
     held_to_length(reader, len, read)
 }
 
+/// Refuse a plaintext package too large for the version 3 container both writers
+/// build — [`limits::STREAMED_PACKAGE_MAX`], from [MS-CFB] §2.6.1.
+///
+/// Called on the measured length before the first RNG draw and before a byte reaches
+/// the writer, so a refusal costs the caller nothing and leaves their writer untouched.
+pub(crate) fn refuse_past_v3_stream(len: u64) -> Result<(), Error> {
+    if len > limits::STREAMED_PACKAGE_MAX {
+        return Err(Error::PackageTooLarge {
+            len,
+            limit: limits::STREAMED_PACKAGE_MAX,
+        });
+    }
+    Ok(())
+}
+
 /// Refuse a reader that did not deliver exactly the `len` bytes its length promised —
 /// the check both writers make after their last segment.
 pub(crate) fn held_to_length<R: Read>(reader: &mut R, len: u64, read: u64) -> Result<(), Error> {
@@ -448,13 +463,13 @@ pub(crate) fn encrypt<R: TryRng + TryCryptoRng>(
 ) -> Result<Vec<u8>, Error> {
     params.validate()?;
 
+    // The whole-buffer ceiling: this function holds the package and the container in
+    // memory, and `PAYLOAD_CEILING` is what it will read back the same way.
     if package.len() > limits::PAYLOAD_CEILING {
-        return Err(Error::BadParameters(format!(
-            "the package is {} bytes; this crate encrypts at most {} (see \
-             limits::PAYLOAD_CEILING), because that is what it will read back",
-            package.len(),
-            limits::PAYLOAD_CEILING
-        )));
+        return Err(Error::PackageTooLarge {
+            len: package.len() as u64,
+            limit: limits::PAYLOAD_CEILING as u64,
+        });
     }
 
     let mut container = Cursor::new(Vec::new());
@@ -501,6 +516,7 @@ where
     params.validate()?;
     let len = reader.seek(SeekFrom::End(0))?;
     reader.seek(SeekFrom::Start(0))?;
+    refuse_past_v3_stream(len)?;
 
     let material = generate(password, params, rng)?;
     // `params.hash` is `<keyData>`'s, for the package IVs and the two `dataIntegrity`

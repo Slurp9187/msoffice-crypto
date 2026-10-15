@@ -36,8 +36,9 @@
 //! this does, are the same operation: 4096 is a multiple of 16, so no interior segment can
 //! be short.
 
-use std::io::{ErrorKind, Read};
+use std::io::Read;
 
+pub(crate) use crate::cfb_reader::read_full;
 use crate::error::Error;
 use crate::hash::{derive_iv, HashAlgorithm};
 
@@ -158,26 +159,6 @@ impl<'a> Segmenter<'a> {
             iv,
         }))
     }
-}
-
-/// Fill `buf` from `reader` until it is full or the reader is exhausted, and return how
-/// many bytes arrived.
-///
-/// `Read::read` may return short at any point before the end, so one call is not a
-/// segment; `read_exact` treats a short final segment as an error, which here it is not.
-/// `Interrupted` is retried, as `read_exact` does; every other error is the caller's —
-/// including the one a cancelling reader returns to stop the pass.
-pub(crate) fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
-    let mut filled = 0;
-    while let Some(rest) = buf.get_mut(filled..).filter(|rest| !rest.is_empty()) {
-        match reader.read(rest) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(filled)
 }
 
 #[cfg(test)]
