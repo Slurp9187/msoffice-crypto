@@ -1,4 +1,4 @@
-Status: Planned (approved 2026-10-15)
+Status: Shipped (2026-10-15) in #38, unreleased until 0.1.0-rc.7 is published
 
 # Plan: streaming OOXML encrypt and decrypt (`Read + Seek` in, `Write` out)
 
