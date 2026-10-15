@@ -403,9 +403,11 @@ fn the_whole_container_is_byte_exact_under_a_seeded_rng() {
     assert_eq!(container, again);
 }
 
-/// Measured on 2026-09-05 under `SEED`, `PASSWORD` and `plain.docx`.
+/// Measured on 2026-09-05 under `SEED`, `PASSWORD` and `plain.docx`. Re-measured on 2026-10-15 for
+/// `cfb` 0.15, whose red-black insertion fixup (upstream #83) recolors and relinks the
+/// directory's sibling tree: 12 bytes of entry color and sibling ids moved, nothing else.
 const GOLDEN_LEN: usize = 40960;
-const GOLDEN_SHA256: &str = "491298746ce1e46aed2c98b7bc9c061d97ccedf578062a901aa32f2249bc7e42";
+const GOLDEN_SHA256: &str = "01d21e2862824527c618fc172639d06c06f374ec468a5ce37f28ca00bedefbf4";
 
 /// The same seed reproduces everything; a different seed reproduces nothing — so the
 /// generator is consuming the RNG rather than deriving from the password alone, which

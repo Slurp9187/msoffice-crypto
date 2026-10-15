@@ -82,13 +82,14 @@
 /// | --- | --- | --- |
 /// | [`Error::XmlParse`] | **never** — classified by an exhaustive match | quick-xml quotes text drawn from the document |
 /// | [`Error::RandomSource`] | forwarded, truncated to 200 characters | names an environment failure; on a failure nothing was generated |
-/// | [`Error::Io`] | forwarded | `cfb` 0.14.0 audited: lengths and fixed strings only |
+/// | [`Error::Io`] | forwarded | `cfb` 0.15.0 audited: lengths and fixed strings only |
 ///
 /// [`Error::Io`] is the one `#[from]`, and it does forward `std::io::Error`'s `Display`.
 /// That is audited rather than assumed: on these paths the only producers are `cfb`,
 /// whose `invalid_data!` messages interpolate lengths and fixed strings and never a
-/// stream name or a file byte (`direntry.rs:118-140` in 0.14.0), and `std::io::Cursor`,
-/// which fails only on allocation. **Re-check it on a `cfb` bump** — that is the standing
+/// stream name or a file byte (`direntry.rs:122-140` in 0.15.0; the messages 0.15 added
+/// interpolate only sector numbers and counts, and its two `OutOfMemory` errors are fixed
+/// strings, `stream.rs:184-207`), and `std::io::Cursor`, which fails only on allocation. **Re-check it on a `cfb` bump** — that is the standing
 /// cost of a `#[from]` on a foreign error type, and the reason there is only one.
 // `unreachable_pub` fires on this type in the **detection** build and only there: the
 // re-export at `lib.rs` is `#[cfg(feature = "crypto-ops")]`, so without that feature this

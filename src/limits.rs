@@ -256,8 +256,9 @@ mod crypto {
     /// beat. Here there is nothing to tie-break: the number above is derived fresh, and the
     /// sibling agreeing is corroboration, not provenance.
     ///
-    /// **What it is not.** It is not an anti-amplification bound: `cfb` 0.14 bounds every
-    /// read by the directory entry's `stream_len` *and* by the real FAT chain, so a forged
+    /// **What it is not.** It is not an anti-amplification bound: `cfb` 0.15 bounds every
+    /// read by the directory entry's `stream_len` *and* by the real FAT chain
+    /// (`cfb-0.15.0/src/internal/stream.rs:176-215`), so a forged
     /// length fails the read instead of allocating, and a file claiming a gigabyte must
     /// actually be a gigabyte. It is a memory bound, argued above.
     ///

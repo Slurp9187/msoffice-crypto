@@ -12,7 +12,7 @@
 //!
 //! Take `tests/fixtures/agile_encrypted.docx`, lift its `EncryptionInfo` and
 //! `EncryptedPackage` streams out **verbatim**, and rebuild the whole container from
-//! nothing with `cfb` 0.14 — including the six-stream `\x06DataSpaces` subtree. The
+//! nothing with `cfb` — including the six-stream `\x06DataSpaces` subtree. The
 //! cryptography is then byte-identical to a file that already works, so the only variable
 //! left is who wrote the container.
 //!

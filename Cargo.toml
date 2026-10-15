@@ -1,6 +1,6 @@
 [package]
 name = "msoffice-crypto"
-version = "0.1.0-rc.6"
+version = "0.1.0-rc.7"
 edition = "2021"
 description = "Microsoft Office document encryption per MS-OFFCRYPTO: detect, decrypt and encrypt (agile and Office 2007 standard), with key material that zeroizes on drop and a detection build that links no cryptography. Not affiliated with Microsoft."
 rust-version = "1.85"
@@ -152,7 +152,7 @@ serde_json = { version = "1", optional = true }
 #
 # Unconditional: `classify` opens the container to read /EncryptionInfo, and the
 # reader's bounds-checking is what makes that safe on an untrusted file.
-cfb = "0.14"
+cfb = "0.15"
 
 # Unconditional: `classify` parses the agile EncryptionInfo XML to report the algorithm
 # tuple and whether a <dataIntegrity> element is declared.
@@ -340,7 +340,7 @@ serde_json = "1"
 # Already a normal dependency; repeated here so the integration tests can build the
 # containers they feed to the public API. tests/legacy_allocation.rs needs a real .xls
 # and will not borrow the crate's internal test helpers to get one.
-cfb = "0.14"
+cfb = "0.15"
 
 # Reads the decrypted OOXML payloads in tests/fixture_identity.rs. `docProps/core.xml` is
 # deflated inside the package, so a raw byte scan cannot see the author fields at all --
