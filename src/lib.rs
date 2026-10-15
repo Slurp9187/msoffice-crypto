@@ -1355,10 +1355,12 @@ pub struct DecryptOutcome {
 /// own error as [`Error::Io`] and leaves `writer` partly written too. The password's key
 /// derivation runs before the first read and cannot be interrupted.
 ///
-/// There is no size ceiling, because nothing here grows with the file: the 1 GiB
+/// There is no size ceiling, because nothing of this crate's grows with the file: one
+/// 4096-byte segment slot is its whole working set, and the 1 GiB
 /// [`Error::PackageTooLarge`] belongs to the whole-buffer function, which holds the
-/// package. What does grow is the container's sector table, which `cfb` keeps in memory,
-/// at about 1/128 of the file.
+/// package. What does grow is `cfb`'s: it keeps the container's sector table and a
+/// sector list in memory, measured at 46 MiB of peak heap for a 1 GiB package
+/// (`tests/streaming_memory.rs`).
 ///
 /// # Errors
 ///
