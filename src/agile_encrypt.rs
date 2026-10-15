@@ -98,17 +98,18 @@
 //! rule `sensitive.rs` states and `encryption_info::EncryptionInfoParams` relies on.
 
 use crate::agile::{
-    aes_cbc_encrypt, derive_block_key, spin_hash, BLOCK_KEY_VALUE, BLOCK_VERIFIER_HASH,
-    BLOCK_VERIFIER_INPUT,
+    aes_cbc_encrypt, aes_cbc_encrypt_in_place, derive_block_key, spin_hash, BLOCK_KEY_VALUE,
+    BLOCK_VERIFIER_HASH, BLOCK_VERIFIER_INPUT,
 };
 use crate::encryption_info::{self, EncryptionInfoParams};
 use crate::error::Error;
-use crate::hash::{fit_iv, HashAlgorithm};
-use crate::segments::Segments;
-use crate::sensitive::{SessionKey, VerifierPlaintext};
+use crate::hash::{fit_iv, HashAlgorithm, HmacState};
+use crate::segments::{read_full, Segmenter, SEGMENT_LEN};
+use crate::sensitive::{PlaintextSegment, SessionKey, VerifierPlaintext};
 use crate::{dataspaces, integrity, limits, EncryptParams};
 use rand::{TryCryptoRng, TryRng};
-use secure_gate::RevealSecret;
+use secure_gate::{RevealSecret, RevealSecretMut};
+use std::io::{Cursor, ErrorKind, Read, Seek, SeekFrom, Write};
 
 /// The AES block size — the multiple every blob is padded up to before encryption, and
 /// the `blockSize` both elements declare.
@@ -302,7 +303,7 @@ pub(crate) fn generate<R: TryRng + TryCryptoRng>(
 /// Encrypt a package into the `EncryptedPackage` stream: the 8-byte little-endian
 /// plaintext length, then every 4096-byte segment under its own IV.
 ///
-/// Runs on [`Segments`], the same iterator `agile::decrypt_package` reads through, so the
+/// Runs on [`Segmenter`], the same type `agile::decrypt_package_to` reads through, so the
 /// two directions share one segmentation and one IV derivation (plan D4). The final
 /// segment is zero-padded to a block multiple — herumi's `data.resize(RoundUp(size, 16))`
 /// — and the reader truncates it away against the prefix.
@@ -311,6 +312,7 @@ pub(crate) fn generate<R: TryRng + TryCryptoRng>(
 /// mixed-hash test can write a file whose `<keyData>` names SHA-1. That file is
 /// non-conforming — [MS-OFFCRYPTO] §2.3.4.10 tells a writer the two `hashAlgorithm`
 /// attributes MUST match — and a reader must still honour each element.
+#[cfg(test)]
 pub(crate) fn encrypt_package(
     plaintext: &[u8],
     session_key: &SessionKey,
@@ -318,14 +320,83 @@ pub(crate) fn encrypt_package(
     hash: HashAlgorithm,
 ) -> Result<Vec<u8>, Error> {
     let mut stream = Vec::with_capacity(8 + plaintext.len() + AES_BLOCK_LEN);
-    stream.extend_from_slice(&(plaintext.len() as u64).to_le_bytes());
-    for segment in Segments::new(plaintext, hash, key_data_salt, AES_BLOCK_LEN)? {
-        let segment = segment?;
-        let block =
-            session_key.with_secret(|k| aes_cbc_encrypt(&segment.padded(), k, &segment.iv))?;
-        stream.extend_from_slice(&block);
-    }
+    encrypt_package_to(
+        &mut Cursor::new(plaintext),
+        plaintext.len() as u64,
+        &mut stream,
+        session_key,
+        key_data_salt,
+        hash,
+        None,
+    )?;
     Ok(stream)
+}
+
+/// [`encrypt_package`] from a reader into a writer, one segment at a time, feeding `mac`
+/// every byte written when one is given — prefix and ciphertext, exactly the bytes the
+/// `dataIntegrity` HMAC covers.
+///
+/// `len` is the plaintext length the prefix declares, measured by the caller before the
+/// first byte is read. The reader is then held to it: a reader that ends early, or has
+/// more to give after `len` bytes, changed while it was being encrypted, and the stream
+/// already written would describe a document that does not exist. Both are refused, as
+/// [`Error::Io`] with [`ErrorKind::UnexpectedEof`] and [`ErrorKind::InvalidData`].
+///
+/// Each segment is read into one wrapped [`PlaintextSegment`] slot and encrypted in
+/// place, so the plaintext is never in an allocation that is not wiped.
+pub(crate) fn encrypt_package_to<R: Read, W: Write + ?Sized>(
+    reader: &mut R,
+    len: u64,
+    out: &mut W,
+    session_key: &SessionKey,
+    key_data_salt: &[u8],
+    hash: HashAlgorithm,
+    mut mac: Option<&mut HmacState>,
+) -> Result<(), Error> {
+    let prefix = len.to_le_bytes();
+    out.write_all(&prefix)?;
+    if let Some(mac) = mac.as_deref_mut() {
+        mac.update(&prefix);
+    }
+
+    let mut segmenter = Segmenter::new(hash, key_data_salt, AES_BLOCK_LEN)?;
+    let mut body = reader.by_ref().take(len);
+    let mut read = 0u64;
+    let mut slot = PlaintextSegment::new([0u8; SEGMENT_LEN]);
+    slot.with_secret_mut(|buf| -> Result<(), Error> {
+        while let Some(segment) = segmenter.fill(&mut body, buf)? {
+            read += segment.len as u64;
+            let Some(block) = buf.get_mut(..segment.padded_len) else {
+                return Err(Error::CipherError);
+            };
+            session_key.with_secret(|k| aes_cbc_encrypt_in_place(block, k, &segment.iv))?;
+            out.write_all(block)?;
+            if let Some(mac) = mac.as_deref_mut() {
+                mac.update(block);
+            }
+        }
+        Ok(())
+    })?;
+    held_to_length(reader, len, read)
+}
+
+/// Refuse a reader that did not deliver exactly the `len` bytes its length promised —
+/// the check both writers make after their last segment.
+pub(crate) fn held_to_length<R: Read>(reader: &mut R, len: u64, read: u64) -> Result<(), Error> {
+    if read < len {
+        return Err(Error::Io(std::io::Error::new(
+            ErrorKind::UnexpectedEof,
+            format!("the input ended after {read} of the {len} bytes it was measured at"),
+        )));
+    }
+    let mut probe = [0u8; 1];
+    if read_full(reader, &mut probe)? != 0 {
+        return Err(Error::Io(std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!("the input grew past the {len} bytes it was measured at"),
+        )));
+    }
+    Ok(())
 }
 
 /// Encrypt an OOXML package with a password into a complete CFB container — the whole
@@ -386,41 +457,120 @@ pub(crate) fn encrypt<R: TryRng + TryCryptoRng>(
         )));
     }
 
-    let material = generate(password, params, rng)?;
-    // `params.hash` on both calls below is `<keyData>`'s: the package segment IVs and
-    // the two `dataIntegrity` IVs are derived from `keyData/@saltValue` under
-    // `keyData/@hashAlgorithm`. One field serves both elements because §2.3.4.10 MUSTs
-    // them equal; the *salt* does not, which is why `key_data_salt` is passed and the
-    // password salt is nowhere near this half.
-    let encrypted_package = encrypt_package(
-        package,
-        &material.session_key,
-        &material.key_data_salt,
-        params.hash,
-    )?;
-    let blobs = integrity::generate(
-        &material.session_key,
-        params.hash,
-        &material.key_data_salt,
-        AES_BLOCK_LEN,
-        &encrypted_package,
+    let mut container = Cursor::new(Vec::new());
+    encrypt_to(
+        &mut Cursor::new(package),
+        &mut container,
+        password,
+        params,
         rng,
     )?;
-    let info = encryption_info::write(&EncryptionInfoParams {
+    Ok(container.into_inner())
+}
+
+/// [`encrypt`] from a seekable reader into a seekable writer, holding one segment of the
+/// package at a time.
+///
+/// The order the whole-buffer path followed is kept, randomness included: the key
+/// material is drawn, then the `dataIntegrity` HMAC key — the draw `integrity::generate`
+/// used to make after the package was encrypted, and makes from the same RNG state now,
+/// before. So a seeded run writes the same bytes through either function. The HMAC is
+/// fed as the `EncryptedPackage` stream is written, and `\EncryptionInfo`, which carries
+/// it, is written as a same-length placeholder first and patched last
+/// ([`dataspaces::write_container`]).
+///
+/// `reader` is measured by seeking to its end, and must then deliver exactly that many
+/// bytes ([`encrypt_package_to`]).
+///
+/// # Errors
+///
+/// As [`encrypt`], less the payload ceiling, which bounds an allocation this function
+/// does not make; plus [`Error::Io`] from either stream, a cancelling reader included.
+pub(crate) fn encrypt_to<R, W, G>(
+    reader: &mut R,
+    writer: &mut W,
+    password: &str,
+    params: EncryptParams,
+    rng: &mut G,
+) -> Result<(), Error>
+where
+    R: Read + Seek,
+    W: Read + Write + Seek,
+    G: TryRng + TryCryptoRng,
+{
+    params.validate()?;
+    let len = reader.seek(SeekFrom::End(0))?;
+    reader.seek(SeekFrom::Start(0))?;
+
+    let material = generate(password, params, rng)?;
+    // `params.hash` is `<keyData>`'s, for the package IVs and the two `dataIntegrity`
+    // IVs alike: one field serves both elements because §2.3.4.10 MUSTs them equal. The
+    // *salt* does not, which is why `key_data_salt` is passed and the password salt is
+    // nowhere near this half.
+    let hmac_key = integrity::draw_key(params.hash, rng)?;
+
+    // The two blobs are a digest's length rounded up to a block, whatever they hold, so
+    // a document carrying zeros there is exactly as long as the real one.
+    let blob_len = round_up(params.hash.digest_len(), AES_BLOCK_LEN);
+    let unknown_blob = vec![0u8; blob_len];
+    let placeholder = encryption_info::write(&info_params(
+        params,
+        &material,
+        &unknown_blob,
+        &unknown_blob,
+    ))?;
+
+    dataspaces::write_container(writer, &placeholder, |stream| {
+        let mut mac = hmac_key.with_secret(|k| params.hash.hmac_state(k));
+        encrypt_package_to(
+            reader,
+            len,
+            stream,
+            &material.session_key,
+            &material.key_data_salt,
+            params.hash,
+            Some(&mut mac),
+        )?;
+        let blobs = integrity::seal(
+            &material.session_key,
+            params.hash,
+            &material.key_data_salt,
+            AES_BLOCK_LEN,
+            &hmac_key,
+            mac,
+        )?;
+        encryption_info::write(&info_params(
+            params,
+            &material,
+            &blobs.encrypted_hmac_key,
+            &blobs.encrypted_hmac_value,
+        ))
+    })
+}
+
+/// The `EncryptionInfo` document for `material`, around a given pair of `dataIntegrity`
+/// blobs — called twice by [`encrypt_to`], for the placeholder and for the real thing, so
+/// the two cannot differ in anything but the blobs.
+fn info_params<'a>(
+    params: EncryptParams,
+    material: &'a AgileKeyMaterial,
+    encrypted_hmac_key: &'a [u8],
+    encrypted_hmac_value: &'a [u8],
+) -> EncryptionInfoParams<'a> {
+    EncryptionInfoParams {
         // The same value `generate` was handed, so the document cannot describe a tuple
         // other than the one that produced these blobs. That is the whole reason
         // `EncryptionInfoParams` carries an `EncryptParams` rather than loose numbers:
         // the disagreement is not expressible.
         params,
         key_data_salt: &material.key_data_salt,
-        encrypted_hmac_key: &blobs.encrypted_hmac_key,
-        encrypted_hmac_value: &blobs.encrypted_hmac_value,
+        encrypted_hmac_key,
+        encrypted_hmac_value,
         password_salt: &material.password_salt,
         encrypted_verifier_hash_input: &material.encrypted_verifier_hash_input,
         encrypted_verifier_hash_value: &material.encrypted_verifier_hash_value,
         encrypted_key_value: &material.encrypted_key_value,
-    })?;
-    dataspaces::build_container(&info, &encrypted_package)
+    }
 }
 
 /// `roundUp(n, multiple)` — the format's padding rule, in one place.

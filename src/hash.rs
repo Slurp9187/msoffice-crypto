@@ -215,22 +215,69 @@ impl HashAlgorithm {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn hmac(self, key: &[u8], message: &[u8]) -> Vec<u8> {
+        let mut mac = self.hmac_state(key);
+        mac.update(message);
+        mac.finalize()
+    }
+
+    /// An HMAC under this hash, fed a piece at a time: the shape the streaming paths need,
+    /// where the `EncryptedPackage` stream passes through once and is never whole in
+    /// memory. [`hmac`](Self::hmac) is this with the whole message in one `update`, so
+    /// the two cannot disagree.
+    pub(crate) fn hmac_state(self, key: &[u8]) -> HmacState {
         macro_rules! run {
-            ($d:ty) => {{
+            ($d:ty, $variant:ident) => {
                 // HMAC accepts a key of any length, so `new_from_slice` cannot fail
                 // here; the `expect` documents that rather than hiding a real case.
-                let mut mac =
-                    <Hmac<$d>>::new_from_slice(key).expect("HMAC accepts keys of any length");
-                mac.update(message);
-                mac.finalize().into_bytes().to_vec()
-            }};
+                HmacState::$variant(
+                    <Hmac<$d>>::new_from_slice(key).expect("HMAC accepts keys of any length"),
+                )
+            };
         }
         match self {
-            Self::Sha1 => run!(Sha1),
-            Self::Sha256 => run!(Sha256),
-            Self::Sha384 => run!(Sha384),
-            Self::Sha512 => run!(Sha512),
+            Self::Sha1 => run!(Sha1, Sha1),
+            Self::Sha256 => run!(Sha256, Sha256),
+            Self::Sha384 => run!(Sha384, Sha384),
+            Self::Sha512 => run!(Sha512, Sha512),
+        }
+    }
+}
+
+/// An HMAC in progress, under whichever hash the file named.
+///
+/// **Holds ipad/opad state derived from the key, and nothing wipes it.** `hmac` 0.12 has
+/// no `Drop` and no `zeroize` feature — the residue the secure-gate skill already records
+/// for the one-shot [`HashAlgorithm::hmac`]. The streaming paths keep this alive for a
+/// whole pass over the package rather than for one call, which lengthens the window but
+/// does not change what is exposed: the capability to forge a tag under that one key.
+/// It lives on the stack of the function running the pass and is never boxed or cloned.
+pub(crate) enum HmacState {
+    Sha1(Hmac<Sha1>),
+    Sha256(Hmac<Sha256>),
+    Sha384(Hmac<Sha384>),
+    Sha512(Hmac<Sha512>),
+}
+
+impl HmacState {
+    pub(crate) fn update(&mut self, data: &[u8]) {
+        match self {
+            Self::Sha1(m) => m.update(data),
+            Self::Sha256(m) => m.update(data),
+            Self::Sha384(m) => m.update(data),
+            Self::Sha512(m) => m.update(data),
+        }
+    }
+
+    /// The tag, as an owned `Vec` of exactly the digest's length — the shape
+    /// `IntegrityTag::new` takes by move, so nothing is abandoned on the way in.
+    pub(crate) fn finalize(self) -> Vec<u8> {
+        match self {
+            Self::Sha1(m) => m.finalize().into_bytes().to_vec(),
+            Self::Sha256(m) => m.finalize().into_bytes().to_vec(),
+            Self::Sha384(m) => m.finalize().into_bytes().to_vec(),
+            Self::Sha512(m) => m.finalize().into_bytes().to_vec(),
         }
     }
 }

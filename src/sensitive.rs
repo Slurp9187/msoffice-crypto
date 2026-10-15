@@ -20,9 +20,10 @@
 //! long-lived process that decrypts documents alongside other secrets does.
 //!
 //! Every alias whose length the *file* decides is `Dynamic<Vec<u8>>` rather than
-//! `Fixed<[u8; N]>` — the five `Fixed` aliases (`XorObfuscationArray`, and the KDF scratch
-//! buffers `SpinState`, `PadBlock`, `Office97Buffer` and `AnsiPassword`) are the exceptions
-//! and say so themselves, each length being the spec's rather than the file's.
+//! `Fixed<[u8; N]>` — the six `Fixed` aliases (`XorObfuscationArray`, the KDF scratch
+//! buffers `SpinState`, `PadBlock`, `Office97Buffer` and `AnsiPassword`, and the streaming
+//! paths' `PlaintextSegment`) are the exceptions and say so themselves, each length being the
+//! spec's rather than the file's.
 //!
 //! **That split is two rules, not one, and they carry different weight.** In the
 //! file-decided direction it is not a choice at all: `Fixed<[u8; N]>` needs `N` at compile
@@ -56,7 +57,8 @@
 //! `SpinState` where a `PadBlock` or a `DerivedKey` is meant is already a compile error.
 //! The one same-shape pair is `AnsiPassword` and `XorObfuscationArray`, both 16 bytes,
 //! both confined to `xor_obfuscation.rs`. The seven interchangeable `Dynamic` roles are
-//! where the question still lives, unchanged.
+//! where the question still lives, unchanged. The thirteenth, `PlaintextSegment`, is a
+//! `Fixed` of a size nothing else has, so it does not move it either.
 
 use secure_gate::Dynamic;
 
@@ -176,6 +178,21 @@ pub(crate) type Office97Buffer = Fixed<[u8; 336]>;
 /// and is never read. `Fixed` for the reason that alias gives: the bound is the spec's.
 #[cfg(feature = "legacy-binary")]
 pub(crate) type AnsiPassword = Fixed<[u8; 16]>;
+
+/// One 4096-byte segment of package **plaintext** — read from the caller's reader on the
+/// way into the cipher, or decrypted on the way out to the caller's writer.
+///
+/// The streaming paths are why it exists. The whole-buffer API never held plaintext the
+/// caller had not handed it or was not handed back; a streaming one carries every byte of
+/// the document through a buffer of its own, one segment at a time, and that buffer is
+/// wiped on drop rather than left for the allocator. It is made once per pass and reused,
+/// so the whole document passes through one wrapped slot; on the encrypt side the slot is
+/// encrypted in place and leaves as ciphertext.
+///
+/// `Fixed`, and 4096 bytes, because the segment length is [MS-OFFCRYPTO] §2.3.4.15's, not
+/// the file's. Standard encryption has no segments and reads in the same 4096-byte steps,
+/// so one buffer type serves both formats.
+pub(crate) type PlaintextSegment = Fixed<[u8; 4096]>;
 
 /// The session encryption key that actually decrypts `EncryptedPackage`, recovered
 /// by decrypting `encryptedKeyValue` under a [`DerivedKey`]. This is the key an

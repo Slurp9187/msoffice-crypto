@@ -36,6 +36,8 @@
 //! this does, are the same operation: 4096 is a multiple of 16, so no interior segment can
 //! be short.
 
+use std::io::{ErrorKind, Read};
+
 use crate::error::Error;
 use crate::hash::{derive_iv, HashAlgorithm};
 
@@ -50,14 +52,17 @@ pub(crate) const SEGMENT_LEN: usize = 4096;
 /// AES block size in bytes — the multiple the final segment is padded up to.
 const AES_BLOCK_LEN: usize = 16;
 
-/// One segment of the package, with the IV that belongs to it.
-pub(crate) struct Segment<'a> {
-    /// The segment's bytes as stored — up to [`SEGMENT_LEN`], shorter only for the last.
-    pub(crate) bytes: &'a [u8],
+/// One segment, as [`Segmenter::fill`] left it in the caller's slot.
+pub(crate) struct Filled {
+    /// Bytes of the input in the slot — [`SEGMENT_LEN`], shorter only for the last.
+    pub(crate) len: usize,
+    /// `len` rounded up to an AES block. The slot is zero from `len` to here, so
+    /// `slot[..padded_len]` is what the cipher takes.
+    pub(crate) padded_len: usize,
     /// `H(salt || LE32(index))[..block_size]`.
     ///
     /// The index itself is not carried: decrypt does not need it, encrypt gets it folded
-    /// into this value, and a test recovers it from `enumerate()`. A field kept for a
+    /// into this value, and a test recovers it by counting. A field kept for a
     /// hypothetical caller is the `allow(dead_code)` argument wearing a different hat.
     ///
     /// Not wrapped: an IV is not key material, and on the encrypt side it is derived from
@@ -65,55 +70,31 @@ pub(crate) struct Segment<'a> {
     pub(crate) iv: Vec<u8>,
 }
 
-impl Segment<'_> {
-    /// The segment's bytes padded up to an AES block multiple with zeros.
-    ///
-    /// Allocates because both callers hand the result to a cipher that needs an owned
-    /// buffer anyway. A segment already on a block boundary — every segment but the last,
-    /// and the last one too in any well-formed file — copies and does not grow.
-    pub(crate) fn padded(&self) -> Vec<u8> {
-        let mut padded = self.bytes.to_vec();
-        let rem = padded.len() % AES_BLOCK_LEN;
-        if rem != 0 {
-            padded.resize(padded.len() + (AES_BLOCK_LEN - rem), 0);
-        }
-        padded
-    }
-}
-
-/// The segments of one payload, in order, each carrying its own IV.
+/// Cuts a payload into segments as it is read, giving each the IV its index derives.
 ///
-/// Borrows the payload rather than owning it: neither direction needs to modify the input,
-/// and a 1 GiB package is exactly the thing not to copy on the way in.
-pub(crate) struct Segments<'a> {
-    data: &'a [u8],
+/// Reads rather than borrows, so neither direction ever holds the whole package: the
+/// encrypt path reads plaintext from the caller's reader and the decrypt path reads
+/// ciphertext out of the `EncryptedPackage` stream, a segment at a time, into one slot the
+/// caller owns and reuses. The slot is the caller's because what it holds differs by
+/// direction — plaintext going in to encrypt, plaintext coming out of decrypt — and the
+/// caller is the one that knows it must be a wiped buffer.
+pub(crate) struct Segmenter<'a> {
     salt: &'a [u8],
     hash: HashAlgorithm,
     block_size: usize,
-    next_index: u32,
+    /// The index the next segment will carry, or `None` once `u32::MAX` has been used.
+    next_index: Option<u32>,
 }
 
-impl<'a> Segments<'a> {
-    /// Segment `data` under `<keyData>`'s hash, salt and block size.
-    ///
-    /// Both arguments that size something are checked here rather than per segment, so a
-    /// bad one is reported once, before any hashing, and with a message naming the field.
+impl<'a> Segmenter<'a> {
+    /// Segment under `<keyData>`'s hash, salt and block size.
     ///
     /// # Errors
     ///
-    /// [`Error::BadParameters`] if `block_size` exceeds the digest the named
-    /// hash produces — the IV would be a slice past the end — or if `data` would need more
-    /// than `u32::MAX` segments.
-    ///
-    /// The segment-count check is what makes the `index.to_le_bytes()` in `next` a fact
-    /// rather than a hope: the counter is a `u32` because the format says the IV suffix is
-    /// LE32, so a payload with more segments than that would silently wrap and reuse every
-    /// IV from zero. It is unreachable through this crate's own callers, since
-    /// [`crate::limits::PAYLOAD_CEILING`] caps the payload at 1 GiB and therefore at
-    /// 262 144 segments, but the cap and this type are separate concerns and a later
-    /// streaming caller may not carry the first one.
+    /// [`Error::BadParameters`] if `block_size` exceeds the digest the named hash
+    /// produces — the IV would be a slice past the end. Checked here, once, before any
+    /// hashing, with a message naming the field.
     pub(crate) fn new(
-        data: &'a [u8],
         hash: HashAlgorithm,
         salt: &'a [u8],
         block_size: usize,
@@ -126,58 +107,77 @@ impl<'a> Segments<'a> {
                 hash.digest_len()
             )));
         }
-        if data.len().div_ceil(SEGMENT_LEN) > u32::MAX as usize {
-            return Err(Error::BadParameters(format!(
-                "a {}-byte payload needs more than u32::MAX {SEGMENT_LEN}-byte segments",
-                data.len()
-            )));
-        }
         Ok(Self {
-            data,
             salt,
             hash,
             block_size,
-            next_index: 0,
+            next_index: Some(0),
         })
     }
 
-    /// How many segments this will yield.
-    pub(crate) fn len(&self) -> usize {
-        self.data.len().div_ceil(SEGMENT_LEN)
-    }
-}
-
-impl<'a> Iterator for Segments<'a> {
-    /// `Result`, even though [`Segments::new`] has already checked what can go wrong.
+    /// Read the next segment of `reader` into `slot`, zero its tail up to an AES block,
+    /// and return where it ends and the IV it takes — or `None` once `reader` is empty.
     ///
-    /// The constructor's check is for the message; this is so that no future edit to
-    /// [`derive_iv`] can turn a violated invariant into a slice panic. Yielding the error
-    /// costs a caller one `?` and costs a hostile file its denial of service.
-    type Item = Result<Segment<'a>, Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let start = (self.next_index as usize).checked_mul(SEGMENT_LEN)?;
-        if start >= self.data.len() {
-            return None;
+    /// Empty input yields nothing rather than one empty segment: a writer handed an empty
+    /// package emits no ciphertext, not one segment of padding.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if `reader` fails, a cancelling reader included. [`Error::BadParameters`]
+    /// if the payload needs a segment past index `u32::MAX`. The format's IV suffix is LE32,
+    /// so a counter allowed to wrap would reuse every IV from zero under one key. No caller in
+    /// this crate gets near it — the V3 stream cap allows 2^19 segments — but the cap and this
+    /// type are separate concerns, so the counter refuses rather than wraps.
+    pub(crate) fn fill<R: Read>(
+        &mut self,
+        reader: &mut R,
+        slot: &mut [u8; SEGMENT_LEN],
+    ) -> Result<Option<Filled>, Error> {
+        let len = read_full(reader, slot)?;
+        if len == 0 {
+            return Ok(None);
         }
-        let end = self.data.len().min(start + SEGMENT_LEN);
-        let index = self.next_index;
-        self.next_index += 1;
-
-        let iv = match derive_iv(self.hash, self.salt, &index.to_le_bytes(), self.block_size) {
-            Ok(iv) => iv,
-            Err(e) => return Some(Err(e)),
+        let Some(index) = self.next_index else {
+            return Err(Error::BadParameters(format!(
+                "the payload needs more than 2^32 {SEGMENT_LEN}-byte segments; the IV's                  LE32 index would wrap"
+            )));
         };
-        Some(Ok(Segment {
-            bytes: &self.data[start..end],
+        self.next_index = index.checked_add(1);
+
+        let padded_len = len.div_ceil(AES_BLOCK_LEN) * AES_BLOCK_LEN;
+        // `padded_len <= SEGMENT_LEN` because 4096 is itself a block multiple, so this
+        // slice is in bounds; `get_mut` keeps that a fact the code states, not one a
+        // panic would report.
+        if let Some(tail) = slot.get_mut(len..padded_len) {
+            tail.fill(0);
+        }
+        let iv = derive_iv(self.hash, self.salt, &index.to_le_bytes(), self.block_size)?;
+        Ok(Some(Filled {
+            len,
+            padded_len,
             iv,
         }))
     }
+}
 
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.len().saturating_sub(self.next_index as usize);
-        (remaining, Some(remaining))
+/// Fill `buf` from `reader` until it is full or the reader is exhausted, and return how
+/// many bytes arrived.
+///
+/// `Read::read` may return short at any point before the end, so one call is not a
+/// segment; `read_exact` treats a short final segment as an error, which here it is not.
+/// `Interrupted` is retried, as `read_exact` does; every other error is the caller's —
+/// including the one a cancelling reader returns to stop the pass.
+pub(crate) fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while let Some(rest) = buf.get_mut(filled..).filter(|rest| !rest.is_empty()) {
+        match reader.read(rest) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
     }
+    Ok(filled)
 }
 
 #[cfg(test)]

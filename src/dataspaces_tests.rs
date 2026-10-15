@@ -34,6 +34,7 @@
 //! through Word rather than an open, or standard (2007) encryption.
 
 use super::*;
+use std::io::Cursor;
 use std::io::Read;
 
 // ---------------------------------------------------------------------------

@@ -47,7 +47,7 @@
 //! writes none, so it never wants this module.
 
 use crate::error::Error;
-use std::io::{Cursor, Write};
+use std::io::{Read, Seek, Write};
 
 // ---------------------------------------------------------------------------
 // Stream paths
@@ -267,41 +267,94 @@ pub(crate) fn transform_info() -> Vec<u8> {
 /// blob below is a compile-time constant, so there is no input-shaped failure here — but
 /// the writes still go through `io::Write` and this crate does not `unwrap` on a code
 /// path a caller can reach.
+#[cfg(test)]
 pub(crate) fn build_container(
     encryption_info: &[u8],
     encrypted_package: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    let mut cursor = Cursor::new(Vec::new());
-    {
-        let mut container = cfb::CompoundFile::create_with_version(cfb::Version::V3, &mut cursor)?;
-
-        for path in STORAGE_PATHS {
-            container.create_storage_all(path)?;
-        }
-
-        for (path, bytes) in [
-            (VERSION, data_space_version_info()),
-            (DATA_SPACE_MAP, data_space_map()),
-            (STRONG_ENCRYPTION_DATA_SPACE, data_space_definition()),
-            (PRIMARY, transform_info()),
-            (ENCRYPTION_INFO, encryption_info.to_vec()),
-            (ENCRYPTED_PACKAGE, encrypted_package.to_vec()),
-        ] {
-            let mut stream = container.create_new_stream(path)?;
-            stream.write_all(&bytes)?;
-            stream.flush()?;
-        }
-
-        // After every write: creating a stream re-stamps its parent storages' modified
-        // time, so this has to be the last thing that touches the directory.
-        for path in TIMESTAMPED_ENTRIES {
-            container.set_created_time(path, cfb_zero_time())?;
-            container.set_modified_time(path, cfb_zero_time())?;
-        }
-
-        container.flush()?;
-    }
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    write_container(&mut cursor, encryption_info, |stream| {
+        stream.write_all(encrypted_package)?;
+        Ok(encryption_info.to_vec())
+    })?;
     Ok(cursor.into_inner())
+}
+
+/// [`build_container`] into `writer`, with the `\EncryptedPackage` stream written by
+/// `write_package` as it goes rather than handed over whole.
+///
+/// `\EncryptionInfo` is created first, from `info_placeholder`, because that is the order
+/// every build of this container has had and the seeded goldens pin the layout it gives.
+/// An agile writer cannot know its final `EncryptionInfo` until the package HMAC is done,
+/// so `write_package` returns it, and it is written over the placeholder in place. That
+/// works because the document's length is fixed before the HMAC is known: the two
+/// `dataIntegrity` blobs are a digest's length rounded up to a block, whatever they hold.
+/// A returned document of any other length is refused rather than written.
+///
+/// `writer` must be readable as well as writable: `cfb` reads back the sectors it
+/// allocates. It is left at an unspecified position.
+///
+/// # Errors
+///
+/// [`Error::Io`] from `writer` or from `write_package`'s writes; whatever
+/// `write_package` returns; [`Error::BadParameters`] if the returned `EncryptionInfo` is
+/// not the placeholder's length.
+pub(crate) fn write_container<W, F>(
+    writer: &mut W,
+    info_placeholder: &[u8],
+    write_package: F,
+) -> Result<(), Error>
+where
+    W: Read + Write + Seek,
+    F: FnOnce(&mut dyn Write) -> Result<Vec<u8>, Error>,
+{
+    let mut container = cfb::CompoundFile::create_with_version(cfb::Version::V3, writer)?;
+
+    for path in STORAGE_PATHS {
+        container.create_storage_all(path)?;
+    }
+
+    for (path, bytes) in [
+        (VERSION, data_space_version_info()),
+        (DATA_SPACE_MAP, data_space_map()),
+        (STRONG_ENCRYPTION_DATA_SPACE, data_space_definition()),
+        (PRIMARY, transform_info()),
+        (ENCRYPTION_INFO, info_placeholder.to_vec()),
+    ] {
+        let mut stream = container.create_new_stream(path)?;
+        stream.write_all(&bytes)?;
+        // Flushed explicitly: `cfb`'s `Drop` flushes too, but discards the error.
+        stream.flush()?;
+    }
+
+    let mut package = container.create_new_stream(ENCRYPTED_PACKAGE)?;
+    let info = write_package(&mut package)?;
+    package.flush()?;
+    drop(package);
+
+    if info.len() != info_placeholder.len() {
+        return Err(Error::BadParameters(format!(
+            "the final EncryptionInfo is {} bytes but its placeholder was {}; the stream \
+             cannot change length once the package has been written after it",
+            info.len(),
+            info_placeholder.len()
+        )));
+    }
+    if info != info_placeholder {
+        let mut stream = container.open_stream(ENCRYPTION_INFO)?;
+        stream.write_all(&info)?;
+        stream.flush()?;
+    }
+
+    // After every write: creating a stream re-stamps its parent storages' modified
+    // time, so this has to be the last thing that touches the directory.
+    for path in TIMESTAMPED_ENTRIES {
+        container.set_created_time(path, cfb_zero_time())?;
+        container.set_modified_time(path, cfb_zero_time())?;
+    }
+
+    container.flush()?;
+    Ok(())
 }
 
 #[cfg(test)]
