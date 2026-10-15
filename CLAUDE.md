@@ -11,9 +11,9 @@ sibling solved it before inventing something new.
 
 ## Project Status — release candidates published, no stable release
 
-> **`0.1.0-rc.2` (2026-09-15) and `0.1.0-rc.3` (2026-09-19) are live on crates.io, neither
-> yanked. There is no stable release. The only known consumer is a private application in
-> the same hands.**
+> **`0.1.0-rc.2` through `0.1.0-rc.7` are live on crates.io, none yanked; `CHANGELOG.md`'s
+> dated headings say when each was cut, and the registry index is the check. There is no
+> stable release. The only known consumer is a private application in the same hands.**
 
 This section said "has never been published" until 2026-09-19, two weeks after it stopped
 being true. The conclusions below were right anyway, but for a reason the text did not give,
@@ -42,16 +42,17 @@ an rc line is for.
   includes — all fine, and expected, in a 0.x crate with one consumer.
 - **The one real constraint is that consumer's Office handler, and it is live.** It was
   dormant until rc.2 published and this file said so for four days after it stopped being
-  true. Verified 2026-09-21 in the consumer's own tree rather than taken on report
-  (`Cargo.toml:455`): it takes this crate from crates.io pinned at exactly `0.1.0-rc.3`
-  with default features off, enables
-  it through `msoffice-crypto/legacy-binary` (the superset, for
-  `decrypt_binary_office`), and calls six entry points — `encrypt_ooxml`, `classify`,
-  `is_cfb_office`, `decrypt_ooxml_with_policy`, `decrypt_binary_office` and
-  `encrypt_ooxml_standard`. **Every item on the old re-enable list is done**, so that list is
-  history rather than a to-do.
+  true. Verified in the consumer's own tree rather than taken on report (`Cargo.toml:222`,
+  as of encrypted-file-vault #1205): it takes this crate from crates.io pinned at exactly
+  `0.1.0-rc.7` with default features off, enables it through
+  `msoffice-crypto/legacy-binary` (the superset, for `decrypt_binary_office`), and calls
+  seven entry points — `classify`, `is_cfb_office`, `decrypt_ooxml_with_policy`,
+  `decrypt_binary_office`, `encrypt_ooxml`, `encrypt_ooxml_with_params` and
+  `encrypt_ooxml_standard_with_key_bits`. None of rc.7's streaming `_to` functions yet.
+  **Every item on the old re-enable list is done**, so that list is history rather than a
+  to-do.
 
-  What replaces it: **the pin is one release back, and a bump is the event to write for.**
+  What replaces it: **the pin is exact, and a bump is the event to write for.**
   An API change here reaches nobody until someone moves that `=` pin, so when you change the
   API, say in your report what the bump lands — not what a re-enable would need. Both kinds
   of change count, and they are not equally visible: a refusal that did not exist before
@@ -344,8 +345,8 @@ Verify with
 
 **secure-gate version.** This crate tracks 0.9.x, matching `odf-crypto`, and the
 dependency is optional on `crypto-ops` — the detection build holds no key material.
-Both this crate and the consumer named above pin `=0.9.0-rc.12` (`Cargo.toml:326` here,
-`Cargo.toml:317` there, verified 2026-09-21), so today they resolve to one copy rather than
+Both this crate and the consumer named above pin `=0.9.0-rc.12` (`Cargo.toml:335` here,
+`Cargo.toml:91` there, as of encrypted-file-vault #1205), so today they resolve to one copy rather than
 two. That is a coincidence of timing and not a requirement: **no secure-gate type crosses
 this crate's public API, by design**, so a consumer on a different version resolves both
 side by side without conflict. The plan to move the boundary onto its types ("S1 part 3")
