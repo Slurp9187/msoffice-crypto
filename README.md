@@ -243,7 +243,8 @@ gives one, an existing file is never overwritten without `--force`, and the writ
 temporary file renamed over the target, so an interrupted run cannot leave a half-written
 `.docx` that looks complete. Both commands stream: a `.docx`, `.xlsx` or `.pptx` passes
 through a segment at a time, whatever its size, and a tampered one is refused before
-anything is written. Only a 97-2003 document is read whole. The `integrity:` line goes to stderr after *every* successful
+anything is written. Only a 97-2003 document is read whole. On Linux and Windows the
+temporary vanishes with the process, so even a killed decrypt leaves no plaintext behind. The `integrity:` line goes to stderr after *every* successful
 decrypt — including after `--integrity skip` — so `-o -` into a pipe is unaffected and
 nobody holds unauthenticated bytes without being told.
 

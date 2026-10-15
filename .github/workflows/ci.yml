@@ -285,7 +285,7 @@ jobs:
           echo "detection-build graph:"; cat graph.txt
           echo "default-feature graph:"; cat graph-default.txt
           for g in graph.txt graph-default.txt; do
-            if grep -E '^(aes|cbc|ecb|sha1|sha2|hmac|subtle|rand|rand_core|getrandom|chacha20|secure-gate|zeroize|base64|rc4|md-5|clap|rpassword|rtoolbox|serde_json) ' "$g"; then
+            if grep -E '^(aes|cbc|ecb|sha1|sha2|hmac|subtle|rand|rand_core|getrandom|chacha20|secure-gate|zeroize|base64|rc4|md-5|clap|rpassword|rtoolbox|serde_json|rustix|ctrlc|nix) ' "$g"; then
               echo "::error::$g: a cipher, hash, MAC, RNG, key-wrapping or CLI-only crate is in the detection build"
               exit 1
             fi

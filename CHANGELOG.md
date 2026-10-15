@@ -73,6 +73,22 @@ pipe, and copies it out. Two orders changed: an existing output is refused befor
 password is asked for, and a failure after bytes reached stdout says so. 97-2003 documents
 are still read whole.
 
+**A killed decrypt leaves no plaintext behind** (#41). Before this, a Ctrl-C or a hard kill in
+the middle of a decrypt left a partial plaintext `.X.msoffice-crypto.tmp` beside the target,
+which nothing removed. The temporary now vanishes with the process:
+- **Linux:** it is an unnamed `O_TMPFILE`, named only once it is complete.
+- **Windows:** it is held delete-pending until just before the rename, so the handle a killed
+  process closes deletes it.
+- **Elsewhere** (macOS, or a Linux file system without `O_TMPFILE`): a Ctrl-C handler removes
+  it. This fallback cannot survive a hard kill.
+
+A test kills the binary mid-decrypt, once its temporary is seen open, and finds the directory
+as it was; with the Windows delete mark removed it finds the plaintext temporary instead.
+`encrypt -o -`'s scratch container uses the same mechanism. The dependencies are
+target-specific and `cli`-only: `rustix` on Linux, `windows-sys` on Windows (already in the
+graph through `rpassword`), `ctrlc` elsewhere. The binary denies `unsafe_code` and allows it
+on the one Windows call that sets the delete mark.
+
 Evidence: files written by the binary itself (`msoffice-crypto encrypt`, built from `87503c9`)
 pass the four-reader gate, run on this machine 2026-10-15: agile, SHA-256
 `d66cfca5b637249737b90dca207db3a1d281d153157e0a0031a470fa38f56a91`, and standard,

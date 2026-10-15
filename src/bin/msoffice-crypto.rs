@@ -8,6 +8,8 @@
 //! the run. `--password` is registered anyway, hidden, purely so that reaching for it
 //! produces an explanation rather than "unexpected argument".
 
+#![deny(unsafe_code)]
+
 use std::fs::{File, OpenOptions};
 use std::io::{IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -1114,20 +1116,17 @@ fn deliver_seekable(
                 std::process::id()
             ));
             let result = (|| {
-                let mut f = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create_new(true)
-                    .open(&tmp)
-                    .map_err(Error::Io)?;
-                produce(&mut f)?;
+                // Never kept: it vanishes when it drops, at the end of this closure, on
+                // success and failure alike -- and with the process if it is killed.
+                let mut pending =
+                    Pending::create(&std::env::temp_dir(), &tmp).map_err(Error::Io)?;
+                let f = pending.file();
+                produce(f)?;
                 f.seek(SeekFrom::Start(0)).map_err(Error::Io)?;
                 let mut out = std::io::stdout().lock();
-                std::io::copy(&mut f, &mut out).map_err(Error::Io)?;
+                std::io::copy(f, &mut out).map_err(Error::Io)?;
                 out.flush().map_err(Error::Io)
             })();
-            // Best effort, on success and failure alike.
-            let _ = std::fs::remove_file(&tmp);
             result.map_err(|e| report(file, &e))
         }
     }
@@ -1183,35 +1182,25 @@ fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// [`write_atomically`] with the bytes produced into the temporary as they come, rather
 /// than handed over whole: what lets a streamed decrypt or encrypt be atomic too.
 ///
-/// The temporary is opened readable as well as writable, because an encrypt assembles a
-/// container in it. Whatever fails -- `produce`, the flush to disk, the rename -- the
-/// temporary is removed, so a refused tag or a cancelled read leaves nothing behind. Only
-/// a process killed outright can leave one, and it is never the target's name.
+/// The temporary is a [`Pending`]: readable as well as writable, because an encrypt
+/// assembles a container in it, and gone if anything fails before it is kept -- whether
+/// `produce` refuses, the disk fills, or the process is killed. Kept, it is renamed over
+/// the target through `temp_path_for(target)`, so the target is touched only by that
+/// rename.
 fn write_atomically_with<T>(
     target: &Path,
     produce: impl FnOnce(&mut File) -> Result<T, Error>,
 ) -> Result<T, Failed> {
     let tmp = temp_path_for(target);
-    let result = (|| {
-        let mut f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)
-            .map_err(Failed::Io)?;
-        let t = produce(&mut f).map_err(Failed::Produce)?;
-        f.sync_all().map_err(Failed::Io)?;
-        // Closed before the rename: Windows will not move an open file.
-        drop(f);
-        std::fs::rename(&tmp, target).map_err(Failed::Io)?;
-        Ok(t)
-    })();
-    if result.is_err() {
-        // Best effort; the error being reported is the one above.
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    let dir = match target.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let mut pending = Pending::create(dir, &tmp).map_err(Failed::Io)?;
+    // On `Err` the `pending` drops here, and with it the temporary.
+    let t = produce(pending.file()).map_err(Failed::Produce)?;
+    pending.keep_as(&tmp, target).map_err(Failed::Io)?;
+    Ok(t)
 }
 
 // --- passwords --------------------------------------------------------------
@@ -1455,3 +1444,284 @@ fn exit_code(e: &Error) -> u8 {
 #[cfg(test)]
 #[path = "msoffice-crypto_tests.rs"]
 mod tests;
+
+// --- temporaries that vanish with the process (#41) --------------------------------
+
+/// A file being written that must not outlive the process unless it is kept.
+///
+/// A decrypt writes plaintext into it. Every failure this process sees drops it, which
+/// removes it; what is left is a failure the process does not see -- a Ctrl-C, a hard
+/// kill, a crash, the power -- and for those the file has to vanish by itself. Each
+/// platform has its own way, and where none applies a Ctrl-C handler is the fallback:
+///
+/// | | while it is written | if the process dies |
+/// | --- | --- | --- |
+/// | Linux | no name at all (`O_TMPFILE`) | the kernel frees it |
+/// | Windows | named, held delete-pending | closing the handle deletes it |
+/// | fallback | named | a Ctrl-C handler removes it; a hard kill does not |
+///
+/// The fallback is macOS, and a Linux file system without `O_TMPFILE`.
+struct Pending {
+    file: Option<File>,
+    how: How,
+}
+
+enum How {
+    /// Linux `O_TMPFILE`: no name until [`Pending::keep_as`] gives it one.
+    #[cfg(target_os = "linux")]
+    Unnamed,
+    /// Windows: named, with a delete disposition set on the handle. The name needs no
+    /// keeping here: closing the handle is the cleanup.
+    #[cfg(windows)]
+    DeletePending,
+    /// The fallback: a plain name, registered with the Ctrl-C handler.
+    #[cfg(not(windows))]
+    Named(PathBuf),
+}
+
+impl Pending {
+    /// A pending file in `dir`, which is known by `name` if it needs a name before it is
+    /// kept. Readable as well as writable, because an encrypt assembles a container in it.
+    fn create(dir: &Path, name: &Path) -> std::io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            use rustix::fs::{Mode, OFlags};
+            use rustix::io::Errno;
+            // 0o666 before the umask: what `File::create` asks for, so the kept file has
+            // the permissions the target always had.
+            match rustix::fs::open(
+                dir,
+                OFlags::TMPFILE | OFlags::RDWR | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o666),
+            ) {
+                Ok(fd) => {
+                    return Ok(Pending {
+                        file: Some(File::from(fd)),
+                        how: How::Unnamed,
+                    })
+                }
+                // The file system or kernel has no `O_TMPFILE`: fall back to a name.
+                Err(Errno::OPNOTSUPP | Errno::ISDIR | Errno::INVAL) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                DELETE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+            };
+            let _ = dir;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE)
+                // No sharing: nothing else opens the plaintext while it is written.
+                .share_mode(0)
+                .open(name)?;
+            if let Err(e) = set_delete_disposition(&file, true) {
+                drop(file);
+                let _ = std::fs::remove_file(name);
+                return Err(e);
+            }
+            Ok(Pending {
+                file: Some(file),
+                how: How::DeletePending,
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = dir;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(name)?;
+            interrupt::register(name);
+            Ok(Pending {
+                file: Some(file),
+                how: How::Named(name.to_path_buf()),
+            })
+        }
+    }
+
+    fn file(&mut self) -> &mut File {
+        // `Some` from `create` until `keep_as` consumes `self`.
+        self.file
+            .as_mut()
+            .expect("a pending file is open until it is kept")
+    }
+
+    /// Flush the file to disk and give it `target`'s name, atomically: it passes through
+    /// `name` (the temporary beside the target) and is renamed over `target`, so a reader
+    /// sees either the old target or the finished one.
+    fn keep_as(mut self, name: &Path, target: &Path) -> std::io::Result<()> {
+        let file = self.file.take().expect("kept once");
+        file.sync_all()?;
+        match &self.how {
+            #[cfg(target_os = "linux")]
+            How::Unnamed => {
+                use std::os::fd::AsRawFd;
+                // A stale temporary from a run that predates this file -- or a fallback
+                // run that was killed -- would make the link fail. Not a directory: that
+                // is a real refusal, and `remove_file` leaves it for `linkat` to report.
+                let _ = std::fs::remove_file(name);
+                // Through /proc, because `AT_EMPTY_PATH` needs `CAP_DAC_READ_SEARCH` and
+                // this runs unprivileged; `linkat(2)` documents this form for `O_TMPFILE`.
+                let proc_path = format!("/proc/self/fd/{}", file.as_raw_fd());
+                rustix::fs::linkat(
+                    rustix::fs::CWD,
+                    proc_path.as_str(),
+                    rustix::fs::CWD,
+                    name,
+                    rustix::fs::AtFlags::SYMLINK_FOLLOW,
+                )?;
+                drop(file);
+            }
+            #[cfg(windows)]
+            How::DeletePending => {
+                set_delete_disposition(&file, false)?;
+                // Closed before the rename: Windows will not move an open file.
+                drop(file);
+            }
+            #[cfg(not(windows))]
+            How::Named(_) => drop(file),
+        }
+        let renamed = std::fs::rename(name, target);
+        if renamed.is_err() {
+            let _ = std::fs::remove_file(name);
+        }
+        #[cfg(not(windows))]
+        if let Some(path) = self.how.named() {
+            interrupt::unregister(path);
+        }
+        // Nothing left for `Drop` to do: the file is the target now, or it is gone.
+        self.how = How::kept();
+        renamed
+    }
+}
+
+impl How {
+    /// The fallback's name, where this is the fallback. A function rather than an
+    /// `if let` at each use: on macOS the fallback is the only variant, and the pattern
+    /// would be irrefutable there.
+    #[cfg(not(windows))]
+    #[allow(unreachable_patterns)]
+    fn named(&self) -> Option<&Path> {
+        match self {
+            How::Named(path) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// What a kept `Pending` holds, so its `Drop` removes nothing: `Unnamed` and
+    /// `DeletePending` have nothing to remove once the handle is closed, and the fallback's
+    /// `Named` carries an empty path, which `Drop` skips.
+    fn kept() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            How::Unnamed
+        }
+        #[cfg(windows)]
+        {
+            How::DeletePending
+        }
+        #[cfg(all(not(windows), not(target_os = "linux")))]
+        {
+            How::Named(PathBuf::new())
+        }
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        // Closing the handle is the cleanup on Linux (an unnamed file is freed) and on
+        // Windows (a delete-pending file is deleted); a fallback name is removed here.
+        drop(self.file.take());
+        #[cfg(not(windows))]
+        if let Some(path) = self.how.named() {
+            if !path.as_os_str().is_empty() {
+                let _ = std::fs::remove_file(path);
+                interrupt::unregister(path);
+            }
+        }
+    }
+}
+
+/// Set or clear the delete disposition on an open file: while set, closing the last
+/// handle deletes the file, which is what a hard kill does.
+///
+/// `FILE_FLAG_DELETE_ON_CLOSE` at open would do the same, but it cannot be cleared, and a
+/// decrypt that finishes must keep its file. The disposition can.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn set_delete_disposition(file: &File, delete: bool) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+    };
+    let info = FILE_DISPOSITION_INFO { DeleteFile: delete };
+    let size = u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>())
+        .expect("a one-byte struct fits a u32");
+    // SAFETY: the handle is `file`'s, open for the duration of the call and opened with
+    // DELETE access; `info` is a live, correctly sized FILE_DISPOSITION_INFO, which is the
+    // structure FileDispositionInfo names, and the call only reads it.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfo,
+            std::ptr::from_ref(&info).cast(),
+            size,
+        )
+    };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// The fallback's Ctrl-C handler: the named temporaries in flight, removed on interrupt.
+///
+/// Paths only -- no plaintext, no key -- so a `static` holds nothing secret.
+#[cfg(not(windows))]
+mod interrupt {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, Once};
+
+    static IN_FLIGHT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    static INSTALL: Once = Once::new();
+
+    pub(super) fn register(path: &Path) {
+        INSTALL.call_once(|| {
+            // If a handler cannot be installed the fallback is only as good as the
+            // `Drop` that every failure the process sees still runs. Nothing to report.
+            let _ = ctrlc::set_handler(|| {
+                remove_all();
+                std::process::exit(130);
+            });
+        });
+        if let Ok(mut v) = IN_FLIGHT.lock() {
+            v.push(path.to_path_buf());
+        }
+    }
+
+    pub(super) fn unregister(path: &Path) {
+        if let Ok(mut v) = IN_FLIGHT.lock() {
+            v.retain(|p| p != path);
+        }
+    }
+
+    /// Remove every registered temporary. What the handler runs; a function of its own so
+    /// that a test can run it without sending a signal.
+    pub(super) fn remove_all() {
+        if let Ok(mut v) = IN_FLIGHT.lock() {
+            for p in v.drain(..) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+}
