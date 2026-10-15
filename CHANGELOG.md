@@ -22,7 +22,7 @@ What survives that move is in two places, deliberately:
 
 ---
 
-## [0.1.0-rc.7] - Unreleased
+## [0.1.0-rc.7] - 2026-10-15
 
 ### Breaking: an input that is too large is `Error::PackageTooLarge`, not `BadParameters`
 
@@ -59,41 +59,9 @@ one 4096-byte segment of the package at a time:
   §2.6.1 caps a version 3 stream at 0x80000000 bytes, and version 3 is the container Office
   writes.
 - `classify_from`, `is_cfb_office_from` and `check_encryptable_from` read only the headers.
-  The last lets a caller refuse a file before asking for a password, as the CLI does. `classify(&[u8])` is
-  now `classify_from` over a `Cursor` and gives the same answers, checked on every
-  fixture.
-
-**The CLI streams too** (#39). `classify`, `decrypt` and `encrypt` open the input rather than
-reading it, so a `.docx`, `.xlsx` or `.pptx` of any size passes through the binary a
-segment at a time. The output is still written atomically, through a temporary file beside
-the target that is removed on every failure: a tampered file, a wrong password or a full
-disk leaves neither a target nor a temporary behind. `encrypt -o -` assembles the container
-in a temporary file in the system temp directory, because a container cannot be built on a
-pipe, and copies it out. Two orders changed: an existing output is refused before the
-password is asked for, and a failure after bytes reached stdout says so. 97-2003 documents
-are still read whole.
-
-**A killed decrypt leaves no plaintext behind** (#41). Before this, a Ctrl-C or a hard kill in
-the middle of a decrypt left a partial plaintext `.X.msoffice-crypto.tmp` beside the target,
-which nothing removed. The temporary now vanishes with the process:
-- **Linux:** it is an unnamed `O_TMPFILE`, named only once it is complete.
-- **Windows:** it is held delete-pending until just before the rename, so the handle a killed
-  process closes deletes it.
-- **Elsewhere** (macOS, or a Linux file system without `O_TMPFILE`): a Ctrl-C handler removes
-  it. This fallback cannot survive a hard kill.
-
-A test kills the binary mid-decrypt, once its temporary is seen open, and finds the directory
-as it was; with the Windows delete mark removed it finds the plaintext temporary instead.
-`encrypt -o -`'s scratch container uses the same mechanism. The dependencies are
-target-specific and `cli`-only: `rustix` on Linux, `windows-sys` on Windows (already in the
-graph through `rpassword`), `ctrlc` elsewhere. The binary denies `unsafe_code` and allows it
-on the one Windows call that sets the delete mark.
-
-Evidence: files written by the binary itself (`msoffice-crypto encrypt`, built from `87503c9`)
-pass the four-reader gate, run on this machine 2026-10-15: agile, SHA-256
-`d66cfca5b637249737b90dca207db3a1d281d153157e0a0031a470fa38f56a91`, and standard,
-`7cf061e6d0af209832076ced4aed38dec6d091a740c578838b0c7ba4a4851074`, each
-`GATE: PASS (4 of 4 readers ran)`; `--tamper --expect-fail` failed as required.
+  The last lets a caller refuse a file before asking for a password, as the CLI does.
+  `classify(&[u8])` is now `classify_from` over a `Cursor` and gives the same answers,
+  checked on every fixture.
 
 A cancelled reader stops any of them with its own error as `Error::Io`, never as a
 damaged file. The whole-buffer functions are now `Cursor` wrappers over the same code, and
@@ -131,14 +99,51 @@ GATE: PASS (4 of 4 readers ran; 0 not selected)
 `--tamper --expect-fail` on both, and `--corrupt-integrity --expect-fail` on agile, failed
 as required.
 
+### The CLI streams too (#39)
+
+`classify`, `decrypt` and `encrypt` open the input rather than
+reading it, so a `.docx`, `.xlsx` or `.pptx` of any size passes through the binary a
+segment at a time. The output is still written atomically, through a temporary file beside
+the target that is removed on every failure: a tampered file, a wrong password or a full
+disk leaves neither a target nor a temporary behind. `encrypt -o -` assembles the container
+in a temporary file in the system temp directory, because a container cannot be built on a
+pipe, and copies it out. Two orders changed: an existing output is refused before the
+password is asked for, and a failure after bytes reached stdout says so. 97-2003 documents
+are still read whole.
+
+**A killed decrypt leaves no plaintext behind** (#41). Before this, a Ctrl-C or a hard kill in
+the middle of a decrypt left a partial plaintext `.X.msoffice-crypto.tmp` beside the target,
+which nothing removed. The temporary now vanishes with the process:
+- **Linux:** it is an unnamed `O_TMPFILE`, named only once it is complete.
+- **Windows:** it is held delete-pending until just before the rename, so the handle a killed
+  process closes deletes it.
+- **Elsewhere** (macOS, or a Linux file system without `O_TMPFILE`): a Ctrl-C handler removes
+  it. This fallback cannot survive a hard kill.
+
+A test kills the binary mid-decrypt, once its temporary is seen open, and finds the directory
+as it was. With the Windows delete mark removed, or on Linux with the named fallback forced,
+it finds the plaintext temporary instead.
+`encrypt -o -`'s scratch container uses the same mechanism. The dependencies are
+target-specific and `cli`-only: `rustix` on Linux, `windows-sys` on Windows (already in the
+graph through `rpassword`), `ctrlc` elsewhere. The binary denies `unsafe_code` and allows it
+on the one Windows call that sets the delete mark.
+
+Evidence: files written by the binary itself (`msoffice-crypto encrypt`, built from this
+release's tree, after the #41 change to how it writes) pass the four-reader gate, run on this
+machine 2026-10-15: agile, SHA-256
+`1352531ec9f4938efe8263bf8c16942eaa324d735aab783ac526dd6b82838bc4`, and standard,
+`c1d08d9d2b64f3252f5cb2243b555ec586a911d8032b46bda02400f394b7960c`, each
+`GATE: PASS (4 of 4 readers ran)`. `--tamper --expect-fail` and `--corrupt-integrity
+--expect-fail` on the agile file failed as required.
+
 ### `cfb` 0.15: the container's directory tree is now balanced
 
 The `cfb` dependency moves from 0.14 to 0.15. Two of its changes reach this crate:
 
 - **Long streams no longer cost quadratic time.** 0.14 re-walked a stream's whole sector
   chain on every 1 MiB buffer refill; 0.15 keeps the list (upstream #89) and sends large
-  reads and writes straight to the file (upstream #87). The streaming entry points this
-  line is building toward depend on it.
+  reads and writes straight to the file (upstream #87). The streaming entry points above
+  depend on it.
 - **Encrypted output changes by 12 bytes.** 0.15 applies the red-black insertion fixup that
   [MS-CFB] §2.6.4 expects to the directory's sibling tree (upstream #83). 0.14 appended
   entries unbalanced. Every file `encrypt_ooxml` and `encrypt_ooxml_standard` write therefore
