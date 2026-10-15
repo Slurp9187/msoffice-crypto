@@ -79,6 +79,25 @@ That is a slope of about 1/32 and 1/22, the same in both formats, so about 66 an
 the 2 GiB cap. The test asserts a working set plus 1/16 of the payload, and fails an
 implementation that holds the document.
 
+Evidence that the streaming write path is still what real readers open: the four-reader
+acceptance gate, run on this machine 2026-10-15 against artifacts built from `477f429` (every
+encrypt now runs the streaming core), written into a private directory:
+
+```
+agile    41,984 bytes  SHA-256 ab2f616624e011cbfe9bd567b1f6d682a66a63209be6860e6c817c174fab99a4
+office         PASS  Word 16.0 build 16.0.19127: OPENED, content matches | WRONG PASSWORD REFUSED 0x800A1520
+libreoffice    PASS  LibreOffice 26.8.0.3: OPENED, content matches | WRONG PASSWORD REFUSED (verifier)
+msoffcrypto    PASS  msoffcrypto-tool 6.0.0: byte-identical to plain.docx | dataIntegrity HMAC verifies
+office-crypto  PASS  office-crypto 0.3: byte-identical to plain.docx
+GATE: PASS (4 of 4 readers ran; 0 not selected)
+
+standard 40,960 bytes  SHA-256 bb1b39ad6e5ce16579daefb281acf50939c0a1ca0624c9e6a5fabe9b0821aa01
+GATE: PASS (4 of 4 readers ran; 0 not selected)
+```
+
+`--tamper --expect-fail` on both, and `--corrupt-integrity --expect-fail` on agile, failed
+as required.
+
 ### `cfb` 0.15: the container's directory tree is now balanced
 
 The `cfb` dependency moves from 0.14 to 0.15. Two of its changes reach this crate:
