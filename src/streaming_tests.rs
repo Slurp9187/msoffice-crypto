@@ -163,16 +163,15 @@ fn the_streaming_writers_write_the_whole_buffer_writers_bytes_into_a_file() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// One of the four public streaming encrypts, over a package and a writer.
+type EncryptTo = fn(&[u8], &mut Cursor<Vec<u8>>) -> Result<(), Error>;
+
 /// Every public streaming encrypt round-trips through every decrypt form, and the
 /// streaming decrypt reports what the whole-buffer one does.
 #[test]
 fn every_streaming_encrypt_round_trips() {
     let plain = fixture("plain.docx");
-    let cases: [(
-        &str,
-        fn(&[u8], &mut Cursor<Vec<u8>>) -> Result<(), Error>,
-        IntegrityOutcome,
-    ); 4] = [
+    let cases: [(&str, EncryptTo, IntegrityOutcome); 4] = [
         (
             "encrypt_ooxml_to",
             |p, w| encrypt_ooxml_to(Cursor::new(p), w, PASSWORD),
