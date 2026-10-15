@@ -158,6 +158,34 @@ format — AES-ECB under a SHA-1-derived key, and **no integrity element at all*
 modified ciphertext decrypts silently to a modified document. It is named for the format so
 that choosing it is a decision.
 
+**Large files stream.** Each decrypt and encrypt function above has a `_to` form that
+reads from an `io::Read + Seek` and writes to an `io::Write`, holding one 4096-byte segment
+of the document at a time, so a package is never whole in memory; `classify_from` reads
+only the headers. What does grow is `cfb`'s sector
+table, measured at 46 MiB for a 1 GiB file. A verified decrypt reads its input twice, and
+checks the HMAC before releasing any plaintext. On any `Err`, discard what the writer
+received:
+
+```rust,no_run
+use std::fs::{File, OpenOptions};
+use msoffice_crypto::{decrypt_ooxml_to, encrypt_ooxml_to, IntegrityPolicy};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let outcome = decrypt_ooxml_to(File::open("big.docx")?, File::create("big-plain.docx")?,
+        "correct horse battery staple", IntegrityPolicy::default())?;
+    println!("integrity: {:?}", outcome.integrity);
+
+    // the container is assembled in the output, so it must also be readable
+    let out = OpenOptions::new().read(true).write(true).create(true).truncate(true)
+        .open("big-resealed.docx")?;
+    encrypt_ooxml_to(File::open("big-plain.docx")?, out, "correct horse battery staple")?;
+    Ok(())
+}
+```
+
+The whole-buffer functions stop at 1 GiB; the streaming encrypt at 2 GiB less 16 bytes, the
+most the container Office writes can hold. Both refuse with `Error::PackageTooLarge`.
+
 **`legacy-binary`** is a superset of `crypto-ops` adding RC4 and MD5, and decrypts a
 97-2003 document *in place* — the same CFB container with its encrypted streams replaced,
 pictures and encrypted document properties included, which is what Word, Excel and

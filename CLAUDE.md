@@ -211,12 +211,13 @@ spec or in a permissive reference. Cite where it came from.
   the `.crate`.
 - **The corpus tests are `#[ignore]`d where there is no corpus, never skipped silently.**
   `build.rs` sets `cfg(fixture_corpus)` when it finds any of the twenty-two withheld
-  fixtures, and the 42 corpus-dependent tests carry
+  fixtures, and the 45 corpus-dependent tests carry
   `#[cfg_attr(not(fixture_corpus), ignore = "…")]`. So the published crate's `cargo test` is
-  green with them reported as **ignored, with a reason**, while this repository runs all 42.
+  green with them reported as **ignored, with a reason**, while this repository runs all 45.
   (The count is a moving figure, not an invariant -- it was thirty until the v0.1.0-rc.3
-  classify work added three, and the rc.6 pictures, properties and IRM work took it to 42,
-  measured on the unpacked `.crate` as 42 ignored and here as 0. The invariant is the two-way read below, which does not depend
+  classify work added three, the rc.6 pictures, properties and IRM work took it to 42, and
+  the rc.7 streaming work's three corpus agreement tests took it to 45, measured on the
+  unpacked `.crate` as 45 ignored and here as 0. The invariant is the two-way read below, which does not depend
   on it.) An early `return` on a missing file would be the anti-pattern above wearing a hat.
   **Read the ignored count in both directions:** 0 in a tarball means the corpus leaked into
   the allowlist; anything but 0 here means a fixture is missing. A partial corpus counts as
@@ -243,7 +244,7 @@ spec or in a permissive reference. Cite where it came from.
 ## Layout
 
 ```
-src/lib.rs             public API: classify, is_cfb_office, decrypt_ooxml, decrypt_ooxml_with_policy, check_encryptable, encrypt_ooxml, encrypt_ooxml_with_params, encrypt_ooxml_standard, decrypt_binary_office   (+ lib_tests.rs)
+src/lib.rs             public API: classify, classify_from, is_cfb_office, is_cfb_office_from, decrypt_ooxml, decrypt_ooxml_with_policy, decrypt_ooxml_to, check_encryptable, encrypt_ooxml, encrypt_ooxml_with_params, encrypt_ooxml_standard, the four encrypt_*_to, decrypt_binary_office   (+ lib_tests.rs, streaming_tests.rs)
 src/classify.rs        detection; NEVER panics, returns Unknown        (+ classify_tests.rs)
 src/data_space_map.rs  rights management (IRM), read from \x06DataSpaces\DataSpaceMap   (+ data_space_map_tests.rs)
 src/binary_office.rs   legacy .doc/.xls/.ppt recognition, and the FIB / BIFF / persist-directory readers both probe and decrypt share
@@ -252,8 +253,8 @@ src/standard.rs        ECMA-376 standard decrypt: parse, KDF, verifier, package 
 src/standard_encrypt.rs the Office 2007 writer: salt, derived key, verifier blobs, binary header, and the assembly behind encrypt_ooxml_standard   (+ standard_encrypt_tests.rs)
 src/integrity.rs       dataIntegrity HMAC verification + IntegrityPolicy / IntegrityOutcome
 src/hash.rs            HashAlgorithm dispatch and IV derivation           (crypto-ops)
-src/segments.rs        the 4096-byte segment iterator both directions share (D4)   (+ segments_tests.rs)
-src/cfb_reader.rs      capped stream reads
+src/segments.rs        the reader-driven 4096-byte segmenter both directions share (D4)   (+ segments_tests.rs)
+src/cfb_reader.rs      capped stream reads, and read_full, which every reader-driven loop uses
 src/limits.rs          every bound, each with cited provenance
 src/sensitive.rs       secure-gate aliases — the only place they are declared   (+ sensitive_tests.rs)
 src/error.rs           Error -- the crate's single public error type
@@ -274,6 +275,7 @@ src/excel97.rs         the Excel 97 walk: FILEPASS, the record set kept in the c
 src/powerpoint97.rs    the PowerPoint 97 walk: persist directory, CryptSession10Container, per-object keys, Pictures
 src/legacy_malformed.rs hostile-input tests for the three walks, on tampered fixtures and synthetic streams
 tests/real_office_fixtures.rs   the Office-written fixtures against an independent oracle
+tests/streaming_memory.rs       the streaming paths' peak heap, measured by a counting allocator
 tests/legacy_binary_fixtures.rs the binary fixtures, byte for byte against msoffcrypto-tool's output
 tests/cli.rs            the binary driven as a subprocess: --json over every fixture, decrypt of every encrypted fixture, exit codes, file side effects
 tests/fixtures/        every fixture, password `testpass`; only two ship in the tarball (see Cargo.toml)

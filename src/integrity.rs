@@ -56,7 +56,7 @@
 //! expression from it is reproduced here).
 
 use crate::error::Error;
-use crate::hash::{derive_iv, HashAlgorithm};
+use crate::hash::{derive_iv, HashAlgorithm, HmacState};
 use crate::sensitive::{IntegrityKey, IntegrityTag, SessionKey};
 use secure_gate::{ConstantTimeEq, RevealSecret};
 
@@ -293,73 +293,124 @@ pub(crate) struct IntegrityMaterial<'a> {
 /// The caller must have verified the password first: a wrong password yields a wrong
 /// session key, and every blob below then decrypts to noise, so the mismatch would be
 /// reported as corruption rather than as a bad password.
+///
+/// [`IntegrityCheck`] with the whole stream in one `update`. The streaming paths feed
+/// the same check a piece at a time, so the two cannot disagree about what is HMACed.
+#[cfg(test)]
 pub(crate) fn verify(
     session_key: &SessionKey,
     material: &IntegrityMaterial<'_>,
     encrypted_package: &[u8],
 ) -> Result<(), Error> {
-    let hash = material.hash;
-    let hash_size = material.hash_size as usize;
-    let block_size = material.block_size as usize;
+    let check = IntegrityCheck::new(session_key, material)?;
+    let mut mac = check.start();
+    mac.update(encrypted_package);
+    check.finish(mac)
+}
 
-    // `hashSize` is a truncation length taken straight from the file. Pair it against
-    // the algorithm before trusting it, exactly as herumi does when parsing
-    // (`include/crypto_util.hpp:156-166`).
-    if hash_size != hash.digest_len() {
-        return Err(Error::BadParameters(format!(
-            "keyData hashSize {} does not match hashAlgorithm {} (expected {})",
+/// A package HMAC check with its key and expected tag unwrapped once, fed the stream as
+/// it passes.
+///
+/// The streaming decrypt runs it twice over one file: once before any plaintext is
+/// released, and again while decrypting, so that an input that changed between the two
+/// reads is caught rather than decrypted unverified. Unwrapping the two blobs once is
+/// what lets both passes compare against the same expected tag.
+pub(crate) struct IntegrityCheck {
+    hash: HashAlgorithm,
+    hmac_key: IntegrityKey,
+    expected: IntegrityTag,
+}
+
+impl IntegrityCheck {
+    /// Check the declared parameters and unwrap the HMAC key and the expected tag.
+    pub(crate) fn new(
+        session_key: &SessionKey,
+        material: &IntegrityMaterial<'_>,
+    ) -> Result<Self, Error> {
+        let hash = material.hash;
+        let hash_size = material.hash_size as usize;
+        let block_size = material.block_size as usize;
+
+        // `hashSize` is a truncation length taken straight from the file. Pair it against
+        // the algorithm before trusting it, exactly as herumi does when parsing
+        // (`include/crypto_util.hpp:156-166`).
+        if hash_size != hash.digest_len() {
+            return Err(Error::BadParameters(format!(
+                "keyData hashSize {} does not match hashAlgorithm {} (expected {})",
+                hash_size,
+                hash.name(),
+                hash.digest_len()
+            )));
+        }
+        if block_size != AES_BLOCK_LEN {
+            return Err(Error::BadParameters(format!(
+                "keyData blockSize {block_size} is not the AES block size ({AES_BLOCK_LEN})"
+            )));
+        }
+
+        let iv1 = derive_iv(
+            hash,
+            material.key_data_salt,
+            &BLOCK_DATA_INTEGRITY_KEY,
+            block_size,
+        )?;
+        let iv2 = derive_iv(
+            hash,
+            material.key_data_salt,
+            &BLOCK_DATA_INTEGRITY_VALUE,
+            block_size,
+        )?;
+
+        let hmac_key = IntegrityKey::new(unwrap_blob(
+            session_key,
+            material.encrypted_hmac_key,
+            &iv1,
             hash_size,
-            hash.name(),
-            hash.digest_len()
-        )));
+            "encryptedHmacKey",
+        )?);
+        let expected = IntegrityTag::new(unwrap_blob(
+            session_key,
+            material.encrypted_hmac_value,
+            &iv2,
+            hash_size,
+            "encryptedHmacValue",
+        )?);
+
+        Ok(Self {
+            hash,
+            hmac_key,
+            expected,
+        })
     }
-    if block_size != AES_BLOCK_LEN {
-        return Err(Error::BadParameters(format!(
-            "keyData blockSize {block_size} is not the AES block size ({AES_BLOCK_LEN})"
-        )));
+
+    /// A fresh HMAC under the unwrapped key, to be fed the whole `EncryptedPackage`
+    /// stream, 8-byte prefix first.
+    pub(crate) fn start(&self) -> HmacState {
+        self.hmac_key.with_secret(|k| self.hash.hmac_state(k))
     }
 
-    let iv1 = derive_iv(
-        hash,
-        material.key_data_salt,
-        &BLOCK_DATA_INTEGRITY_KEY,
-        block_size,
-    )?;
-    let iv2 = derive_iv(
-        hash,
-        material.key_data_salt,
-        &BLOCK_DATA_INTEGRITY_VALUE,
-        block_size,
-    )?;
+    /// Compare what `mac` was fed against the declared tag.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::IntegrityCheckFailed`] on any mismatch.
+    pub(crate) fn finish(&self, mac: HmacState) -> Result<(), Error> {
+        let actual = IntegrityTag::new(mac.finalize());
 
-    let hmac_key = IntegrityKey::new(unwrap_blob(
-        session_key,
-        material.encrypted_hmac_key,
-        &iv1,
-        hash_size,
-        "encryptedHmacKey",
-    )?);
-    let expected = IntegrityTag::new(unwrap_blob(
-        session_key,
-        material.encrypted_hmac_value,
-        &iv2,
-        hash_size,
-        "encryptedHmacValue",
-    )?);
+        // Constant-time. Both operands stay inside their closures; only the bool escapes.
+        // This one is a genuine MAC-forgery oracle if it short-circuits — unlike
+        // `verify_password`, the right-hand side is a value the attacker supplies in the
+        // file — which is why secure-gate's `ct-eq` feature is switched on for this crate.
+        let matches = actual.with_secret(|a| {
+            self.expected
+                .with_secret(|e| a.as_slice().ct_eq(e.as_slice()))
+        });
 
-    let actual = IntegrityTag::new(hmac_key.with_secret(|k| hash.hmac(k, encrypted_package)));
-
-    // Constant-time. Both operands stay inside their closures; only the bool escapes.
-    // This one is a genuine MAC-forgery oracle if it short-circuits — unlike
-    // `verify_password`, the right-hand side is a value the attacker supplies in the
-    // file — which is why secure-gate's `ct-eq` feature is switched on for this crate.
-    let matches =
-        actual.with_secret(|a| expected.with_secret(|e| a.as_slice().ct_eq(e.as_slice())));
-
-    if !matches {
-        return Err(Error::IntegrityCheckFailed);
+        if !matches {
+            return Err(Error::IntegrityCheckFailed);
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// AES-CBC-decrypt one dataIntegrity blob and cut it back to the digest length.
@@ -413,6 +464,7 @@ pub(crate) struct IntegrityBlobs {
 /// Randomness enters this way and no other (plan D3), so a seeded RNG makes the output a
 /// committable golden and the production caller passes `rand::rngs::SysRng` through the
 /// same function.
+#[cfg(test)]
 pub(crate) fn generate<R: rand::TryRng + rand::TryCryptoRng>(
     session_key: &SessionKey,
     hash: HashAlgorithm,
@@ -421,8 +473,7 @@ pub(crate) fn generate<R: rand::TryRng + rand::TryCryptoRng>(
     encrypted_package: &[u8],
     rng: &mut R,
 ) -> Result<IntegrityBlobs, Error> {
-    let hmac_key = IntegrityKey::from_rng(hash.digest_len(), rng)
-        .map_err(crate::agile_encrypt::random_source)?;
+    let hmac_key = draw_key(hash, rng)?;
     generate_with_key(
         session_key,
         hash,
@@ -431,6 +482,20 @@ pub(crate) fn generate<R: rand::TryRng + rand::TryCryptoRng>(
         encrypted_package,
         &hmac_key,
     )
+}
+
+/// The HMAC key a writer draws: `hashSize` bytes from the injected `rng`, wrapped as
+/// [`IntegrityKey`] the moment they exist.
+///
+/// Split out of [`generate`] for the streaming writer, which must hold the key before the
+/// first ciphertext byte passes rather than after the last. It is the same draw, and in
+/// both shapes it is the first draw after the key material, so a seeded run writes the
+/// same file either way.
+pub(crate) fn draw_key<R: rand::TryRng + rand::TryCryptoRng>(
+    hash: HashAlgorithm,
+    rng: &mut R,
+) -> Result<IntegrityKey, Error> {
+    IntegrityKey::from_rng(hash.digest_len(), rng).map_err(crate::agile_encrypt::random_source)
 }
 
 /// [`generate`] with the HMAC key supplied — deterministic, which is what makes it
@@ -471,6 +536,7 @@ pub(crate) fn generate<R: rand::TryRng + rand::TryCryptoRng>(
 /// `hashSize` — this one, herumi, LibreOffice — cannot tell the difference, and HMAC
 /// itself zero-extends a short key, which is why msoffcrypto-tool's untruncated key
 /// (`ecma376_agile.py:490-497`) also verifies a zero-padded file.
+#[cfg(test)]
 pub(crate) fn generate_with_key(
     session_key: &SessionKey,
     hash: HashAlgorithm,
@@ -478,6 +544,22 @@ pub(crate) fn generate_with_key(
     block_size: usize,
     encrypted_package: &[u8],
     hmac_key: &IntegrityKey,
+) -> Result<IntegrityBlobs, Error> {
+    let mut mac = hmac_key.with_secret(|k| hash.hmac_state(k));
+    mac.update(encrypted_package);
+    seal(session_key, hash, key_data_salt, block_size, hmac_key, mac)
+}
+
+/// The two `<dataIntegrity>` blobs from an HMAC that has already been fed the whole
+/// `EncryptedPackage` stream: the tail of [`generate_with_key`], for a writer that fed
+/// `mac` as it wrote the stream rather than handing the stream over.
+pub(crate) fn seal(
+    session_key: &SessionKey,
+    hash: HashAlgorithm,
+    key_data_salt: &[u8],
+    block_size: usize,
+    hmac_key: &IntegrityKey,
+    mac: HmacState,
 ) -> Result<IntegrityBlobs, Error> {
     // The same pin `verify` applies: this crate writes AES-CBC and nothing else.
     if block_size != AES_BLOCK_LEN {
@@ -535,7 +617,7 @@ pub(crate) fn generate_with_key(
     // `IntegrityTag::new` takes ownership of the `Vec` the HMAC returns -- exact-sized, so
     // nothing is abandoned on the way in -- and the padded copy is a second wrapped
     // buffer rather than a grown first one, for the reason above.
-    let tag = IntegrityTag::new(hmac_key.with_secret(|k| hash.hmac(k, encrypted_package)));
+    let tag = IntegrityTag::new(mac.finalize());
     let encrypted_hmac_value = tag.with_secret(|t| {
         let padded = IntegrityTag::new_with(padded_len(t.len())?, |slot| {
             slot[..t.len()].copy_from_slice(t);
@@ -609,12 +691,22 @@ mod tests {
     fn office_fixture(name: &str) -> (Vec<u8>, crate::agile::AgileParams, SessionKey) {
         let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
         let data = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-        let streams = crate::cfb_reader::read_cfb_streams(&data).expect("an encrypted container");
-        let params = crate::agile::parse_encryption_info(&streams.encryption_info[8..])
+        let mut cfb =
+            cfb::CompoundFile::open(std::io::Cursor::new(&data)).expect("an encrypted container");
+        let info = crate::cfb_reader::read_encryption_info_in(&mut cfb).expect("EncryptionInfo");
+        let mut package = Vec::new();
+        std::io::Read::read_to_end(
+            &mut cfb
+                .open_stream("/EncryptedPackage")
+                .expect("EncryptedPackage"),
+            &mut package,
+        )
+        .expect("EncryptedPackage reads");
+        let params = crate::agile::parse_encryption_info(&info[8..])
             .expect("Office writes a parseable EncryptionInfo");
         let session_key =
             crate::agile::recover_session_key(&params, "testpass").expect("the password");
-        (streams.encrypted_package, params, session_key)
+        (package, params, session_key)
     }
 
     /// **Given Office's own HMAC key, the writer reproduces Office's own blobs, byte for

@@ -480,8 +480,10 @@ fn a_package_over_the_ceiling_is_refused_before_any_work() {
     big[..4].copy_from_slice(b"PK\x03\x04");
     let got = crate::encrypt_ooxml_standard(&big, PASSWORD).map(|c| c.len());
     assert!(
-        matches!(&got, Err(Error::BadParameters(msg)) if msg.contains("PAYLOAD_CEILING")),
-        "over the ceiling must be refused by name, got: {got:?}"
+        matches!(&got, Err(Error::PackageTooLarge { len, limit })
+            if *len == crate::limits::PAYLOAD_CEILING as u64 + 1
+                && *limit == crate::limits::PAYLOAD_CEILING as u64),
+        "over the ceiling must be refused as PackageTooLarge, got: {got:?}"
     );
 }
 

@@ -24,6 +24,80 @@ What survives that move is in two places, deliberately:
 
 ## [0.1.0-rc.7] - Unreleased
 
+### Breaking: an input that is too large is `Error::PackageTooLarge`, not `BadParameters`
+
+The 1 GiB refusals of the whole-buffer functions, on encrypt and on decrypt, were
+`Error::BadParameters`, whose meaning is a parameter *the file* declares; an input's size
+is not one. They are now `Error::PackageTooLarge { len, limit }`, and so is the new cap on
+the streaming encrypt below. **A consumer matching `BadParameters` to word a size refusal
+stops matching it, with no compile error**, because `Error` is `#[non_exhaustive]` and the
+catch-all already present takes the new variant. Word the refusal from `limit`, which is
+1 GiB on the whole-buffer paths and 2 GiB less 16 bytes on the streaming encrypt. The CLI
+exits 5 for it.
+
+The whole-buffer decrypt's ceiling is now measured against the `\EncryptedPackage`
+stream's length before a byte of it is read, rather than by reading one byte past the cap.
+
+### Streaming: `_to` entry points that never hold the document
+
+Large files no longer have to fit in memory. Each takes an `io::Read + Seek` and holds
+one 4096-byte segment of the package at a time:
+
+- `decrypt_ooxml_to(reader, writer, password, policy) -> Result<DecryptOutcome, Error>`,
+  `writer: io::Write`. A verified decrypt reads the input **twice**: the `dataIntegrity`
+  HMAC first, writing nothing, so a tampered file is refused before any plaintext exists;
+  then the decrypt, with the HMAC computed again. If the second disagrees, the file changed
+  between the reads, and the result is `IntegrityCheckFailed` with plaintext already
+  written. **On any `Err` the caller discards W**, as the docs say in those words.
+- `encrypt_ooxml_to`, `encrypt_ooxml_with_params_to`, `encrypt_ooxml_standard_to` and
+  `encrypt_ooxml_standard_with_key_bits_to`, `writer: io::Read + io::Write + io::Seek`:
+  `cfb` reads back what it writes, and the agile `\EncryptionInfo`, which carries the
+  HMAC, is written as a same-length placeholder and patched once the last segment is
+  written. The reader is measured by seeking to its end and must deliver exactly that many
+  bytes. One that ends early or grows is refused as `Error::Io`. Past 2 GiB less 16 bytes
+  of plaintext the encrypt refuses as `PackageTooLarge` before writing anything: [MS-CFB]
+  §2.6.1 caps a version 3 stream at 0x80000000 bytes, and version 3 is the container Office
+  writes.
+- `classify_from` and `is_cfb_office_from` read only the headers. `classify(&[u8])` is
+  now `classify_from` over a `Cursor` and gives the same answers, checked on every
+  fixture.
+
+A cancelled reader stops any of them with its own error as `Error::Io`, never as a
+damaged file. The whole-buffer functions are now `Cursor` wrappers over the same code, and
+their output is unchanged: both seeded goldens match byte for byte through either form.
+
+**What the streaming paths hold**, measured by a counting allocator in a release build on
+2026-10-15 (`tests/streaming_memory.rs`). Plaintext only ever sits in one wiped
+4096-byte slot. What grows is `cfb`'s sector table and sector list, which it keeps in memory:
+
+| payload | encrypt | decrypt |
+| --- | --- | --- |
+| 256 MiB | 9.0 MiB | 11.5 MiB |
+| 1 GiB | 33 MiB | 46 MiB |
+
+That is a slope of about 1/32 and 1/22, the same in both formats, so about 66 and 92 MiB at
+the 2 GiB cap. The test asserts a working set plus 1/16 of the payload, and fails an
+implementation that holds the document.
+
+Evidence that the streaming write path is still what real readers open: the four-reader
+acceptance gate, run on this machine 2026-10-15 against artifacts built from `477f429` (every
+encrypt now runs the streaming core), written into a private directory:
+
+```
+agile    41,984 bytes  SHA-256 ab2f616624e011cbfe9bd567b1f6d682a66a63209be6860e6c817c174fab99a4
+office         PASS  Word 16.0 build 16.0.19127: OPENED, content matches | WRONG PASSWORD REFUSED 0x800A1520
+libreoffice    PASS  LibreOffice 26.8.0.3: OPENED, content matches | WRONG PASSWORD REFUSED (verifier)
+msoffcrypto    PASS  msoffcrypto-tool 6.0.0: byte-identical to plain.docx | dataIntegrity HMAC verifies
+office-crypto  PASS  office-crypto 0.3: byte-identical to plain.docx
+GATE: PASS (4 of 4 readers ran; 0 not selected)
+
+standard 40,960 bytes  SHA-256 bb1b39ad6e5ce16579daefb281acf50939c0a1ca0624c9e6a5fabe9b0821aa01
+GATE: PASS (4 of 4 readers ran; 0 not selected)
+```
+
+`--tamper --expect-fail` on both, and `--corrupt-integrity --expect-fail` on agile, failed
+as required.
+
 ### `cfb` 0.15: the container's directory tree is now balanced
 
 The `cfb` dependency moves from 0.14 to 0.15. Two of its changes reach this crate:

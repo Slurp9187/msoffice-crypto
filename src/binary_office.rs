@@ -24,7 +24,7 @@
 //! # One reader, two callers
 //!
 //! The FIB, the BIFF record walk and PowerPoint's persist directory are read here, once,
-//! by functions that return `Option` and never fail loudly. [`probe`] maps `None` to
+//! by functions that return `Option` and never fail loudly. [`probe_in`] maps `None` to
 //! "could not tell"; the decrypt modules (`word97`, `excel97`, `powerpoint97`, behind the
 //! `legacy-binary` feature) map the same `None` to an error naming the field. Two walkers
 //! that could disagree about where a record starts would be the crossed-parameter bug
@@ -48,7 +48,7 @@
 //!
 //! Everything read here is attacker-chosen. Every offset is bounds-checked before use,
 //! every scan is bounded by [`crate::limits`], and no path can panic or loop unboundedly:
-//! `probe` returns `None` for anything it cannot make sense of, exactly as `classify`
+//! `probe_in` returns `None` for anything it cannot make sense of, exactly as `classify`
 //! returns `Unknown`. The PowerPoint walk seeks rather than reading a prefix, so an
 //! `offsetToCurrentEdit` near the end of a 50 MB deck costs a few small reads and not
 //! 50 MB of memory.
@@ -58,7 +58,7 @@ use crate::limits::{
     PPT_PERSIST_DIRECTORY_READ_CAP, PPT_PERSIST_OBJECTS_MAX,
 };
 use std::collections::BTreeMap;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 
 /// Which 97-2003 application format a CFB container holds.
@@ -69,7 +69,7 @@ pub(crate) enum BinaryFormat {
     PowerPoint,
 }
 
-/// What [`probe`] found in a legacy binary container.
+/// What [`probe_in`] found in a legacy binary container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BinaryVerdict {
     pub(crate) format: BinaryFormat,
@@ -87,7 +87,7 @@ pub(crate) struct BinaryVerdict {
     /// XOR obfuscation rather than an RC4 family. A different scheme, not a weaker one.
     pub(crate) xor_obfuscated: bool,
     /// An edition before 97: Word 6.0/95 (`nFib` 0x0065 to 0x0069) or a BIFF5 workbook
-    /// (Excel 5.0/95, in a `Book` stream). Set by [`probe`] for every verdict.
+    /// (Excel 5.0/95, in a `Book` stream). Set by [`probe_in`] for every verdict.
     pub(crate) pre_97: bool,
 }
 
@@ -138,17 +138,17 @@ pub(crate) fn workbook_stream_name<F: Read + Seek>(
 /// Recognise a legacy binary Office container, or return `None`.
 ///
 /// `None` means "not a legacy binary Office document, or unreadable as one" — never an
-/// error, because a caller of `classify` gets a verdict for every input.
-pub(crate) fn probe(data: &[u8]) -> Option<BinaryVerdict> {
-    let mut cfb = cfb::CompoundFile::open(Cursor::new(data)).ok()?;
-    let mut verdict = match format_of(&cfb)? {
-        BinaryFormat::Word => probe_word(&mut cfb),
-        BinaryFormat::Excel => probe_excel(&mut cfb),
-        BinaryFormat::PowerPoint => probe_powerpoint(&mut cfb),
+/// error, because a caller of `classify` gets a verdict for every input. Takes the
+/// container already open, as `classify_from` and the decrypt path both hold it.
+pub(crate) fn probe_in<F: Read + Seek>(cfb: &mut cfb::CompoundFile<F>) -> Option<BinaryVerdict> {
+    let mut verdict = match format_of(cfb)? {
+        BinaryFormat::Word => probe_word(cfb),
+        BinaryFormat::Excel => probe_excel(cfb),
+        BinaryFormat::PowerPoint => probe_powerpoint(cfb),
     }?;
     verdict.pre_97 = match verdict.format {
-        BinaryFormat::Word => word_is_pre_97(&mut cfb),
-        BinaryFormat::Excel => workbook_stream_name(&cfb) == Some(BOOK),
+        BinaryFormat::Word => word_is_pre_97(cfb),
+        BinaryFormat::Excel => workbook_stream_name(cfb) == Some(BOOK),
         BinaryFormat::PowerPoint => false,
     };
     Some(verdict)

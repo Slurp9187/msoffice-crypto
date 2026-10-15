@@ -38,13 +38,16 @@
 //! derivations written side by side can.
 use crate::error::Error;
 use crate::limits;
+use crate::segments::{read_full, SEGMENT_LEN};
 use crate::sensitive::{
-    utf16le_password, DerivedKey, PadBlock, PasswordDigest, SpinState, VerifierPlaintext,
+    utf16le_password, DerivedKey, PadBlock, PasswordDigest, PlaintextSegment, SpinState,
+    VerifierPlaintext,
 };
 use aes::{Aes128, Aes192, Aes256};
 use ecb::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyInit};
 use secure_gate::{ConstantTimeEq, RevealSecret, RevealSecretMut};
 use sha1::{Digest, Sha1};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 /// `AlgID` values — [MS-OFFCRYPTO] §2.3.2, the `wincrypt.h` `CALG_*` constants. The same
 /// four `classify` reads (`classify.rs`), spelled once per module because the detection
@@ -149,29 +152,34 @@ pub(crate) struct StandardParams<'a> {
     pub(crate) key_size_bytes: usize,
 }
 
-/// Decrypt a standard-encryption `EncryptedPackage`.
+/// Decrypt a standard-encryption `EncryptedPackage` from a seekable stream into
+/// `writer`, one 4096-byte step at a time.
 ///
-/// `info` is the EncryptionInfo stream with the 8-byte header stripped
-/// (4-byte version + 4-byte `Flags` copy already consumed by the caller).
-///
-/// On error, no plaintext is produced. This format defines no integrity element.
+/// `info` is the EncryptionInfo stream with the 8-byte header stripped (4-byte version +
+/// 4-byte `Flags` copy already consumed by the caller).
 ///
 /// # Errors
 ///
-/// [`Error::MissingStream`] if the header is truncated;
-/// [`Error::BadParameters`] if `EncryptionHeaderSize` or a sibling field is
-/// out of range; [`Error::UnsupportedAlgorithm`] if `AlgID` names a cipher other than
-/// AES or `AlgIDHash` is not SHA-1; [`Error::WrongPassword`] if the verifier does not
-/// match; [`Error::CipherError`] if an AES-ECB step rejects a block.
-pub(crate) fn decrypt(
+/// [`Error::MissingStream`] if the header or the package prefix is truncated;
+/// [`Error::BadParameters`] if `EncryptionHeaderSize` or a sibling field is out of
+/// range, or the declared size exceeds the ciphertext; [`Error::UnsupportedAlgorithm`]
+/// if `AlgID` names a cipher other than AES or `AlgIDHash` is not SHA-1;
+/// [`Error::WrongPassword`] if the verifier does not match; [`Error::Io`] from either
+/// stream.
+///
+/// One pass: the format defines no integrity element, so there is nothing to check
+/// before plaintext is released, and nothing to read twice for. The password is
+/// verified before the stream is touched.
+pub(crate) fn decrypt_to<S: Read + Seek, W: Write>(
     info: &[u8],
-    encrypted_package: &[u8],
+    encrypted_package: &mut S,
+    writer: &mut W,
     password: &str,
-) -> Result<Vec<u8>, Error> {
+) -> Result<(), Error> {
     let params = parse_encryption_info(info)?;
     let derived_key = derive_standard_key(password, params.salt, params.key_size_bytes)?;
     verify_password(&derived_key, &params)?;
-    decrypt_package(&derived_key, encrypted_package)
+    decrypt_package_to(&derived_key, encrypted_package, writer)
 }
 
 /// Steps 1 and 2: the binary header and the verifier, with every field this crate acts
@@ -569,47 +577,66 @@ pub(crate) fn derive_standard_key(
     }))
 }
 
-fn decrypt_package(key: &DerivedKey, encrypted_package: &[u8]) -> Result<Vec<u8>, Error> {
-    if encrypted_package.len() < 8 {
+fn decrypt_package_to<S: Read + Seek, W: Write>(
+    key: &DerivedKey,
+    encrypted_package: &mut S,
+    writer: &mut W,
+) -> Result<(), Error> {
+    let stream_len = encrypted_package.seek(SeekFrom::End(0))?;
+    encrypted_package.seek(SeekFrom::Start(0))?;
+    let mut prefix = [0u8; 8];
+    if stream_len < 8 || read_full(encrypted_package, &mut prefix)? < 8 {
         return Err(Error::MissingStream("EncryptedPackage too short"));
     }
-    let declared_size = u64::from_le_bytes(encrypted_package[..8].try_into().unwrap());
-    let data = &encrypted_package[8..];
+    let declared_size = u64::from_le_bytes(prefix);
+    let data_len = stream_len - 8;
 
-    // The identical guard `agile::decrypt_package` carries, for the identical field, and
-    // it matters more here: [MS-OFFCRYPTO] §2.3.4.5 defines no integrity element for
+    // The identical guard `agile::decrypt_package_to` carries, for the identical field,
+    // and it matters more here: [MS-OFFCRYPTO] §2.3.4.5 defines no integrity element for
     // standard encryption, so there is no HMAC that incidentally covers this prefix and
-    // nothing else in the path can notice. The number's only use is `output.truncate(..)`
-    // below, and `Vec::truncate` past the current length is a silent no-op — so any
-    // declared size at or above the ciphertext length was *accepted* and the caller
-    // quietly received the writer's final-segment padding appended to their ZIP.
-    //
-    // Compared as `u64`, before the `as usize` cast: on a 32-bit target that cast
-    // truncates, and a declared size of `2^32 + 16` would otherwise pass as 16 — silently
-    // returning a 16-byte prefix of the document as though it were the whole thing.
-    if declared_size > data.len() as u64 {
+    // nothing else in the path can notice. Before the streaming API the number's only use
+    // was `output.truncate(..)`, and `Vec::truncate` past the current length is a silent
+    // no-op — so any declared size at or above the ciphertext length was *accepted* and
+    // the caller quietly received the writer's final-segment padding appended to their
+    // ZIP. Compared as `u64`, so no cast can shorten it first.
+    if declared_size > data_len {
         return Err(Error::BadParameters(format!(
-            "EncryptedPackage declares {declared_size} plaintext bytes but carries only {} \
-             bytes of ciphertext",
-            data.len()
+            "EncryptedPackage declares {declared_size} plaintext bytes but carries only \
+             {data_len} bytes of ciphertext"
         )));
     }
-    let plaintext_size = declared_size as usize;
 
-    let mut output = Vec::with_capacity(data.len());
-    for chunk in data.chunks(4096) {
-        // Pad final chunk to AES block boundary
-        let mut padded = chunk.to_vec();
-        let rem = padded.len() % 16;
-        if rem != 0 {
-            padded.resize(padded.len() + (16 - rem), 0);
+    let mut body = encrypted_package.by_ref().take(data_len);
+    let mut remaining = declared_size;
+    let mut slot = PlaintextSegment::new([0u8; SEGMENT_LEN]);
+    slot.with_secret_mut(|buf| -> Result<(), Error> {
+        loop {
+            let len = read_full(&mut body, buf)?;
+            if len == 0 {
+                return Ok(());
+            }
+            // Pad a short final step to an AES block; 4096 is one itself.
+            let padded_len = len.div_ceil(16) * 16;
+            let Some(block) = buf.get_mut(..padded_len) else {
+                return Err(Error::CipherError);
+            };
+            if let Some(tail) = block.get_mut(len..) {
+                tail.fill(0);
+            }
+            key.with_secret(|k| aes_ecb_decrypt_in_place(k, block))?;
+            let keep = usize::try_from(remaining.min(len as u64)).unwrap_or(0);
+            writer.write_all(block.get(..keep).unwrap_or_default())?;
+            remaining -= keep as u64;
         }
-        let dec = key.with_secret(|k| aes_ecb_decrypt(k, &padded))?;
-        output.extend_from_slice(&dec);
-    }
+    })
+}
 
-    output.truncate(plaintext_size);
-    Ok(output)
+/// The whole-buffer shape of [`decrypt_package_to`], for the tests below.
+#[cfg(test)]
+fn decrypt_package(key: &DerivedKey, encrypted_package: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut out = Vec::new();
+    decrypt_package_to(key, &mut std::io::Cursor::new(encrypted_package), &mut out)?;
+    Ok(out)
 }
 
 /// The key length rule both ECB directions share.
@@ -693,6 +720,48 @@ pub(crate) fn aes_ecb_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, E
     }
     .map_err(|_| Error::CipherError)?;
     Ok(out)
+}
+
+/// [`aes_ecb_decrypt`] in place, for the streaming paths' wrapped plaintext slot — see
+/// `agile::aes_cbc_decrypt_in_place` for why a returned `Vec` would not do. `buf` must
+/// be a multiple of 16 bytes.
+pub(crate) fn aes_ecb_decrypt_in_place(key: &[u8], buf: &mut [u8]) -> Result<(), Error> {
+    use aes::cipher::generic_array::GenericArray;
+    check_aes_key(key)?;
+    macro_rules! run {
+        ($cipher:ty) => {
+            ecb::Decryptor::<$cipher>::new(GenericArray::from_slice(key))
+                .decrypt_padded_mut::<NoPadding>(buf)
+                .map(|_| ())
+        };
+    }
+    match key.len() {
+        16 => run!(Aes128),
+        24 => run!(Aes192),
+        _ => run!(Aes256),
+    }
+    .map_err(|_| Error::CipherError)
+}
+
+/// [`aes_ecb_encrypt`] in place: the ciphertext overwrites the plaintext in `buf`. `buf`
+/// must be a multiple of 16 bytes.
+pub(crate) fn aes_ecb_encrypt_in_place(key: &[u8], buf: &mut [u8]) -> Result<(), Error> {
+    use aes::cipher::generic_array::GenericArray;
+    check_aes_key(key)?;
+    let len = buf.len();
+    macro_rules! run {
+        ($cipher:ty) => {
+            ecb::Encryptor::<$cipher>::new(GenericArray::from_slice(key))
+                .encrypt_padded_mut::<NoPadding>(buf, len)
+                .map(|_| ())
+        };
+    }
+    match key.len() {
+        16 => run!(Aes128),
+        24 => run!(Aes192),
+        _ => run!(Aes256),
+    }
+    .map_err(|_| Error::CipherError)
 }
 
 fn read_u32(data: &[u8], offset: usize) -> u32 {

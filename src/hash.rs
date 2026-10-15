@@ -215,22 +215,69 @@ impl HashAlgorithm {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn hmac(self, key: &[u8], message: &[u8]) -> Vec<u8> {
+        let mut mac = self.hmac_state(key);
+        mac.update(message);
+        mac.finalize()
+    }
+
+    /// An HMAC under this hash, fed a piece at a time: the shape the streaming paths need,
+    /// where the `EncryptedPackage` stream passes through once and is never whole in
+    /// memory. [`hmac`](Self::hmac) is this with the whole message in one `update`, so
+    /// the two cannot disagree.
+    pub(crate) fn hmac_state(self, key: &[u8]) -> HmacState {
         macro_rules! run {
-            ($d:ty) => {{
+            ($d:ty, $variant:ident) => {
                 // HMAC accepts a key of any length, so `new_from_slice` cannot fail
                 // here; the `expect` documents that rather than hiding a real case.
-                let mut mac =
-                    <Hmac<$d>>::new_from_slice(key).expect("HMAC accepts keys of any length");
-                mac.update(message);
-                mac.finalize().into_bytes().to_vec()
-            }};
+                HmacState::$variant(
+                    <Hmac<$d>>::new_from_slice(key).expect("HMAC accepts keys of any length"),
+                )
+            };
         }
         match self {
-            Self::Sha1 => run!(Sha1),
-            Self::Sha256 => run!(Sha256),
-            Self::Sha384 => run!(Sha384),
-            Self::Sha512 => run!(Sha512),
+            Self::Sha1 => run!(Sha1, Sha1),
+            Self::Sha256 => run!(Sha256, Sha256),
+            Self::Sha384 => run!(Sha384, Sha384),
+            Self::Sha512 => run!(Sha512, Sha512),
+        }
+    }
+}
+
+/// An HMAC in progress, under whichever hash the file named.
+///
+/// **Holds ipad/opad state derived from the key, and nothing wipes it.** `hmac` 0.12 has
+/// no `Drop` and no `zeroize` feature — the residue the secure-gate skill already records
+/// for the one-shot [`HashAlgorithm::hmac`]. The streaming paths keep this alive for a
+/// whole pass over the package rather than for one call, which lengthens the window but
+/// does not change what is exposed: the capability to forge a tag under that one key.
+/// It lives on the stack of the function running the pass and is never boxed or cloned.
+pub(crate) enum HmacState {
+    Sha1(Hmac<Sha1>),
+    Sha256(Hmac<Sha256>),
+    Sha384(Hmac<Sha384>),
+    Sha512(Hmac<Sha512>),
+}
+
+impl HmacState {
+    pub(crate) fn update(&mut self, data: &[u8]) {
+        match self {
+            Self::Sha1(m) => m.update(data),
+            Self::Sha256(m) => m.update(data),
+            Self::Sha384(m) => m.update(data),
+            Self::Sha512(m) => m.update(data),
+        }
+    }
+
+    /// The tag, as an owned `Vec` of exactly the digest's length — the shape
+    /// `IntegrityTag::new` takes by move, so nothing is abandoned on the way in.
+    pub(crate) fn finalize(self) -> Vec<u8> {
+        match self {
+            Self::Sha1(m) => m.finalize().into_bytes().to_vec(),
+            Self::Sha256(m) => m.finalize().into_bytes().to_vec(),
+            Self::Sha384(m) => m.finalize().into_bytes().to_vec(),
+            Self::Sha512(m) => m.finalize().into_bytes().to_vec(),
         }
     }
 }
@@ -292,6 +339,47 @@ pub(crate) fn fit_iv(bytes: &[u8], block_size: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An HMAC fed a piece at a time is the HMAC of the whole message, under every hash
+    /// and at every chunk size the streaming paths can produce: one byte (a reader that
+    /// returns short), 15 (never block-aligned), 4096 (a whole segment) and 4097 (a
+    /// segment and one byte over). The one-shot expectation is computed straight from the
+    /// `hmac` crate, not from [`HashAlgorithm::hmac`], which is now this same state fed
+    /// once and would agree with it whatever it did.
+    #[test]
+    fn a_chunked_hmac_is_the_one_shot_hmac() {
+        let key: Vec<u8> = (0..64u8).collect();
+        let message: Vec<u8> = (0..20_000u32).map(|i| (i % 253) as u8).collect();
+        for hash in [
+            HashAlgorithm::Sha1,
+            HashAlgorithm::Sha256,
+            HashAlgorithm::Sha384,
+            HashAlgorithm::Sha512,
+        ] {
+            macro_rules! one_shot {
+                ($d:ty) => {{
+                    let mut m = <Hmac<$d>>::new_from_slice(&key).unwrap();
+                    m.update(&message);
+                    m.finalize().into_bytes().to_vec()
+                }};
+            }
+            let want = match hash {
+                HashAlgorithm::Sha1 => one_shot!(Sha1),
+                HashAlgorithm::Sha256 => one_shot!(Sha256),
+                HashAlgorithm::Sha384 => one_shot!(Sha384),
+                HashAlgorithm::Sha512 => one_shot!(Sha512),
+            };
+            assert_eq!(want.len(), hash.digest_len());
+            for chunk in [1usize, 15, 4096, 4097] {
+                let mut mac = hash.hmac_state(&key);
+                for piece in message.chunks(chunk) {
+                    mac.update(piece);
+                }
+                assert_eq!(mac.finalize(), want, "{hash:?} fed in {chunk}-byte pieces");
+            }
+            assert_eq!(hash.hmac(&key, &message), want, "{hash:?} one-shot");
+        }
+    }
 
     /// Each variant must actually run the algorithm it names. A `match` arm that fell
     /// through to the wrong hasher would be invisible to every other test in the crate

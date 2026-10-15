@@ -160,6 +160,10 @@ fn exit_codes_map_every_error_class() {
     );
     assert_eq!(exit_code(&Error::NotAPlainPackage), EX_REFUSED);
     assert_eq!(exit_code(&Error::UnknownContainer), EX_NOT_OFFICE);
+    assert_eq!(
+        exit_code(&Error::PackageTooLarge { len: 2, limit: 1 }),
+        EX_REFUSED
+    );
     // The one caller error in the table. It is here although today's CLI cannot raise
     // it -- there is no `--spin-count` flag -- because the number is the contract the
     // library's callers see through this binary's exit status, and the canary in

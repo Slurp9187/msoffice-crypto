@@ -746,10 +746,10 @@ fn a_zip_is_not_inspected_so_a_package_and_an_impostor_are_indistinguishable() {
 /// same branch for "I was handed too few bytes" as for "this is not an Office file". One
 /// of those is a missing answer and the other is a wrong one.
 ///
-/// **Proven by removal**: route the `Err(Error::NotACfbFile)` arm in `classify_cfb` back
-/// to `classify_binary(data)` and the first assertion fails with
-/// `Opened`/`NotAttempted` -- because `binary_office::probe` opens the container with the
-/// same call that already failed, so the walk reports "looked, found nothing".
+/// **Proven by removal**: make the `Err(_)` arm after `cfb::CompoundFile::open` in
+/// `classify_from` return `unknown(Container::Cfb, ContainerRead::Opened)` -- "looked,
+/// found nothing" -- and the first assertion fails. Until the streaming API the arm was
+/// `Err(Error::NotACfbFile)` in `classify_cfb`, and the container was opened three times.
 #[test]
 #[cfg_attr(
     not(fixture_corpus),

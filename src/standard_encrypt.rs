@@ -134,15 +134,17 @@
 
 use crate::agile_encrypt::{fill, random_source};
 use crate::error::{EncryptParam, EncryptParamProblem, Error};
-use crate::sensitive::{DerivedKey, VerifierPlaintext};
+use crate::segments::read_full;
+use crate::sensitive::{DerivedKey, PlaintextSegment, VerifierPlaintext};
 use crate::standard::{
-    aes_ecb_encrypt, derive_standard_key, AES128_KEY_LEN, ALG_ID_AES_128, ALG_ID_AES_192,
-    ALG_ID_AES_256, FLAG_AES, HEADER_FIXED_LEN, SHA1_LEN,
+    aes_ecb_encrypt, aes_ecb_encrypt_in_place, derive_standard_key, AES128_KEY_LEN, ALG_ID_AES_128,
+    ALG_ID_AES_192, ALG_ID_AES_256, FLAG_AES, HEADER_FIXED_LEN, SHA1_LEN,
 };
-use crate::{dataspaces, limits};
+use crate::{agile_encrypt, dataspaces, limits};
 use rand::{TryCryptoRng, TryRng};
-use secure_gate::RevealSecret;
+use secure_gate::{RevealSecret, RevealSecretMut};
 use sha1::{Digest, Sha1};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
 /// `EncryptionInfo.vMajor` / `vMinor` — [MS-OFFCRYPTO] §2.3.4.5; see the module header.
 pub(crate) const STANDARD_VERSION: (u16, u16) = (4, 2);
@@ -526,17 +528,54 @@ pub(crate) fn write_encryption_info(
 /// format. The reader (`standard::decrypt_package`) truncates the padding away against
 /// the prefix, and refuses a prefix larger than the ciphertext — so the prefix is the
 /// plaintext length exactly, never the padded length.
+#[cfg(test)]
 pub(crate) fn encrypt_package(plaintext: &[u8], key: &DerivedKey) -> Result<Vec<u8>, Error> {
     let mut stream = Vec::with_capacity(8 + plaintext.len() + AES_BLOCK_LEN);
-    stream.extend_from_slice(&(plaintext.len() as u64).to_le_bytes());
-    for chunk in plaintext.chunks(CHUNK_LEN) {
-        // Only the final chunk can be short of a block multiple; 4096 is one itself.
-        let mut padded = chunk.to_vec();
-        padded.resize(chunk.len().div_ceil(AES_BLOCK_LEN) * AES_BLOCK_LEN, 0);
-        let block = key.with_secret(|k| aes_ecb_encrypt(k, &padded))?;
-        stream.extend_from_slice(&block);
-    }
+    encrypt_package_to(
+        &mut std::io::Cursor::new(plaintext),
+        plaintext.len() as u64,
+        &mut stream,
+        key,
+    )?;
     Ok(stream)
+}
+
+/// [`encrypt_package`] from a reader into a writer, `CHUNK_LEN` bytes at a time through
+/// one wrapped [`PlaintextSegment`] slot, encrypted in place.
+///
+/// `len` is the plaintext length the prefix declares, measured by the caller; the reader
+/// is held to it exactly as the agile writer holds its reader
+/// ([`agile_encrypt::held_to_length`]).
+pub(crate) fn encrypt_package_to<R: Read, W: Write + ?Sized>(
+    reader: &mut R,
+    len: u64,
+    out: &mut W,
+    key: &DerivedKey,
+) -> Result<(), Error> {
+    out.write_all(&len.to_le_bytes())?;
+    let mut body = reader.by_ref().take(len);
+    let mut read = 0u64;
+    let mut slot = PlaintextSegment::new([0u8; CHUNK_LEN]);
+    slot.with_secret_mut(|buf| -> Result<(), Error> {
+        loop {
+            let n = read_full(&mut body, buf)?;
+            if n == 0 {
+                return Ok(());
+            }
+            read += n as u64;
+            // Only the final chunk can be short of a block multiple; 4096 is one itself.
+            let padded_len = n.div_ceil(AES_BLOCK_LEN) * AES_BLOCK_LEN;
+            let Some(block) = buf.get_mut(..padded_len) else {
+                return Err(Error::CipherError);
+            };
+            if let Some(tail) = block.get_mut(n..) {
+                tail.fill(0);
+            }
+            key.with_secret(|k| aes_ecb_encrypt_in_place(k, block))?;
+            out.write_all(block)?;
+        }
+    })?;
+    agile_encrypt::held_to_length(reader, len, read)
 }
 
 /// Encrypt an OOXML package with a password into a complete Office 2007 container — the
@@ -588,26 +627,68 @@ pub(crate) fn encrypt<R: TryRng + TryCryptoRng>(
     key_bits: u32,
     rng: &mut R,
 ) -> Result<Vec<u8>, Error> {
-    let key_size = AesKeySize::new(key_bits)?;
+    AesKeySize::new(key_bits)?;
 
+    // The whole-buffer ceiling: this function holds the package and the container in
+    // memory, and `PAYLOAD_CEILING` is what it will read back the same way.
     if package.len() > limits::PAYLOAD_CEILING {
-        return Err(Error::BadParameters(format!(
-            "the package is {} bytes; this crate encrypts at most {} (see \
-             limits::PAYLOAD_CEILING), because that is what it will read back",
-            package.len(),
-            limits::PAYLOAD_CEILING
-        )));
+        return Err(Error::PackageTooLarge {
+            len: package.len() as u64,
+            limit: limits::PAYLOAD_CEILING as u64,
+        });
     }
 
+    let mut container = Cursor::new(Vec::new());
+    encrypt_to(
+        &mut Cursor::new(package),
+        &mut container,
+        password,
+        key_bits,
+        rng,
+    )?;
+    Ok(container.into_inner())
+}
+
+/// [`encrypt`] from a seekable reader into a seekable writer, one 4096-byte step at a
+/// time.
+///
+/// No placeholder is needed here: the format has no integrity element, so
+/// `EncryptionInfo` is complete before the first package byte is written, and it goes in
+/// first as it always has. `reader` is measured by seeking to its end and held to that
+/// length ([`encrypt_package_to`]).
+///
+/// # Errors
+///
+/// As [`encrypt`], less the payload ceiling, which bounds an allocation this function
+/// does not make; plus [`Error::Io`] from either stream, a cancelling reader included.
+pub(crate) fn encrypt_to<R, W, G>(
+    reader: &mut R,
+    writer: &mut W,
+    password: &str,
+    key_bits: u32,
+    rng: &mut G,
+) -> Result<(), Error>
+where
+    R: Read + Seek,
+    W: Read + Write + Seek,
+    G: TryRng + TryCryptoRng,
+{
+    let key_size = AesKeySize::new(key_bits)?;
+    let len = reader.seek(SeekFrom::End(0))?;
+    reader.seek(SeekFrom::Start(0))?;
+    agile_encrypt::refuse_past_v3_stream(len)?;
+
     let material = generate(password, key_size, rng)?;
-    let encrypted_package = encrypt_package(package, &material.key)?;
     let info = write_encryption_info(
         material.key_size,
         &material.salt,
         &material.encrypted_verifier,
         &material.encrypted_verifier_hash,
     );
-    dataspaces::build_container(&info, &encrypted_package)
+    dataspaces::write_container(writer, &info, |stream| {
+        encrypt_package_to(reader, len, stream, &material.key)?;
+        Ok(info.clone())
+    })
 }
 
 #[cfg(test)]

@@ -47,7 +47,7 @@ handing back the plaintext package *is* the function.
 withdrawn as a design error. Do not reopen it without new evidence, and do not move it
 piecemeal.
 
-## The twelve aliases
+## The thirteen aliases
 
 All in `src/sensitive.rs`, all `pub(crate)`, all plain `type` aliases — **not** newtypes.
 
@@ -65,13 +65,15 @@ All in `src/sensitive.rs`, all `pub(crate)`, all plain `type` aliases — **not*
 | `PadBlock` | `Fixed<[u8; 64]>` | standard encryption's `H_final` XOR 0x36 / 0x5C ladder inputs |
 | `Office97Buffer` | `Fixed<[u8; 336]>` | Office 97/2000 RC4's `TruncatedHash ‖ salt` × 16 buffer, with `H0` finalized into its tail (`legacy-binary`) |
 | `AnsiPassword` | `Fixed<[u8; 16]>` | the XOR obfuscation password's bytes, at most 15, length carried beside it (`legacy-binary`) |
+| `PlaintextSegment` | `Fixed<[u8; 4096]>` | one segment of package plaintext on the streaming paths (#27): read in to be encrypted in place, or decrypted in place on its way out |
 
 **`Dynamic`, not `Fixed`, and why:** every length here is decided by the *file*. Agile's
 `keyBits` comes out of the `EncryptionInfo` XML and sets the derived-key and session-key length
 (16/24/32); the digest is 20 or 64 bytes depending on the hash the file names.
 
-**The five `Fixed` aliases** (`XorObfuscationArray` and the four KDF scratch buffers added
-in rc.5) are `Fixed` because their lengths are the *spec's*, not the file's. That is the rule
+**The six `Fixed` aliases** (`XorObfuscationArray`, the four KDF scratch buffers added
+in rc.5, and rc.7's `PlaintextSegment`) are `Fixed` because their lengths are the *spec's*,
+not the file's — 4096 is [MS-OFFCRYPTO] §2.3.4.15's segment length. That is the rule
 applied in the direction the `Dynamic` rows do not show. `SpinState` and `PadBlock` compile
 under `crypto-ops`. The other three are `legacy-binary`-gated.
 
@@ -112,7 +114,7 @@ done
 | `new_with` | 10 |
 | `ct_eq` | 6 |
 | `from_rng` | 4 |
-| `with_secret_mut` | 2 |
+| `with_secret_mut` | 4 |
 | `expose_secret` | **0** |
 | `into_inner` | **0** |
 | `from_random` | **0** |
@@ -120,7 +122,10 @@ done
 **There is no Tier 2 and no Tier 3 in this crate.** Every secret access is a `with_secret`
 or `with_secret_mut` closure. `with_secret_mut` arrived in rc.5 for exactly two in-place
 loops: standard's spin over one `SpinState`, and agile's spin writing each round into the
-spare of its two alternating `PasswordDigest`s. That use is scoped Tier 1, so it is not the
+spare of its two alternating `PasswordDigest`s. rc.7 added the four package loops of the
+streaming paths, one per direction per format, each filling and ciphering one
+`PlaintextSegment` in place; the slot is never grown, and nothing leaves the closure but
+`Result<(), Error>`. That use is scoped Tier 1, so it is not the
 `expose_secret` decision below. Treat each further `with_secret_mut` as a loop that needs
 one, not as a convenience, which is what makes "every access is greppable" actually true here — so keep it that
 way, and treat the first `expose_secret` as a decision to argue for rather than a convenience.
@@ -168,7 +173,9 @@ Re-derive from the manifests rather than trusting this list — it was incomplet
   and `rc4` there is no flag to turn on. Exposure is MAC-forgery capability under that key.
   **This entry was missing until the rc.12 audit**, and the way it was missing is the lesson:
   the hasher class directly above it was known, written down, and then not carried across to
-  the HMAC path in the same crate.
+  the HMAC path in the same crate. Since rc.7 the streaming paths keep this state
+  (`hash::HmacState`) alive for a whole pass over the package rather than for one call: a
+  longer window, the same exposure. What it is fed is ciphertext only.
 - `sha2::compress512` spills its message schedule; `W[0..16]` *is* the message block verbatim.
 - **The spin loops, specific to this format: closed in rc.5, and why the old reasoning was
   wrong.** Until rc.5 `spin_hash` dropped one unwiped `Vec` per round (up to `spinCount` per

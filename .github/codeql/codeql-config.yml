@@ -55,6 +55,10 @@ paths-ignore:
   # literals and three `assert_eq!` panic messages -- were the prompt.
   - src/lib_tests.rs
   - src/sensitive_tests.rs
+  # The streaming entry points' tests (#27), a test-only file from the start: the fixture
+  # password, a constant session key for the package loop, and `assert!` messages that
+  # print a `Result`, which CodeQL reads as cleartext logging -- eight alerts on PR #38.
+  - src/streaming_tests.rs
 
   # The hostile-input suites. These carry no `#[cfg(test)]` marker *inside* the file --
   # the gate is on the `mod` declaration in `src/lib.rs:248` and `:253`

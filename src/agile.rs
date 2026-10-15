@@ -39,17 +39,18 @@
 use crate::classify::local_name;
 use crate::error::Error;
 use crate::hash::{fit_iv, HashAlgorithm};
-use crate::integrity::{self, IntegrityMaterial, IntegrityOutcome, IntegrityPolicy};
+use crate::integrity::{IntegrityCheck, IntegrityMaterial, IntegrityOutcome, IntegrityPolicy};
 use crate::limits;
-use crate::segments::Segments;
+use crate::segments::{read_full, Segmenter, SEGMENT_LEN};
 use crate::sensitive::{
-    utf16le_password, DerivedKey, PasswordDigest, SessionKey, VerifierPlaintext,
+    utf16le_password, DerivedKey, PasswordDigest, PlaintextSegment, SessionKey, VerifierPlaintext,
 };
 use aes::{Aes128, Aes192, Aes256};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use cbc::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
 use quick_xml::{events::Event, Reader};
 use secure_gate::{ConstantTimeEq, RevealSecret, RevealSecretMut};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 // Block key constants — verified against office-crypto reference implementation.
 // The two dataIntegrity constants live in `integrity.rs` beside their only user.
@@ -310,12 +311,44 @@ pub(crate) fn recover_session_key(
 /// [`Error::IntegrityCheckFailed`] or [`Error::BadParameters`] from
 /// the HMAC policy; [`Error::CipherError`] if an AES-CBC step rejects a block;
 /// [`Error::MissingStream`] if the package prefix is truncated.
+#[cfg(test)]
 pub(crate) fn decrypt(
     xml_data: &[u8],
     encrypted_package: &[u8],
     password: &str,
     policy: IntegrityPolicy,
 ) -> Result<(Vec<u8>, IntegrityOutcome), Error> {
+    // Sized once, at the stream's length — never less than the plaintext, since the
+    // declared size is refused past it — so the buffer that ends up holding the document
+    // is never reallocated and nothing abandons a copy of it on the way.
+    let mut plaintext = Vec::with_capacity(encrypted_package.len());
+    let outcome = decrypt_to(
+        xml_data,
+        &mut std::io::Cursor::new(encrypted_package),
+        &mut plaintext,
+        password,
+        policy,
+    )?;
+    Ok((plaintext, outcome))
+}
+
+/// [`decrypt`] from a seekable `EncryptedPackage` stream into `writer`, holding one
+/// segment at a time.
+///
+/// **Two passes when the policy verifies.** The first reads the whole stream into the HMAC
+/// and writes nothing, so a tag that fails is refused before a byte of plaintext exists —
+/// step 5 before step 6, as the whole-buffer path always did. The second decrypts and
+/// feeds the HMAC again, and a tag that fails *there* means the stream changed between
+/// the reads: [`Error::IntegrityCheckFailed`], after plaintext has reached `writer`.
+/// That is the one case a streaming reader cannot close without holding the file, and it
+/// is why the public contract says to discard `writer`'s contents on any `Err`.
+pub(crate) fn decrypt_to<S: Read + Seek, W: Write>(
+    xml_data: &[u8],
+    encrypted_package: &mut S,
+    writer: &mut W,
+    password: &str,
+    policy: IntegrityPolicy,
+) -> Result<IntegrityOutcome, Error> {
     let params = parse_encryption_info(xml_data)?;
 
     // `p:encryptedKey/@hashAlgorithm`, never `<keyData>`'s: this is step 2 of the module
@@ -328,23 +361,44 @@ pub(crate) fn decrypt(
     // file that does not.
     let encryption_key = recover_session_key(&params, password)?;
 
-    let outcome = check_integrity(&params, &encryption_key, encrypted_package, policy)?;
+    let (outcome, check) = check_integrity(&params, &encryption_key, policy)?;
+    if let Some(check) = &check {
+        // Pass 1: the whole stream into the HMAC, nothing out.
+        encrypted_package.seek(SeekFrom::Start(0))?;
+        let mut mac = check.start();
+        let mut chunk = vec![0u8; SEGMENT_LEN];
+        loop {
+            let n = read_full(encrypted_package, &mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            mac.update(chunk.get(..n).unwrap_or_default());
+        }
+        check.finish(mac)?;
+    }
 
-    let plaintext = decrypt_package(&encryption_key, &params, encrypted_package)?;
-    Ok((plaintext, outcome))
+    decrypt_package_to(
+        &encryption_key,
+        &params,
+        encrypted_package,
+        writer,
+        check.as_ref(),
+    )?;
+    Ok(outcome)
 }
 
 /// Apply `policy` to whatever `<dataIntegrity>` the file did or did not declare.
 ///
-/// Returns `Err` on a genuine mismatch, on a missing element under a policy that
-/// requires one (the default included), and on a declared-but-unusable parameter set.
-/// Never returns `Ok` for a tag that failed.
+/// Returns the outcome to report and, where a tag is to be checked, the check to run it
+/// with; `Err` on a missing element under a policy that requires one (the default
+/// included) and on a declared-but-unusable parameter set. `Verified` is returned
+/// alongside the check, before it has run, and stands only because every caller runs the
+/// check and returns its `Err` instead.
 fn check_integrity(
     params: &AgileParams,
     session_key: &SessionKey,
-    encrypted_package: &[u8],
     policy: IntegrityPolicy,
-) -> Result<IntegrityOutcome, Error> {
+) -> Result<(IntegrityOutcome, Option<IntegrityCheck>), Error> {
     let Some(di) = params.data_integrity() else {
         // The agile half of `IntegrityPolicy`'s contract; the standard half is the
         // version dispatch in `lib.rs`. Absence is a defect here, not a shape: agile
@@ -363,18 +417,18 @@ fn check_integrity(
             // `NotDeclared` for `Skip` too, not `Skipped`: nothing was skipped, because
             // nothing was there. Stated rather than inherited from arm ordering.
             IntegrityPolicy::VerifyIfPresent | IntegrityPolicy::Skip => {
-                Ok(IntegrityOutcome::NotDeclared)
+                Ok((IntegrityOutcome::NotDeclared, None))
             }
         };
     };
 
     if policy == IntegrityPolicy::Skip {
-        return Ok(IntegrityOutcome::Skipped);
+        return Ok((IntegrityOutcome::Skipped, None));
     }
 
     let material = params.integrity_material(di)?;
-    integrity::verify(session_key, &material, encrypted_package)?;
-    Ok(IntegrityOutcome::Verified)
+    let check = IntegrityCheck::new(session_key, &material)?;
+    Ok((IntegrityOutcome::Verified, Some(check)))
 }
 
 /// `Hp(decrypted encryptedVerifierHashInput)` must equal the decrypted
@@ -514,12 +568,22 @@ pub(crate) fn verify_password(params: &AgileParams, h_final: &PasswordDigest) ->
 /// (`include/crypto_util.hpp:432-441`, via `DecContent`) and LibreOffice from
 /// `mInfo.hashAlgorithm` (`AgileEngine.cxx:497`, behaviour only) — both read it from
 /// the file, and so does the integrity path in `integrity.rs`.
-fn decrypt_package(
+///
+/// Reads the stream from `encrypted_package`, which may be seeked anywhere first: this
+/// measures it and starts at byte 0. When `check` is given, every stored byte — prefix
+/// and ciphertext, as stored, before it is decrypted in place — goes through it again,
+/// and a mismatch is [`Error::IntegrityCheckFailed`] after the last segment is written.
+fn decrypt_package_to<S: Read + Seek, W: Write>(
     encryption_key: &SessionKey,
     params: &AgileParams,
-    encrypted_package: &[u8],
-) -> Result<Vec<u8>, Error> {
-    if encrypted_package.len() < 8 {
+    encrypted_package: &mut S,
+    writer: &mut W,
+    check: Option<&IntegrityCheck>,
+) -> Result<(), Error> {
+    let stream_len = encrypted_package.seek(SeekFrom::End(0))?;
+    encrypted_package.seek(SeekFrom::Start(0))?;
+    let mut prefix = [0u8; 8];
+    if stream_len < 8 || read_full(encrypted_package, &mut prefix)? < 8 {
         return Err(Error::MissingStream("EncryptedPackage too short"));
     }
 
@@ -545,22 +609,13 @@ fn decrypt_package(
         )));
     }
 
-    let declared_size = u64::from_le_bytes(encrypted_package[..8].try_into().unwrap());
-    let data = &encrypted_package[8..];
+    let declared_size = u64::from_le_bytes(prefix);
+    let data_len = stream_len - 8;
 
-    // The ceiling, repeated at the point of allocation. `cfb_reader` already refused a
-    // larger stream, so this is unreachable through `decrypt_ooxml` — it is here because
-    // `decrypt_package` takes a `&[u8]` and a later caller (the streaming API, a test, a
-    // second entry point) reaches it without passing that reader. GH #10 pattern 3: one
-    // named ceiling aliased per allocation path, never a second number.
-    if data.len() > limits::PAYLOAD_CEILING {
-        return Err(Error::BadParameters(format!(
-            "EncryptedPackage carries {} bytes of ciphertext; this crate decrypts at most \
-             {} (see limits::PAYLOAD_CEILING)",
-            data.len(),
-            limits::PAYLOAD_CEILING
-        )));
-    }
+    // No payload ceiling here, deliberately, since the streaming API: this function
+    // allocates one segment whatever the stream's length, so there is nothing for a
+    // ceiling to protect. `limits::PAYLOAD_CEILING` bounds what the whole-buffer
+    // wrappers allocate, and they check it where they allocate.
 
     // The declared plaintext size is the file's own claim about its payload and it is
     // checked, not trusted. AES-CBC preserves length and each 4096-byte segment is padded
@@ -573,34 +628,70 @@ fn decrypt_package(
     //
     // Compared as `u64`, before the `as usize` cast: on a 32-bit target that cast
     // truncates, and a declared size of `2^32 + 16` would otherwise pass as 16.
-    if declared_size > data.len() as u64 {
+    if declared_size > data_len {
         return Err(Error::BadParameters(format!(
-            "EncryptedPackage declares {declared_size} plaintext bytes but carries only {} \
-             bytes of ciphertext",
-            data.len()
+            "EncryptedPackage declares {declared_size} plaintext bytes but carries only \
+             {data_len} bytes of ciphertext"
         )));
     }
-    let plaintext_size = declared_size as usize;
+
+    let mut mac = check.map(IntegrityCheck::start);
+    if let Some(mac) = &mut mac {
+        mac.update(&prefix);
+    }
 
     // One segmentation and one IV derivation, shared with the encrypt path (plan D4) —
     // see `crate::segments` for why this is a type and not a `chunks(4096)` here.
-    let segments = Segments::new(
-        data,
+    let mut segmenter = Segmenter::new(
         params.key_data_hash,
         &params.outer_salt,
         params.key_data_block_size as usize,
     )?;
+    let mut body = encrypted_package.by_ref().take(data_len);
+    let mut remaining = declared_size;
 
-    let mut output = Vec::with_capacity(data.len());
-    for segment in segments {
-        let segment = segment?;
-        let dec =
-            encryption_key.with_secret(|k| aes_cbc_decrypt(&segment.padded(), k, &segment.iv))?;
-        output.extend_from_slice(&dec);
+    // Every byte of the document is decrypted into this one wiped slot and leaves it for
+    // `writer`; the padding past the declared size is decrypted and never written.
+    let mut slot = PlaintextSegment::new([0u8; SEGMENT_LEN]);
+    slot.with_secret_mut(|buf| -> Result<(), Error> {
+        while let Some(segment) = segmenter.fill(&mut body, buf)? {
+            let Some(stored) = buf.get_mut(..segment.padded_len) else {
+                return Err(Error::CipherError);
+            };
+            if let Some(mac) = &mut mac {
+                mac.update(stored.get(..segment.len).unwrap_or_default());
+            }
+            encryption_key.with_secret(|k| aes_cbc_decrypt_in_place(stored, k, &segment.iv))?;
+            let keep = usize::try_from(remaining.min(segment.len as u64)).unwrap_or(0);
+            writer.write_all(stored.get(..keep).unwrap_or_default())?;
+            remaining -= keep as u64;
+        }
+        Ok(())
+    })?;
+
+    if let (Some(check), Some(mac)) = (check, mac) {
+        check.finish(mac)?;
     }
+    Ok(())
+}
 
-    output.truncate(plaintext_size);
-    Ok(output)
+/// The whole-buffer shape of [`decrypt_package_to`], with no integrity check — for the
+/// tests below, which drive the package loop directly.
+#[cfg(test)]
+fn decrypt_package(
+    encryption_key: &SessionKey,
+    params: &AgileParams,
+    encrypted_package: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let mut out = Vec::new();
+    decrypt_package_to(
+        encryption_key,
+        params,
+        &mut std::io::Cursor::new(encrypted_package),
+        &mut out,
+        None,
+    )?;
+    Ok(out)
 }
 
 /// Iterated spin hash under `p:encryptedKey/@hashAlgorithm`.
@@ -805,6 +896,54 @@ pub(crate) fn aes_cbc_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result
     }
     .map_err(|_| Error::CipherError)?;
     Ok(out)
+}
+
+/// [`aes_cbc_decrypt`] in place: the plaintext overwrites the ciphertext in `buf`.
+///
+/// The streaming paths decrypt into a wrapped [`PlaintextSegment`] slot, and a version
+/// that returned a fresh `Vec` would put every segment of the document in an unwrapped
+/// allocation on its way there. `buf` must be a multiple of 16 bytes.
+pub(crate) fn aes_cbc_decrypt_in_place(buf: &mut [u8], key: &[u8], iv: &[u8]) -> Result<(), Error> {
+    use aes::cipher::generic_array::GenericArray;
+    check_cbc_lengths(key, iv)?;
+    let iv = GenericArray::from_slice(iv);
+    macro_rules! run {
+        ($cipher:ty) => {
+            cbc::Decryptor::<$cipher>::new(GenericArray::from_slice(key), iv)
+                .decrypt_padded_mut::<NoPadding>(buf)
+                .map(|_| ())
+        };
+    }
+    match key.len() {
+        16 => run!(Aes128),
+        24 => run!(Aes192),
+        _ => run!(Aes256),
+    }
+    .map_err(|_| Error::CipherError)
+}
+
+/// [`aes_cbc_encrypt`] in place: the ciphertext overwrites the plaintext in `buf`, for
+/// [`aes_cbc_decrypt_in_place`]'s reason on the way in. `buf` must be a multiple of 16
+/// bytes.
+pub(crate) fn aes_cbc_encrypt_in_place(buf: &mut [u8], key: &[u8], iv: &[u8]) -> Result<(), Error> {
+    use aes::cipher::generic_array::GenericArray;
+    use cbc::cipher::BlockEncryptMut;
+    check_cbc_lengths(key, iv)?;
+    let iv = GenericArray::from_slice(iv);
+    let len = buf.len();
+    macro_rules! run {
+        ($cipher:ty) => {
+            cbc::Encryptor::<$cipher>::new(GenericArray::from_slice(key), iv)
+                .encrypt_padded_mut::<NoPadding>(buf, len)
+                .map(|_| ())
+        };
+    }
+    match key.len() {
+        16 => run!(Aes128),
+        24 => run!(Aes192),
+        _ => run!(Aes256),
+    }
+    .map_err(|_| Error::CipherError)
 }
 
 /// The key and IV length rules both CBC directions share.

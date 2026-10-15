@@ -221,6 +221,10 @@
 // stack each answer for their own, and `cargo deny` is what watches them.
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "crypto-ops")]
+use std::io::{Cursor, Write};
+use std::io::{Read, Seek, SeekFrom};
+
 mod binary_office;
 mod cfb_reader;
 mod classify;
@@ -331,8 +335,8 @@ mod malformed_input;
 mod legacy_malformed;
 
 pub use classify::{
-    classify, AlgorithmParams, CipherAlgorithm, Classification, Container, ContainerRead, Document,
-    Family, HashAlgorithm, IntegrityDeclaration,
+    classify, classify_from, AlgorithmParams, CipherAlgorithm, Classification, Container,
+    ContainerRead, Document, Family, HashAlgorithm, IntegrityDeclaration,
 };
 /// The parameters of an agile encryption, as a caller chooses them — and
 /// `EncryptParams::validate`, which judges them before a password is asked for.
@@ -427,6 +431,29 @@ pub struct Decrypted {
 /// [`classify()`] reports container, family and integrity declaration together.
 pub fn is_cfb_office(data: &[u8]) -> bool {
     data.len() >= 8 && data[..8] == [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
+}
+
+/// [`is_cfb_office`] from a reader: the first eight bytes, read from the start.
+///
+/// `false` for a reader too short to hold them, and for one that fails while they are
+/// read, which is what "could not tell" is in a `bool`. Where the reader is left is
+/// unspecified.
+///
+/// ```
+/// use msoffice_crypto::is_cfb_office_from;
+/// use std::io::Cursor;
+///
+/// let encrypted = include_bytes!("../tests/fixtures/agile_encrypted.docx");
+/// assert!(is_cfb_office_from(Cursor::new(&encrypted[..])));
+/// assert!(!is_cfb_office_from(Cursor::new(b"PK")));
+/// ```
+#[must_use]
+pub fn is_cfb_office_from<R: Read + Seek>(mut reader: R) -> bool {
+    let mut magic = [0u8; 8];
+    reader
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| cfb_reader::read_full(&mut reader, &mut magic))
+        .is_ok_and(|n| n == magic.len() && is_cfb_office(&magic))
 }
 
 /// Decrypt a password-protected OOXML file to the original ZIP package.
@@ -572,7 +599,13 @@ pub fn decrypt_ooxml(data: &[u8], password: &str) -> Result<Vec<u8>, Error> {
 // `clippy::double_must_use`, which is `-D warnings` in all five feature columns.
 #[cfg(feature = "crypto-ops")]
 pub fn check_encryptable(package: &[u8]) -> Result<(), Error> {
-    let class = classify(package);
+    encryptable(&classify(package))
+}
+
+/// The verdict [`check_encryptable`] gives, from a classification already made: one rule
+/// for the slice and the reader forms.
+#[cfg(feature = "crypto-ops")]
+fn encryptable(class: &Classification) -> Result<(), Error> {
     // Exhaustive without a `_` arm: `Container` is `#[non_exhaustive]` only to other
     // crates, so a variant added later is `E0004` right here and someone has to decide
     // what it is, rather than it defaulting into "encryptable" or into one refusal.
@@ -1120,13 +1153,44 @@ pub fn decrypt_ooxml_with_policy(
     password: &str,
     policy: IntegrityPolicy,
 ) -> Result<Decrypted, Error> {
-    if !is_cfb_office(data) {
+    // Sized once, at the input's length, which bounds the plaintext, so the buffer that
+    // ends up holding the document is never reallocated and nothing abandons a copy of it.
+    let mut package = Vec::with_capacity(data.len());
+    let integrity = decrypt_ooxml_core(
+        Cursor::new(data),
+        &mut package,
+        password,
+        policy,
+        Some(limits::PAYLOAD_CEILING as u64),
+    )?;
+    Ok(Decrypted { package, integrity })
+}
+
+/// The one decrypt path. [`decrypt_ooxml_with_policy`] runs it over a `Cursor` with the
+/// whole-buffer ceiling, [`decrypt_ooxml_to`] over the caller's reader with none.
+///
+/// `ceiling` bounds the `\EncryptedPackage` stream, measured before a byte of it is read.
+#[cfg(feature = "crypto-ops")]
+fn decrypt_ooxml_core<R: Read + Seek, W: Write>(
+    mut reader: R,
+    writer: &mut W,
+    password: &str,
+    policy: IntegrityPolicy,
+    ceiling: Option<u64>,
+) -> Result<IntegrityOutcome, Error> {
+    reader.seek(SeekFrom::Start(0))?;
+    let mut magic = [0u8; 8];
+    let n = cfb_reader::read_full(&mut reader, &mut magic)?;
+    if !is_cfb_office(magic.get(..n).unwrap_or_default()) {
         return Err(Error::NotACfbFile);
     }
+    reader.seek(SeekFrom::Start(0))?;
+    let mut cfb = cfb::CompoundFile::open(reader).map_err(container_error)?;
+
     // A rights-managed package has an `EncryptedPackage` and no `EncryptionInfo`; without
     // this the answer would be a missing stream, which sends the holder looking for
     // damage that is not there.
-    if data_space_map::rights_management(data).is_some() {
+    if data_space_map::rights_management_in(&mut cfb).is_some() {
         return Err(Error::UnsupportedAlgorithm {
             what: "\\x06DataSpaces\\DataSpaceMap",
             name: "rights management (IRM): the key is held by a rights-management \
@@ -1135,14 +1199,26 @@ pub fn decrypt_ooxml_with_policy(
         });
     }
 
-    let streams = cfb_reader::read_cfb_streams(data)?;
+    let encryption_info = cfb_reader::read_encryption_info_in(&mut cfb)?;
+    let mut package = cfb.open_stream("/EncryptedPackage").map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Error::MissingStream("EncryptedPackage")
+        } else {
+            container_error(e)
+        }
+    })?;
+    if let Some(limit) = ceiling {
+        let len = package.len();
+        if len > limit {
+            return Err(Error::PackageTooLarge { len, limit });
+        }
+    }
 
     // The version header is eight bytes. Copying it into an array is how a short stream
     // becomes [`Error::MissingStream`] rather than a panic on `try_into` or
     // on indexing past the end — both of which clippy::missing_panics_doc would then
     // demand a `# Panics` section for, on a path that is an error, not a panic.
-    let header: [u8; 8] = streams
-        .encryption_info
+    let header: [u8; 8] = encryption_info
         .get(..8)
         .and_then(|s| s.try_into().ok())
         .ok_or(Error::MissingStream("EncryptionInfo too short"))?;
@@ -1185,13 +1261,13 @@ pub fn decrypt_ooxml_with_policy(
                      2.3.4.10 requires {AGILE_ENCRYPTION_RESERVED:#010x}"
                 )));
             }
-            agile::decrypt(
-                &streams.encryption_info[8..],
-                &streams.encrypted_package,
+            agile::decrypt_to(
+                encryption_info.get(8..).unwrap_or_default(),
+                &mut package,
+                writer,
                 password,
                 policy,
             )
-            .map(|(package, integrity)| Decrypted { package, integrity })
         }
         // Standard Encryption — binary EncryptionHeader starts after the 8-byte header
         // vMajor 2/3/4 all indicate Standard Encryption per MS-OFFCRYPTO spec.
@@ -1222,23 +1298,234 @@ pub fn decrypt_ooxml_with_policy(
                 | IntegrityPolicy::VerifyIfPresent
                 | IntegrityPolicy::Skip => {}
             }
-            let package = standard::decrypt(
-                &streams.encryption_info[8..],
-                &streams.encrypted_package,
+            standard::decrypt_to(
+                encryption_info.get(8..).unwrap_or_default(),
+                &mut package,
+                writer,
                 password,
             )?;
-            Ok(Decrypted {
-                package,
-                integrity: IntegrityOutcome::NotApplicable,
-            })
+            Ok(IntegrityOutcome::NotApplicable)
         }
         _ => Err(Error::UnsupportedEncryptionVersion(v_major, v_minor)),
     }
 }
 
+/// A `cfb` error opening the container or one of its streams, as this crate reports it.
+///
+/// `cfb` reports a malformed container as `InvalidData` (its `invalid_data!` macro) and a
+/// truncated one as `UnexpectedEof`; those are [`Error::NotACfbFile`], as they always
+/// were. Every other kind came from the caller's reader, not from the file, and is
+/// returned as [`Error::Io`] unchanged, so that a reader cancelled part-way reports the
+/// cancellation rather than a damaged file.
+#[cfg(feature = "crypto-ops")]
+fn container_error(e: std::io::Error) -> Error {
+    match e.kind() {
+        std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof => Error::NotACfbFile,
+        _ => Error::Io(e),
+    }
+}
+
+/// What [`decrypt_ooxml_to`] established about the plaintext it wrote.
+///
+/// [`Decrypted`] without the package, which went to the caller's writer instead.
+#[cfg(feature = "crypto-ops")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DecryptOutcome {
+    /// What was established about the plaintext's integrity. Ask
+    /// [`IntegrityOutcome::is_authenticated`] rather than matching, for the reason
+    /// [`Decrypted::integrity`] gives.
+    pub integrity: IntegrityOutcome,
+}
+
+/// [`decrypt_ooxml_with_policy`] from a reader into a writer, holding one 4096-byte
+/// segment of the document at a time, whatever its size.
+///
+/// `reader` is the encrypted file and must be seekable. When `policy` verifies, the
+/// `\EncryptedPackage` stream is read **twice**: once into the `dataIntegrity` HMAC,
+/// writing nothing, so that a tag that fails is refused before a byte of plaintext
+/// exists; and once to decrypt, with the HMAC computed again. `writer` receives the
+/// plaintext package in order and is never seeked, so a writer that only hashes what it
+/// is given is enough.
+///
+/// **On any `Err` the caller discards W.** One failure can arrive after plaintext has
+/// been written: if the second pass's tag disagrees with the first, the file changed
+/// between the two reads, and the result is [`Error::IntegrityCheckFailed`] with
+/// whatever reached `writer` unauthenticated. A cancelled `reader` stops the pass with its
+/// own error as [`Error::Io`] and leaves `writer` partly written too. The password's key
+/// derivation runs before the first read and cannot be interrupted.
+///
+/// There is no size ceiling, because nothing of this crate's grows with the file: one
+/// 4096-byte segment slot is its whole working set, and the 1 GiB
+/// [`Error::PackageTooLarge`] belongs to the whole-buffer function, which holds the
+/// package. What does grow is `cfb`'s: it keeps the container's sector table and a
+/// sector list in memory, measured at 46 MiB of peak heap for a 1 GiB package
+/// (`tests/streaming_memory.rs`).
+///
+/// # Errors
+///
+/// As [`decrypt_ooxml_with_policy`], less [`Error::PackageTooLarge`], plus
+/// [`Error::Io`] from either stream.
+///
+/// # Examples
+///
+/// ```
+/// use msoffice_crypto::{decrypt_ooxml_to, IntegrityOutcome, IntegrityPolicy};
+/// use std::io::Cursor;
+///
+/// let encrypted = include_bytes!("../tests/fixtures/agile_encrypted.docx");
+/// let mut package = Vec::new();
+/// let outcome = decrypt_ooxml_to(
+///     Cursor::new(&encrypted[..]),
+///     &mut package,
+///     "testpass",
+///     IntegrityPolicy::default(),
+/// )?;
+/// assert_eq!(outcome.integrity, IntegrityOutcome::Verified);
+/// assert!(package.starts_with(b"PK\x03\x04"));
+/// # Ok::<(), msoffice_crypto::Error>(())
+/// ```
+#[cfg(feature = "crypto-ops")]
+pub fn decrypt_ooxml_to<R: Read + Seek, W: Write>(
+    reader: R,
+    mut writer: W,
+    password: &str,
+    policy: IntegrityPolicy,
+) -> Result<DecryptOutcome, Error> {
+    let integrity = decrypt_ooxml_core(reader, &mut writer, password, policy, None)?;
+    Ok(DecryptOutcome { integrity })
+}
+
+/// [`check_encryptable`] from a reader, with the reader left at its start.
+#[cfg(feature = "crypto-ops")]
+fn check_encryptable_from<R: Read + Seek>(reader: &mut R) -> Result<(), Error> {
+    let verdict = encryptable(&classify_from(&mut *reader));
+    reader.seek(SeekFrom::Start(0))?;
+    verdict
+}
+
+/// [`encrypt_ooxml`] from a reader into a writer, holding one 4096-byte segment of the
+/// package at a time, whatever its size.
+///
+/// `reader` is the plain package and is measured by seeking to its end, so the size
+/// prefix and the `dataIntegrity` HMAC can be written as the ciphertext passes. It must
+/// then deliver exactly that many bytes; one that ends early or grows changed while it
+/// was read, and is refused as [`Error::Io`]. `writer` must be readable and seekable as
+/// well as writable: the CFB container is assembled in it, and `\EncryptionInfo`, which
+/// carries the HMAC, is patched once the last segment is written.
+///
+/// **On any `Err` the caller discards W.** The input is checked and measured before
+/// anything is written. A refusal at that point — the input is not a plain package, or it
+/// is too large for the container — leaves `writer` untouched, but a failure later, a
+/// cancelled reader included, leaves it holding part of a container.
+///
+/// The output is byte for byte what [`encrypt_ooxml`] returns for the same input and the
+/// same random draws.
+///
+/// # Errors
+///
+/// As [`encrypt_ooxml`], except that the size limit is [`Error::PackageTooLarge`] at
+/// 2 GiB less 16 bytes — the most a version 3 container can carry — rather than 1 GiB;
+/// plus [`Error::Io`] from either stream.
+///
+/// # Examples
+///
+/// ```
+/// use msoffice_crypto::{decrypt_ooxml, encrypt_ooxml_to};
+/// use std::io::Cursor;
+///
+/// let plain = include_bytes!("../tests/fixtures/plain.docx");
+/// let mut encrypted = Cursor::new(Vec::new());
+/// encrypt_ooxml_to(Cursor::new(&plain[..]), &mut encrypted, "testpass")?;
+/// assert_eq!(decrypt_ooxml(encrypted.get_ref(), "testpass")?, plain);
+/// # Ok::<(), msoffice_crypto::Error>(())
+/// ```
+#[cfg(feature = "crypto-ops")]
+pub fn encrypt_ooxml_to<R: Read + Seek, W: Read + Write + Seek>(
+    reader: R,
+    writer: W,
+    password: &str,
+) -> Result<(), Error> {
+    encrypt_ooxml_with_params_to(reader, writer, password, EncryptParams::default())
+}
+
+/// [`encrypt_ooxml_with_params`] from a reader into a writer; [`encrypt_ooxml_to`] with
+/// the agile tuple chosen. Everything that function says applies.
+///
+/// # Errors
+///
+/// As [`encrypt_ooxml_to`], plus [`Error::EncryptParams`] if `params` is not a tuple this
+/// crate writes, judged before anything is written.
+#[cfg(feature = "crypto-ops")]
+pub fn encrypt_ooxml_with_params_to<R: Read + Seek, W: Read + Write + Seek>(
+    mut reader: R,
+    mut writer: W,
+    password: &str,
+    params: EncryptParams,
+) -> Result<(), Error> {
+    check_encryptable_from(&mut reader)?;
+    agile_encrypt::encrypt_to(
+        &mut reader,
+        &mut writer,
+        password,
+        params,
+        &mut rand::rngs::SysRng,
+    )
+}
+
+/// [`encrypt_ooxml_standard`] from a reader into a writer, one 4096-byte step at a time.
+///
+/// The Office 2007 format. Everything [`encrypt_ooxml_to`] says applies, except that this
+/// format has no integrity element and so nothing is patched at the end.
+///
+/// # Errors
+///
+/// As [`encrypt_ooxml_to`].
+#[cfg(feature = "crypto-ops")]
+pub fn encrypt_ooxml_standard_to<R: Read + Seek, W: Read + Write + Seek>(
+    reader: R,
+    writer: W,
+    password: &str,
+) -> Result<(), Error> {
+    encrypt_ooxml_standard_with_key_bits_to(
+        reader,
+        writer,
+        password,
+        standard_encrypt::DEFAULT_KEY_BITS,
+    )
+}
+
+/// [`encrypt_ooxml_standard_with_key_bits`] from a reader into a writer: the Office 2007
+/// format at a key size of the caller's choosing, one 4096-byte step at a time.
+///
+/// # Errors
+///
+/// As [`encrypt_ooxml_standard_to`], plus [`Error::EncryptParams`] if `key_bits` is not
+/// 128, 192 or 256, judged before anything is written.
+#[cfg(feature = "crypto-ops")]
+pub fn encrypt_ooxml_standard_with_key_bits_to<R: Read + Seek, W: Read + Write + Seek>(
+    mut reader: R,
+    mut writer: W,
+    password: &str,
+    key_bits: u32,
+) -> Result<(), Error> {
+    check_encryptable_from(&mut reader)?;
+    standard_encrypt::encrypt_to(
+        &mut reader,
+        &mut writer,
+        password,
+        key_bits,
+        &mut rand::rngs::SysRng,
+    )
+}
+
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "crypto-ops"))]
+#[path = "streaming_tests.rs"]
+mod streaming_tests;
 
 // The README's examples are compiled and run by `cargo test --doc`, so they cannot silently
 // rot. They are the only examples in this repository that nothing else checks: rustdoc never

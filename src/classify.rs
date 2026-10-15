@@ -41,10 +41,7 @@ use quick_xml::{events::Event, Reader};
 use crate::binary_office;
 use crate::cfb_reader;
 use crate::data_space_map;
-// Ungated, as in `cfb_reader`: the *type* exists in every build and only its re-export is
-// behind `crypto-ops`. `classify_cfb` matches one variant of it to tell "the container
-// would not open" from "it opened and carried no EncryptionInfo".
-use crate::error::Error;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 /// The container [`classify()`] found the bytes wrapped in.
 ///
@@ -677,10 +674,53 @@ impl Classification {
 /// the pair; that is not a promise the parameters will be accepted.
 #[must_use]
 pub fn classify(data: &[u8]) -> Classification {
-    if crate::is_cfb_office(data) {
-        return classify_cfb(data);
+    classify_from(Cursor::new(data))
+}
+
+/// [`classify()`] from a reader, reading only what classification needs.
+///
+/// For a ZIP that is four bytes. For a CFB container it is the header, the FAT and
+/// directory, and the few streams the verdict rests on (`EncryptionInfo`, the
+/// `\x06DataSpaces\DataSpaceMap`, a binary format's header records), each under the read
+/// cap `classify` already applies, and never `\EncryptedPackage`. So a caller classifying
+/// a large file before deciding what to do with it no longer has to read the whole file
+/// into memory first, which `classify(&[u8])` made it do. The answer is identical to
+/// `classify()` on the same bytes, because `classify()` *is* this over a `Cursor`.
+///
+/// **Never fails loudly**, like `classify()`. A reader that errors part-way is reported
+/// the way an unreadable file is, [`ContainerRead::Unreadable`] with
+/// [`Document::Unknown`], because "could not look" is what it is. Where the reader is left
+/// positioned is unspecified.
+///
+/// ```
+/// use msoffice_crypto::{classify, classify_from, Family};
+/// use std::io::Cursor;
+///
+/// let bytes = include_bytes!("../tests/fixtures/agile_encrypted.docx");
+/// let class = classify_from(Cursor::new(&bytes[..]));
+/// assert_eq!(class.family, Family::Agile);
+/// assert_eq!(class, classify(bytes));
+/// ```
+#[must_use]
+pub fn classify_from<R: Read + Seek>(mut reader: R) -> Classification {
+    let mut magic = [0u8; 8];
+    let Ok(n) = reader
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| cfb_reader::read_full(&mut reader, &mut magic))
+    else {
+        return unknown(Container::Unknown, ContainerRead::NotAttempted);
+    };
+    let head = magic.get(..n).unwrap_or_default();
+    if crate::is_cfb_office(head) {
+        if reader.seek(SeekFrom::Start(0)).is_err() {
+            return unknown(Container::Cfb, ContainerRead::Unreadable);
+        }
+        return match cfb::CompoundFile::open(reader) {
+            Ok(mut cfb) => classify_cfb(&mut cfb),
+            Err(_) => unknown(Container::Cfb, ContainerRead::Unreadable),
+        };
     }
-    if is_zip(data) {
+    if is_zip(head) {
         return Classification {
             container: Container::Zip,
             // Four bytes of signature, and nothing inside the archive is read. See
@@ -729,32 +769,29 @@ fn is_zip(data: &[u8]) -> bool {
         && matches!((data[2], data[3]), (3, 4) | (5, 6) | (7, 8))
 }
 
-fn classify_cfb(data: &[u8]) -> Classification {
+fn classify_cfb<F: Read + Seek>(cfb: &mut cfb::CompoundFile<F>) -> Classification {
     // Rights management first: neither kind is what the rest of this function would
     // call it. An IRM package has no `EncryptionInfo`, and an IRM binary document carries
     // a placeholder whose own markers say "unencrypted".
-    if let Some(kind) = data_space_map::rights_management(data) {
-        return classify_irm(data, kind);
+    if let Some(kind) = data_space_map::rights_management_in(cfb) {
+        return classify_irm(cfb, kind);
     }
     // No `EncryptionInfo` does not mean "unreadable". The 97-2003 binary formats are CFB
     // containers too and carry their encryption inside their own records, so ask them
     // before giving up -- otherwise an encrypted `.doc` classifies identically to a
     // corrupt file, which is the failure this crate made in GH #11 and LibreOffice makes
     // on `.ppt` to this day.
-    // The error is the signal, not noise. `read_encryption_info` distinguishes "the
-    // container would not open" (`NotACfbFile`, from `cfb::CompoundFile::open`) from
-    // "it opened and the stream is missing or oversized" -- and a `let`-else used to
-    // discard that, so a 128-byte prefix of this very file and sixteen bytes of junk
-    // came back identically `Unknown`. `binary_office::probe` opens the container with
-    // the same call, so there is nothing for it to find either; returning here rather
-    // than walking on is what lets the verdict say which of the two happened.
-    let info = match cfb_reader::read_encryption_info(data) {
-        Ok(info) => info,
-        Err(Error::NotACfbFile) => return unknown(Container::Cfb, ContainerRead::Unreadable),
-        Err(_) => return classify_binary(data),
+    // "The container would not open" and "it opened and the stream is missing or
+    // oversized" are different verdicts, and a 128-byte prefix of an agile file must not
+    // classify the same as sixteen bytes of junk. That distinction is made once, where
+    // `classify_from` opens the container and returns `Unreadable` if it cannot; by the
+    // time this runs the container is open, so any failure here means the stream, and
+    // the binary formats are the next thing to ask.
+    let Ok(info) = cfb_reader::read_encryption_info_in(cfb) else {
+        return classify_binary(cfb);
     };
     if info.len() < 8 {
-        return classify_binary(data);
+        return classify_binary(cfb);
     }
 
     let v_major = u16::from_le_bytes([info[0], info[1]]);
@@ -784,10 +821,13 @@ fn classify_cfb(data: &[u8]) -> Classification {
 
 /// A rights-managed container. The document is the format's claim for an ECMA-376 one,
 /// and whatever the placeholder beside the protected content is for a binary one.
-fn classify_irm(data: &[u8], kind: data_space_map::RightsManagement) -> Classification {
+fn classify_irm<F: Read + Seek>(
+    cfb: &mut cfb::CompoundFile<F>,
+    kind: data_space_map::RightsManagement,
+) -> Classification {
     let document = match kind {
         data_space_map::RightsManagement::Ecma376 => Document::OoxmlPackage,
-        data_space_map::RightsManagement::Binary => binary_office::probe(data)
+        data_space_map::RightsManagement::Binary => binary_office::probe_in(cfb)
             .map_or(Document::Unknown, |v| binary_document(v.format, v.pre_97)),
     };
     Classification {
@@ -820,8 +860,8 @@ fn binary_document(format: binary_office::BinaryFormat, pre_97: bool) -> Documen
 /// The families here are named for the *scheme*, and the `document` field for the
 /// *format*, because they vary independently: ECMA-376 standard encryption can also carry
 /// an RC4 AlgID, so `Family::Rc4CryptoApi` alone would not tell a `.doc` from a `.docx`.
-fn classify_binary(data: &[u8]) -> Classification {
-    let Some(v) = binary_office::probe(data) else {
+fn classify_binary<F: Read + Seek>(cfb: &mut cfb::CompoundFile<F>) -> Classification {
+    let Some(v) = binary_office::probe_in(cfb) else {
         // The container opened -- `classify_cfb` returned above when it would not -- so
         // this is "looked inside, recognised no format", not "could not look".
         return unknown(Container::Cfb, ContainerRead::Opened);
