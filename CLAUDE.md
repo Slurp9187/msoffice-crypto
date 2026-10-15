@@ -244,7 +244,7 @@ spec or in a permissive reference. Cite where it came from.
 ## Layout
 
 ```
-src/lib.rs             public API: classify, classify_from, is_cfb_office, is_cfb_office_from, decrypt_ooxml, decrypt_ooxml_with_policy, decrypt_ooxml_to, check_encryptable, encrypt_ooxml, encrypt_ooxml_with_params, encrypt_ooxml_standard, the four encrypt_*_to, decrypt_binary_office   (+ lib_tests.rs, streaming_tests.rs)
+src/lib.rs             public API: classify, classify_from, is_cfb_office, is_cfb_office_from, decrypt_ooxml, decrypt_ooxml_with_policy, decrypt_ooxml_to, check_encryptable, check_encryptable_from, encrypt_ooxml, encrypt_ooxml_with_params, encrypt_ooxml_standard, the four encrypt_*_to, decrypt_binary_office   (+ lib_tests.rs, streaming_tests.rs)
 src/classify.rs        detection; NEVER panics, returns Unknown        (+ classify_tests.rs)
 src/data_space_map.rs  rights management (IRM), read from \x06DataSpaces\DataSpaceMap   (+ data_space_map_tests.rs)
 src/binary_office.rs   legacy .doc/.xls/.ppt recognition, and the FIB / BIFF / persist-directory readers both probe and decrypt share
@@ -258,7 +258,7 @@ src/cfb_reader.rs      capped stream reads, and read_full, which every reader-dr
 src/limits.rs          every bound, each with cited provenance
 src/sensitive.rs       secure-gate aliases — the only place they are declared   (+ sensitive_tests.rs)
 src/error.rs           Error -- the crate's single public error type
-src/bin/msoffice-crypto.rs  the CLI: exit codes, clap wiring, classify rendering, the decrypt dispatch and the atomic write   (+ msoffice-crypto_tests.rs)
+src/bin/msoffice-crypto.rs  the CLI: exit codes, clap wiring, classify rendering, the decrypt dispatch and the streamed atomic write   (+ msoffice-crypto_tests.rs)
 src/malformed_input.rs hostile-input tests, containers built at runtime
 src/dataspaces.rs      the \x06DataSpaces writer and the CFB container, timestamps zeroed   (+ dataspaces_tests.rs)
 src/encrypt_params.rs  EncryptParams -- the caller's encryption tuple, per-element as the spec is, and validate()   (+ encrypt_params_tests.rs)

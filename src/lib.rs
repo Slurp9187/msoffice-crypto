@@ -1396,10 +1396,34 @@ pub fn decrypt_ooxml_to<R: Read + Seek, W: Write>(
     Ok(DecryptOutcome { integrity })
 }
 
-/// [`check_encryptable`] from a reader, with the reader left at its start.
+/// [`check_encryptable`] from a reader, reading only what [`classify_from`] reads, and
+/// leaving the reader at its start.
+///
+/// The same verdict, from the same rule: the four `encrypt_*_to` functions call it at the
+/// door, as their whole-buffer forms call `check_encryptable`. It exists publicly so that a
+/// caller streaming a large file can refuse it **before** asking for a password, which is
+/// what the `msoffice-crypto` binary does.
+///
+/// # Errors
+///
+/// As [`check_encryptable`], plus [`Error::Io`] if the reader cannot be returned to its
+/// start.
+///
+/// ```
+/// use msoffice_crypto::{check_encryptable_from, Error};
+/// use std::io::Cursor;
+///
+/// let plain = include_bytes!("../tests/fixtures/plain.docx");
+/// check_encryptable_from(Cursor::new(&plain[..]))?;
+///
+/// let encrypted = include_bytes!("../tests/fixtures/agile_encrypted.docx");
+/// let refused = check_encryptable_from(Cursor::new(&encrypted[..]));
+/// assert!(matches!(refused, Err(Error::AlreadyEncrypted { .. })));
+/// # Ok::<(), Error>(())
+/// ```
 #[cfg(feature = "crypto-ops")]
-fn check_encryptable_from<R: Read + Seek>(reader: &mut R) -> Result<(), Error> {
-    let verdict = encryptable(&classify_from(&mut *reader));
+pub fn check_encryptable_from<R: Read + Seek>(mut reader: R) -> Result<(), Error> {
+    let verdict = encryptable(&classify_from(&mut reader));
     reader.seek(SeekFrom::Start(0))?;
     verdict
 }

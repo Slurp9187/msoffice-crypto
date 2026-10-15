@@ -8,7 +8,8 @@
 //! the run. `--password` is registered anyway, hidden, purely so that reaching for it
 //! produces an explanation rather than "unexpected argument".
 
-use std::io::{IsTerminal, Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -16,8 +17,8 @@ use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command};
 #[cfg(feature = "legacy-binary")]
 use msoffice_crypto::decrypt_binary_office;
 use msoffice_crypto::{
-    check_encryptable, classify, decrypt_ooxml_with_policy, encrypt_ooxml, encrypt_ooxml_standard,
-    AlgorithmParams, CipherAlgorithm, Classification, Container, ContainerRead, Decrypted,
+    check_encryptable_from, classify_from, decrypt_ooxml_to, encrypt_ooxml_standard_to,
+    encrypt_ooxml_to, AlgorithmParams, CipherAlgorithm, Classification, Container, ContainerRead,
     Document, Error, Family, HashAlgorithm, IntegrityDeclaration, IntegrityOutcome,
     IntegrityPolicy,
 };
@@ -261,18 +262,14 @@ fn dispatch(m: &ArgMatches) -> u8 {
 
 fn cmd_classify(m: &ArgMatches) -> u8 {
     let file = m.get_one::<String>("file").expect("required by clap");
-    let bytes = match std::fs::read(file) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("msoffice-crypto: cannot read {file}: {e}");
-            // Through the one table rather than a literal EX_IO, so the CLI has exactly
-            // one Error -> exit-code function from this slice onward.
-            return exit_code(&Error::Io(e));
-        }
+    let mut input = match open_input(file) {
+        Ok(f) => f,
+        Err(code) => return code,
     };
     // No `?`, no Result, no arm mapping "unknown" to a failure: `classify` answers
-    // every input by contract (CLAUDE.md Design Value 1), so this always exits 0.
-    let class = classify(&bytes);
+    // every input by contract (CLAUDE.md Design Value 1), so this always exits 0. From the
+    // file rather than from its bytes: only the headers are read.
+    let class = classify_from(&mut input);
     if m.get_flag("json") {
         println!("{}", classification_json(&class));
     } else {
@@ -664,18 +661,38 @@ fn cmd_crypt(m: &ArgMatches, dir: Direction) -> u8 {
     };
 
     let file = m.get_one::<String>("file").expect("required by clap");
-    let bytes = match std::fs::read(file) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("msoffice-crypto: cannot read {file}: {e}");
-            return exit_code(&Error::Io(e));
-        }
+    let input = match open_input(file) {
+        Ok(f) => f,
+        Err(code) => return code,
     };
 
     match dir {
-        Direction::Decrypt => cmd_decrypt(m, file, &bytes, source),
-        Direction::Encrypt => cmd_encrypt(m, file, &bytes, source),
+        Direction::Decrypt => cmd_decrypt(m, file, input, source),
+        Direction::Encrypt => cmd_encrypt(m, file, input, source),
     }
+}
+
+/// Open the input for reading, the one way every command does.
+///
+/// Since 0.1.0-rc.7 the file is streamed rather than read whole: only the headers for a
+/// classification, and one 4096-byte segment at a time through a decrypt or an encrypt.
+/// One byte is read here and the file rewound, so that an input that opens but cannot be
+/// read -- a directory, on the platforms where a directory opens -- is refused with the
+/// error `std::fs::read` used to give, before anything else happens.
+fn open_input(file: &str) -> Result<File, u8> {
+    let probe = File::open(file).and_then(|mut f| {
+        // The count does not matter, only whether the read fails: an empty file is a
+        // file, and `classify` has an answer for it.
+        let _ = f.read(&mut [0u8; 1])?;
+        f.seek(SeekFrom::Start(0))?;
+        Ok(f)
+    });
+    probe.map_err(|e| {
+        eprintln!("msoffice-crypto: cannot read {file}: {e}");
+        // Through the one table rather than a literal EX_IO, so the CLI has exactly one
+        // Error -> exit-code function.
+        exit_code(&Error::Io(e))
+    })
 }
 
 /// `decrypt`: classify, refuse what needs no password, read the password, decrypt, write.
@@ -688,7 +705,7 @@ fn cmd_crypt(m: &ArgMatches, dir: Direction) -> u8 {
 ///
 /// Dispatch is on the classification, never the extension (plan § 6): a `.doc` that is
 /// really an OOXML package, or the reverse, is exactly the file this crate exists for.
-fn cmd_decrypt(m: &ArgMatches, file: &str, bytes: &[u8], source: PasswordSource) -> u8 {
+fn cmd_decrypt(m: &ArgMatches, file: &str, mut input: File, source: PasswordSource) -> u8 {
     let name = m.get_one::<String>("integrity").expect("clap default");
     let Some(policy) = parse_policy(name) else {
         // clap validated `name` against POLICY_NAMES and `parse_policy` reads the same
@@ -700,9 +717,16 @@ fn cmd_decrypt(m: &ArgMatches, file: &str, bytes: &[u8], source: PasswordSource)
         return EX_INTERNAL;
     };
 
-    let route = match route_for(&classify(bytes), policy) {
+    let route = match route_for(&classify_from(&mut input), policy) {
         Ok(r) => r,
         Err(r) => return refused(file, &r),
+    };
+
+    // Before the password, as the classification is: an output that is already there is
+    // answered from the file system alone, so it is not worth a prompt.
+    let target = match output_target(m, file, Direction::Decrypt) {
+        Ok(t) => t,
+        Err(code) => return code,
     };
 
     let password = match read_password(source, Direction::Decrypt) {
@@ -710,31 +734,47 @@ fn cmd_decrypt(m: &ArgMatches, file: &str, bytes: &[u8], source: PasswordSource)
         Err(code) => return code,
     };
 
-    let (produced, outcome) = match route {
-        Route::Ooxml => match decrypt_ooxml_with_policy(bytes, &password, policy) {
-            // `..` is mandatory: `Decrypted` is `#[non_exhaustive]` and this is another
-            // crate (CONTRACT T2).
-            Ok(Decrypted {
-                package, integrity, ..
-            }) => (package, outcome_name(integrity)),
-            Err(e) => return report(file, &e),
+    let outcome = match route {
+        // Streamed: the package goes from the input to the output a segment at a time,
+        // and a verified decrypt checks the tag before the first byte is written, so a
+        // tampered file leaves neither a target nor a temporary behind.
+        Route::Ooxml => match deliver(&target, file, |out| {
+            decrypt_ooxml_to(&mut input, out, &password, policy).map(|o| o.integrity)
+        }) {
+            Ok(integrity) => outcome_name(integrity),
+            Err(code) => return code,
         },
         // T5: this is the whole rewritten CFB container, the same length as the input,
-        // magic D0 CF 11 E0 -- not a PK package. Nothing below sniffs its shape.
+        // magic D0 CF 11 E0 -- not a PK package. Nothing below sniffs its shape. Read
+        // whole, because `decrypt_binary_office` rewrites a container in memory: the
+        // 97-2003 formats are outside the streaming work (#27), and their own read cap
+        // bounds what this holds.
         #[cfg(feature = "legacy-binary")]
-        Route::Legacy => match decrypt_binary_office(bytes, &password) {
-            // The library returns bytes and no outcome: none of the 97-2003 formats
-            // defines an integrity tag, so `not-applicable` is the CLI's own word, and
-            // it is the same word under every policy that reaches here -- `skip`
-            // included, because nothing was skipped. `require` never reaches here.
-            Ok(container) => (container, outcome_name(IntegrityOutcome::NotApplicable)),
-            Err(e) => return report(file, &e),
-        },
+        Route::Legacy => {
+            // From the start: classifying it moved the file's position, and
+            // `classify_from` leaves it unspecified.
+            let mut bytes = Vec::new();
+            if let Err(e) = input
+                .seek(SeekFrom::Start(0))
+                .and_then(|_| input.read_to_end(&mut bytes))
+            {
+                eprintln!("msoffice-crypto: cannot read {file}: {e}");
+                return exit_code(&Error::Io(e));
+            }
+            match deliver(&target, file, |out| {
+                let container = decrypt_binary_office(&bytes, &password)?;
+                out.write_all(&container)?;
+                // The library returns bytes and no outcome: none of the 97-2003 formats
+                // defines an integrity tag, so `not-applicable` is the CLI's own word,
+                // and it is the same word under every policy that reaches here -- `skip`
+                // included, because nothing was skipped. `require` never reaches here.
+                Ok(IntegrityOutcome::NotApplicable)
+            }) {
+                Ok(integrity) => outcome_name(integrity),
+                Err(code) => return code,
+            }
+        }
     };
-
-    if let Err(code) = write_output(m, file, Direction::Decrypt, &produced) {
-        return code;
-    }
     // On EVERY success, `skip` included, so a user who opted out is told in the same run
     // that the bytes they now hold are unauthenticated. Stderr, so `-o -` is unaffected.
     eprintln!("integrity: {outcome}");
@@ -752,7 +792,7 @@ fn cmd_decrypt(m: &ArgMatches, file: &str, bytes: &[u8], source: PasswordSource)
 /// `encrypt_ooxml` calls at the door, so the CLI cannot drift from what the writer will
 /// accept — it used to be a CLI-only `encrypt_guard`, which is exactly how a consumer
 /// ended up reimplementing it.
-fn cmd_encrypt(m: &ArgMatches, file: &str, bytes: &[u8], source: PasswordSource) -> u8 {
+fn cmd_encrypt(m: &ArgMatches, file: &str, mut input: File, source: PasswordSource) -> u8 {
     let name = m.get_one::<String>("format").expect("clap default");
     let Some(format) = parse_format(name) else {
         eprintln!(
@@ -762,25 +802,27 @@ fn cmd_encrypt(m: &ArgMatches, file: &str, bytes: &[u8], source: PasswordSource)
         return EX_INTERNAL;
     };
 
-    if let Err(e) = check_encryptable(bytes) {
+    if let Err(e) = check_encryptable_from(&mut input) {
         return report(file, &e);
     }
+
+    let target = match output_target(m, file, Direction::Encrypt) {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
 
     let password = match read_password(source, Direction::Encrypt) {
         Ok(p) => p,
         Err(code) => return code,
     };
 
-    let produced = match format {
-        Format::Agile => encrypt_ooxml(bytes, &password),
-        Format::Standard => encrypt_ooxml_standard(bytes, &password),
-    };
-    let produced = match produced {
-        Ok(v) => v,
-        Err(e) => return report(file, &e),
-    };
-
-    if let Err(code) = write_output(m, file, Direction::Encrypt, &produced) {
+    // Streamed into a file the container can be assembled in: `cfb` reads back what it
+    // writes, and the agile `EncryptionInfo` is patched once the package is through.
+    let written = deliver_seekable(&target, file, |out| match format {
+        Format::Agile => encrypt_ooxml_to(&mut input, out, &password),
+        Format::Standard => encrypt_ooxml_standard_to(&mut input, out, &password),
+    });
+    if let Err(code) = written {
         return code;
     }
     // On every success, so the artifact's one security-relevant property is stated in
@@ -968,50 +1010,141 @@ fn derived_output(input: &Path, suffix: &str) -> PathBuf {
     input.with_file_name(name)
 }
 
-/// The output tail both directions share (plan § 8). `Ok(())` once the bytes are on
-/// disk or on stdout; `Err(code)` with the reason already printed.
+/// Where the output goes: stdout for `-o -`, otherwise a path.
+#[derive(Debug)]
+enum Target {
+    Stdout,
+    File(PathBuf),
+}
+
+/// The output both directions share (plan § 8), decided **before** the password is read.
 ///
-/// Nothing here looks at `produced`: an OOXML decrypt yields a `PK` package and a
-/// 97-2003 decrypt yields a whole CFB container (T5), and this function must not care.
-fn write_output(m: &ArgMatches, input: &str, dir: Direction, produced: &[u8]) -> Result<(), u8> {
-    match m.get_one::<String>("output").map(String::as_str) {
-        Some("-") => {
+/// `Err(code)` with the reason printed if the target exists and `--force` was not given:
+/// never silently, because a decrypt that replaced the encrypted original, or an earlier
+/// decrypt, is unrecoverable. `exists()`, not `is_file()`: a directory at the target is
+/// also something this tool must not rename over.
+fn output_target(m: &ArgMatches, input: &str, dir: Direction) -> Result<Target, u8> {
+    let target = match m.get_one::<String>("output").map(String::as_str) {
+        Some("-") => return Ok(Target::Stdout),
+        Some(o) => PathBuf::from(o),
+        None => derived_output(Path::new(input), dir.suffix()),
+    };
+    if target.exists() && !m.get_flag("force") {
+        eprintln!(
+            "msoffice-crypto: {} already exists; pass --force to overwrite. Nothing was \
+             written.",
+            target.display()
+        );
+        return Err(EX_USAGE);
+    }
+    Ok(Target::File(target))
+}
+
+/// A writer that remembers whether anything reached it, so a failure on stdout can say
+/// whether there is output to discard.
+struct Counted<W> {
+    inner: W,
+    written: u64,
+}
+
+impl<W: Write> Write for Counted<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Run `produce` into the target and report the outcome: `Ok` with what it returned once
+/// the output is complete, or `Err(code)` with the reason already printed.
+///
+/// A file target is written atomically, through the temporary beside it, so a failure at
+/// any point -- a refused tag, a cancelled read, a full disk -- leaves the target as it
+/// was and no temporary behind. Stdout cannot be taken back: if a failure comes after
+/// bytes were written, the run says so, and exits non-zero.
+fn deliver<T>(
+    target: &Target,
+    file: &str,
+    produce: impl FnOnce(&mut dyn Write) -> Result<T, Error>,
+) -> Result<T, u8> {
+    match target {
+        Target::Stdout => {
             // Stdout carries the bytes and nothing else; every notice is on stderr.
-            let mut stdout = std::io::stdout().lock();
-            stdout
-                .write_all(produced)
-                .and_then(|()| stdout.flush())
-                .map_err(|e| {
-                    eprintln!("msoffice-crypto: cannot write to stdout: {e}");
-                    EX_IO
-                })
-        }
-        other => {
-            let target = match other {
-                Some(o) => PathBuf::from(o),
-                None => derived_output(Path::new(input), dir.suffix()),
+            let mut out = Counted {
+                inner: std::io::stdout().lock(),
+                written: 0,
             };
-            // Never silently: a decrypt that replaced the encrypted original, or an
-            // earlier decrypt, is unrecoverable. `exists()`, not `is_file()`: a
-            // directory at the target is also something this tool must not rename over.
-            if target.exists() && !m.get_flag("force") {
-                eprintln!(
-                    "msoffice-crypto: {} already exists; pass --force to overwrite. Nothing \
-                     was written.",
-                    target.display()
-                );
-                return Err(EX_USAGE);
-            }
-            match write_atomically(&target, produced) {
-                Ok(()) => {
-                    eprintln!("msoffice-crypto: wrote {}", target.display());
-                    Ok(())
+            let result = produce(&mut out).and_then(|t| {
+                out.flush()?;
+                Ok(t)
+            });
+            result.map_err(|e| {
+                if out.written > 0 {
+                    eprintln!(
+                        "msoffice-crypto: the {} bytes already written to stdout are \
+                         incomplete; discard them",
+                        out.written
+                    );
                 }
-                Err(e) => {
-                    eprintln!("msoffice-crypto: cannot write {}: {e}", target.display());
-                    Err(EX_IO)
-                }
-            }
+                report(file, &e)
+            })
+        }
+        Target::File(path) => finish(path, file, write_atomically_with(path, |f| produce(f))),
+    }
+}
+
+/// [`deliver`] for an encrypt, whose output must be readable and seekable as well.
+///
+/// A file target is the same atomic temporary. Stdout cannot seek, so the container is
+/// assembled in a temporary file in the system temp directory and copied out once it is
+/// complete -- ciphertext only, removed on every path.
+fn deliver_seekable(
+    target: &Target,
+    file: &str,
+    produce: impl FnOnce(&mut File) -> Result<(), Error>,
+) -> Result<(), u8> {
+    match target {
+        Target::File(path) => finish(path, file, write_atomically_with(path, produce)),
+        Target::Stdout => {
+            let tmp = std::env::temp_dir().join(format!(
+                ".msoffice-crypto-{}.stdout.tmp",
+                std::process::id()
+            ));
+            let result = (|| {
+                let mut f = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(&tmp)
+                    .map_err(Error::Io)?;
+                produce(&mut f)?;
+                f.seek(SeekFrom::Start(0)).map_err(Error::Io)?;
+                let mut out = std::io::stdout().lock();
+                std::io::copy(&mut f, &mut out).map_err(Error::Io)?;
+                out.flush().map_err(Error::Io)
+            })();
+            // Best effort, on success and failure alike.
+            let _ = std::fs::remove_file(&tmp);
+            result.map_err(|e| report(file, &e))
+        }
+    }
+}
+
+/// Turn an atomic write's result into the CLI's: the notice on success, and on failure
+/// the library's reason or the file system's.
+fn finish<T>(path: &Path, file: &str, result: Result<T, Failed>) -> Result<T, u8> {
+    match result {
+        Ok(t) => {
+            eprintln!("msoffice-crypto: wrote {}", path.display());
+            Ok(t)
+        }
+        Err(Failed::Produce(e)) => Err(report(file, &e)),
+        Err(Failed::Io(e)) => {
+            eprintln!("msoffice-crypto: cannot write {}: {e}", path.display());
+            Err(EX_IO)
         }
     }
 }
@@ -1025,6 +1158,13 @@ fn temp_path_for(target: &Path) -> PathBuf {
     dir.join(format!(".{file_name}.msoffice-crypto.tmp"))
 }
 
+/// Why [`write_atomically_with`] failed: the producer refused, or the file system did.
+#[derive(Debug)]
+enum Failed {
+    Produce(Error),
+    Io(std::io::Error),
+}
+
 /// Write to a temporary file beside the target, then rename over it.
 ///
 /// The target path is touched by exactly one call in this function, `rename`, which is
@@ -1032,15 +1172,40 @@ fn temp_path_for(target: &Path) -> PathBuf {
 /// target or the finished one, plus at worst a `.X.msoffice-crypto.tmp` that no reader
 /// mistakes for a document -- never a half-written `.docx` that looks complete. Pinned
 /// by `write_atomically_never_opens_the_target_itself` in the unit module.
+#[cfg(test)]
 fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomically_with(target, |f| f.write_all(bytes).map_err(Error::Io)).map_err(|e| match e {
+        Failed::Io(e) => e,
+        Failed::Produce(e) => std::io::Error::other(e.to_string()),
+    })
+}
+
+/// [`write_atomically`] with the bytes produced into the temporary as they come, rather
+/// than handed over whole: what lets a streamed decrypt or encrypt be atomic too.
+///
+/// The temporary is opened readable as well as writable, because an encrypt assembles a
+/// container in it. Whatever fails -- `produce`, the flush to disk, the rename -- the
+/// temporary is removed, so a refused tag or a cancelled read leaves nothing behind. Only
+/// a process killed outright can leave one, and it is never the target's name.
+fn write_atomically_with<T>(
+    target: &Path,
+    produce: impl FnOnce(&mut File) -> Result<T, Error>,
+) -> Result<T, Failed> {
     let tmp = temp_path_for(target);
     let result = (|| {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)
+            .map_err(Failed::Io)?;
+        let t = produce(&mut f).map_err(Failed::Produce)?;
+        f.sync_all().map_err(Failed::Io)?;
         // Closed before the rename: Windows will not move an open file.
         drop(f);
-        std::fs::rename(&tmp, target)
+        std::fs::rename(&tmp, target).map_err(Failed::Io)?;
+        Ok(t)
     })();
     if result.is_err() {
         // Best effort; the error being reported is the one above.

@@ -13,6 +13,7 @@
 //! directory under `std::env::temp_dir()` that they create and remove themselves.
 
 use super::*;
+use msoffice_crypto::classify;
 /// The two halves of [`Error::EncryptParams`]'s payload. Imported here rather than at
 /// the top of the binary because the CLI itself never names them: it cannot raise that
 /// variant today (no `--spin-count`/`--key-bits` flags), and `exit_code` matches it with
