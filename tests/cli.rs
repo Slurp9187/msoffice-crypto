@@ -2420,3 +2420,121 @@ fn a_successful_decrypt_prints_exactly_one_integrity_line() {
     assert!(integrity_line(&out).is_some());
     assert_eq!(stderr(&out).matches("integrity: ").count(), 1);
 }
+
+// --- streaming (#39) ---------------------------------------------------------------
+
+/// The names in a scratch directory, sorted: what a failed run left behind.
+fn listing(s: &Scratch) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(&s.0)
+        .expect("scratch dir")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// An agile file written by this binary with one byte of its package ciphertext flipped,
+/// deep in the body rather than in the container or the size prefix, so the refusal is
+/// the MAC's and not a parse failure's.
+fn tampered_agile(s: &Scratch) -> PathBuf {
+    let out = encrypt_to(s, &fixture("plain.docx"), "sealed.docx", &[]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    let path = s.join("sealed.docx");
+    let mut bytes = std::fs::read(&path).expect("read sealed");
+    let mut head = [0u8; 16];
+    {
+        use std::io::Read;
+        let mut cfb = cfb::CompoundFile::open(std::io::Cursor::new(&bytes)).expect("a container");
+        cfb.open_stream("/EncryptedPackage")
+            .expect("the package")
+            .read_exact(&mut head)
+            .expect("its head");
+    }
+    let at = bytes
+        .windows(16)
+        .position(|w| w == head)
+        .expect("the package's first sector is in the file");
+    bytes[at + 8 + 5000] ^= 0x01;
+    std::fs::write(&path, &bytes).expect("write tampered");
+    path
+}
+
+/// A tampered file leaves neither a target nor a temporary behind. The decrypt is
+/// streamed into the temporary beside the target, and a verified decrypt checks the tag
+/// before writing a byte, so the refusal comes first and the temporary is removed.
+#[test]
+fn a_tampered_file_leaves_no_target_and_no_temporary() {
+    let s = Scratch::new("stream-tamper");
+    let input = tampered_agile(&s);
+    let before = listing(&s);
+
+    let out = decrypt_to(&s, &input, "plain-out.docx", &[]);
+    assert_eq!(code(&out), EX_INTEGRITY, "stderr: {}", stderr(&out));
+    assert_eq!(
+        listing(&s),
+        before,
+        "a refused decrypt must leave the directory exactly as it found it"
+    );
+
+    // And to stdout: refused before the first byte, so there is nothing to discard.
+    let pw = s.join("pw.txt");
+    let out = run(&[
+        "decrypt",
+        input.to_str().expect("utf-8"),
+        "--password-file",
+        pw.to_str().expect("utf-8"),
+        "-o",
+        "-",
+    ]);
+    assert_eq!(code(&out), EX_INTEGRITY, "stderr: {}", stderr(&out));
+    assert!(out.stdout.is_empty(), "no plaintext may reach stdout");
+    assert!(!stderr(&out).contains("discard"), "{}", stderr(&out));
+}
+
+/// A wrong password leaves nothing behind either: no target, and no temporary.
+#[test]
+fn a_wrong_password_leaves_no_target_and_no_temporary() {
+    let s = Scratch::new("stream-wrongpw");
+    let pw = pw_file(&s, "wrong.txt", "not-the-password\n");
+    let before = listing(&s);
+    let out_path = s.join("never.docx");
+    let out = run(&[
+        "decrypt",
+        agile().as_str(),
+        "-o",
+        out_path.to_str().expect("utf-8"),
+        "--password-file",
+        pw.to_str().expect("utf-8"),
+    ]);
+    assert_eq!(code(&out), EX_WRONG_PASSWORD, "stderr: {}", stderr(&out));
+    assert_eq!(listing(&s), before);
+}
+
+/// A package far larger than any fixture round-trips through the binary, both formats.
+///
+/// The memory bound is the library's and is measured there (`tests/streaming_memory.rs`);
+/// what this pins is that the binary reaches it -- streams from the input file and into
+/// the output -- for a payload where a whole-file path would be the visible difference.
+#[test]
+fn a_large_package_round_trips_through_the_binary() {
+    const LEN: usize = 24 << 20;
+    let s = Scratch::new("stream-large");
+    let mut plain = Vec::with_capacity(LEN);
+    plain.extend_from_slice(b"PK\x03\x04");
+    plain.extend((4..LEN).map(|i| (i % 251) as u8));
+    let input = s.join("large.docx");
+    std::fs::write(&input, &plain).expect("write large");
+
+    for format in ["agile", "standard"] {
+        let sealed = format!("large.{format}.docx");
+        let out = encrypt_to(&s, &input, &sealed, &["--format", format]);
+        assert_eq!(code(&out), EX_OK, "{format} encrypt: {}", stderr(&out));
+        let back = format!("large.{format}.back.docx");
+        let out = decrypt_to(&s, &s.join(&sealed), &back, &[]);
+        assert_eq!(code(&out), EX_OK, "{format} decrypt: {}", stderr(&out));
+        assert!(
+            std::fs::read(s.join(&back)).expect("read back") == plain,
+            "{format}: the large package came back different"
+        );
+    }
+}
