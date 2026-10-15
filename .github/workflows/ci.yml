@@ -352,6 +352,31 @@ jobs:
           python-version: '3.x'
       - run: python tools/audit_claims.py
 
+  test-counts:
+    # GH #21. docs/RELEASING.md § 3's table states how many tests pass and how many are
+    # ignored in each configuration, in the repository and in the tarball, and CLAUDE.md
+    # states the corpus count. They are prose that looks like data: every figure in the
+    # table drifted between rc.1 and rc.3, and again between rc.4 and rc.7, because nothing
+    # read them back. `prose` checks that the documents agree with each other (check I);
+    # this checks that they agree with the tree, which takes running the suite in both
+    # places -- why it is a job of its own rather than a check inside audit_claims.py.
+    #
+    # It also asserts the invariant the numbers sit on, whatever they are: 0 ignored in the
+    # repository, and a non-zero corpus ignored in the tarball. A leaked corpus or a missing
+    # fixture is reported as itself, never as a figure to update.
+    name: documented test counts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # branch `stable`, resolved 2026-09-11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: test-counts
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.x'
+      - run: python tools/check_test_counts.py
+
   supply-chain:
     # The dependency half of the licence discipline CLAUDE.md calls load-bearing. The
     # provenance table there is about source we might *port* and is a rule about reading,
