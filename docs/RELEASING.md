@@ -133,20 +133,31 @@ That guard is not hypothetical. During the rc.3 cut a failed `cd` produced seven
 "absent as intended" lines checked against a directory that did not exist, and three green
 test configurations that had run in the repository.
 
-Measured 2026-09-21 for v0.1.0-rc.4, and **every one must be green**:
+**Every one must be green**, and every figure must be what the tree measures. These are
+Linux's figures, because CI is Linux: on Windows the `cli,legacy-binary` row passes one test
+fewer in each column, the CLI's interrupt fallback, which exists only off Windows.
 
 | Build | tarball | repository |
 | --- | --- | --- |
-| detection | 37 passed, 0 failed, **14 ignored** | 51 passed, **0 ignored** |
-| `crypto-ops` | 231 passed, 0 failed, **24 ignored** | 266 passed, **0 ignored** |
-| `legacy-binary` | 252 passed, 0 failed, **35 ignored** | 308 passed, **0 ignored** |
+| detection | 45 passed, 0 failed, **17 ignored** | 62 passed, **0 ignored** |
+| `crypto-ops` | 257 passed, 0 failed, **30 ignored** | 299 passed, **0 ignored** |
+| `legacy-binary` | 294 passed, 0 failed, **45 ignored** | 365 passed, **0 ignored** |
+| `cli,legacy-binary` | 342 passed, 0 failed, **45 ignored** | 476 passed, **0 ignored** |
 
-**Re-measure these at each release rather than trusting them.** They were the 2026-09-05
-figures until rc.3 and every one of the six had drifted; nothing machine-checks them. The
-totals are not expected to match across the two columns either: `detection` does
-(37 + 13 = 50, the same tests with thirteen reported honestly as ignored), but the other two
-lose tests outright, because the `tests/*.rs` integration files are not in the `include`
-allowlist and so do not exist in the tarball at all.
+**`tools/check_test_counts.py` measures this table, and CI runs it** (the `test-counts`
+job). It runs every configuration in the repository, packages the crate, extracts it to a
+short path, asserts it is the tarball, runs them again there, and fails on any figure that
+differs -- printing the table as measured, ready to paste. Until it existed nothing read
+these numbers back: they were the 2026-09-05 figures until rc.3 with all six wrong, and the
+rc.4 figures until rc.7 with all six wrong again (GH #21). The `cli,legacy-binary` row's
+tarball `ignored` figure is the corpus count, and the script checks every place `CLAUDE.md`
+states it against that.
+
+The totals are not expected to match across the two columns. `detection` does -- its tarball
+`passed` plus `ignored` is the repository's `passed`, the same tests with the corpus ones
+reported honestly as ignored -- but the others lose tests outright, because the `tests/*.rs`
+integration files are not in the `include` allowlist and so do not exist in the tarball at
+all.
 
 **The ignored count is a check, not an accident.** `build.rs` sets `cfg(fixture_corpus)`
 when it finds any of the twenty-two withheld fixtures, and the corpus-dependent tests carry

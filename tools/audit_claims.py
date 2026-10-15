@@ -15,6 +15,8 @@ Lints check shape, not truth. This checks the truths a machine can reach:
   E  version and MSRV figures in the live documents agree with `Cargo.toml`
   F  upstream `file.ext:NNN` citations resolve against the local clones  (local only)
   G  CHANGELOG.md's top version heading matches Cargo.toml, and is dated iff tagged
+  H  every digest CHANGELOG.md records as evidence is well-formed
+  I  CLAUDE.md's corpus-test count agrees with docs/RELEASING.md's table
 
 Exit status is 1 if anything is flagged, 0 otherwise.
 
@@ -360,6 +362,59 @@ def main():
             if not dated and marker != "Unreleased":
                 flag("G heading marker is neither a date nor 'Unreleased'",
                      f"CHANGELOG.md:{line_of(txt, head.start())} -> {marker!r}")
+
+    # ---- H: evidence digests are well-formed -------------------------------------------
+    # GH #21. The changelog's evidence names artifacts by SHA-256, and those digests are
+    # not re-derivable -- each describes one artifact on one day, which is their point --
+    # so the most a machine can check is that each is a digest at all. Two shapes are
+    # legitimate: the full 64 hex characters, and an abbreviation keeping at least four on
+    # each side of an ellipsis (`980d45ad…7682e4`; rc.1's goldens keep four, `b4cc009e…2a6b`,
+    # and frozen sections are not rewritten to suit a checker). A run of hex long enough to be a digest
+    # and not exactly 64 is a digest with a character lost or doubled in a paste. Every
+    # section, not only the newest: unlike a heading, a broken digest is fixable wherever
+    # it is, and an evidence table nobody can match against an artifact is not evidence.
+    if changelog.exists():
+        txt = read(changelog)
+        for m in re.finditer(r"(?<![0-9A-Za-z])[0-9a-f]{33,}(?![0-9A-Za-z])", txt):
+            if len(m.group(0)) != 64:
+                flag("H malformed evidence digest",
+                     f"CHANGELOG.md:{line_of(txt, m.start())} -> a {len(m.group(0))}-character "
+                     f"hex run where a SHA-256 has 64: {m.group(0)[:16]}…")
+        for m in re.finditer(r"(?<![0-9A-Za-z])([0-9a-f]+)…([0-9a-f]+)(?![0-9A-Za-z])", txt):
+            if len(m.group(1)) < 4 or len(m.group(2)) < 4:
+                flag("H malformed evidence digest",
+                     f"CHANGELOG.md:{line_of(txt, m.start())} -> {m.group(0)!r} keeps fewer "
+                     "than four hex characters on a side of the ellipsis")
+
+    # ---- I: the corpus count, stated twice ---------------------------------------------
+    # GH #21. CLAUDE.md names the number of corpus-dependent tests, and docs/RELEASING.md's
+    # § 3 table measures it -- the all-features tarball row's `ignored` figure. Whether the
+    # table is *true* takes a test run (`tools/check_test_counts.py`, its own CI job); that
+    # the two documents agree is a file read, and belongs here.
+    releasing = ROOT / "docs" / "RELEASING.md"
+    claude = ROOT / "CLAUDE.md"
+    if releasing.exists() and claude.exists():
+        row = re.search(r"^\| `cli,legacy-binary` \| \d+ passed, \d+ failed, \*\*(\d+) ignored",
+                        read(releasing), re.M)
+        if row is None:
+            flag("I corpus count has no measured source",
+                 "docs/RELEASING.md § 3: no `cli,legacy-binary` row to read the corpus count from")
+        else:
+            corpus = int(row.group(1))
+            ctxt = read(claude)
+            stated = [(m.start(), int(m.group(1))) for pat in (
+                r"the (\d+) corpus-dependent tests",
+                r"this repository runs all (\d+)",
+                r"unpacked `\.crate` as (\d+) ignored",
+            ) for m in re.finditer(pat, ctxt)]
+            if not stated:
+                flag("I corpus count not found",
+                     "CLAUDE.md no longer states the corpus count in a form this check reads")
+            for pos, n in stated:
+                if n != corpus:
+                    flag("I corpus count disagrees with the table",
+                         f"CLAUDE.md:{line_of(ctxt, pos)} says {n}; docs/RELEASING.md § 3's "
+                         f"`cli,legacy-binary` tarball row ignores {corpus}")
 
     # ---- report ----------------------------------------------------------------------
     print(f"audited {len(DOCS)} documents against {len(src)} source files")
