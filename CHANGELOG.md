@@ -22,6 +22,24 @@ What survives that move is in two places, deliberately:
 
 ---
 
+## [0.1.0-rc.7] - Unreleased
+
+### `cfb` 0.15: the container's directory tree is now balanced
+
+The `cfb` dependency moves from 0.14 to 0.15. Two of its changes reach this crate:
+
+- **Long streams no longer cost quadratic time.** 0.14 re-walked a stream's whole sector
+  chain on every 1 MiB buffer refill; 0.15 keeps the list (upstream #89) and sends large
+  reads and writes straight to the file (upstream #87). The streaming entry points this
+  line is building toward depend on it.
+- **Encrypted output changes by 12 bytes.** 0.15 applies the red-black insertion fixup that
+  [MS-CFB] §2.6.4 expects to the directory's sibling tree (upstream #83). 0.14 appended
+  entries unbalanced. Every file `encrypt_ooxml` and `encrypt_ooxml_standard` write therefore
+  differs from rc.6's in the color and sibling ids of its directory entries, and nowhere else.
+  Same length, same streams, same cryptography. The two seeded goldens are re-measured.
+
+---
+
 ## [0.1.0-rc.6] - 2026-10-14
 
 ### `decrypt_binary_office` no longer hands back ciphertext inside a "plain" file

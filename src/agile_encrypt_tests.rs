@@ -395,9 +395,11 @@ fn the_whole_container_is_byte_exact_under_a_seeded_rng() {
     assert_eq!(container, again);
 }
 
-/// Measured on 2026-09-05 under `SEED`, `PASSWORD`, `SPIN_COUNT` and `plain.docx`.
+/// Measured on 2026-09-05 under `SEED`, `PASSWORD`, `SPIN_COUNT` and `plain.docx`. Re-measured on 2026-10-15 for
+/// `cfb` 0.15, whose red-black insertion fixup (upstream #83) recolors and relinks the
+/// directory's sibling tree: 12 bytes of entry color and sibling ids moved, nothing else.
 const GOLDEN_LEN: usize = 41984;
-const GOLDEN_SHA256: &str = "b4cc009e94bddf00c6610e0b897e5ee0a4485bd5bc9e40a024131d9e789a2a6b";
+const GOLDEN_SHA256: &str = "205633eb5f1c80eef0e1c74f66456da634f08217f97c1385170d41b6e08c0b44";
 
 /// Every generated blob is the length step 3's writer demands.
 ///
