@@ -38,6 +38,24 @@ The `cfb` dependency moves from 0.14 to 0.15. Two of its changes reach this crat
   differs from rc.6's in the color and sibling ids of its directory entries, and nowhere else.
   Same length, same streams, same cryptography. The two seeded goldens are re-measured.
 
+Evidence: the four-reader acceptance gate, run on this machine 2026-10-15 against artifacts
+built from `7ce0873` with `cfb` 0.15.0, written into a private directory:
+
+```
+agile    41,984 bytes  SHA-256 556d4f1202a47afdf335da31289e18e7af1f21fb347629d942643c220a503d31
+office         PASS  Word 16.0 build 16.0.19127: OPENED, content matches | WRONG PASSWORD REFUSED 0x800A1520
+libreoffice    PASS  LibreOffice 26.8.0.3: OPENED, content matches | WRONG PASSWORD REFUSED (verifier)
+msoffcrypto    PASS  msoffcrypto-tool 6.0.0: byte-identical to plain.docx | dataIntegrity HMAC verifies
+office-crypto  PASS  office-crypto 0.3: byte-identical to plain.docx
+GATE: PASS (4 of 4 readers ran; 0 not selected)
+
+standard 40,960 bytes  SHA-256 4d7b7b4acce12c13aaed1e3a1f0f32648105df71644b166cc4eb423a87981cf2
+GATE: PASS (4 of 4 readers ran; 0 not selected)
+```
+
+`--tamper --expect-fail` on both, and `--corrupt-integrity --expect-fail` on agile, failed
+as required.
+
 ---
 
 ## [0.1.0-rc.6] - 2026-10-14
