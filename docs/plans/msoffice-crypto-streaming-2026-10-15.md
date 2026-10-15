@@ -106,8 +106,9 @@ approved stays readable as approved.
 - **The memory slope is larger than decision 1 assumed.** Measured in a release build:
   33 MiB on encrypt and 46 MiB on decrypt at 1 GiB, about 1/32 and 1/22, so about 66 and
   92 MiB at the 2 GiB cap rather than ~32 MiB. `cfb`'s `Vec`s grow by doubling, and
-  opening a container reads its sector table through a temporary buffer as well. Reported
-  to EFV STREAMING for the owner with a recommendation to accept. S8 asserts
+  opening a container reads its sector table through a temporary buffer as well; the
+  crate's own working set stays flat at one 4096-byte slot. The owner accepted the measured
+  slope on 2026-10-15 and kept the no-fork decision. S8 asserts
   `FIXED + payload/16` rather than `payload/64`, and runs at 32 and 128 MiB rather than 64
   and 256: in a debug build those sizes take about 50 seconds, and the larger one still
   fails a buffering implementation by two orders of magnitude.
