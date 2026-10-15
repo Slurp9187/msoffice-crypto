@@ -340,6 +340,47 @@ pub(crate) fn fit_iv(bytes: &[u8], block_size: usize) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// An HMAC fed a piece at a time is the HMAC of the whole message, under every hash
+    /// and at every chunk size the streaming paths can produce: one byte (a reader that
+    /// returns short), 15 (never block-aligned), 4096 (a whole segment) and 4097 (a
+    /// segment and one byte over). The one-shot expectation is computed straight from the
+    /// `hmac` crate, not from [`HashAlgorithm::hmac`], which is now this same state fed
+    /// once and would agree with it whatever it did.
+    #[test]
+    fn a_chunked_hmac_is_the_one_shot_hmac() {
+        let key: Vec<u8> = (0..64u8).collect();
+        let message: Vec<u8> = (0..20_000u32).map(|i| (i % 253) as u8).collect();
+        for hash in [
+            HashAlgorithm::Sha1,
+            HashAlgorithm::Sha256,
+            HashAlgorithm::Sha384,
+            HashAlgorithm::Sha512,
+        ] {
+            macro_rules! one_shot {
+                ($d:ty) => {{
+                    let mut m = <Hmac<$d>>::new_from_slice(&key).unwrap();
+                    m.update(&message);
+                    m.finalize().into_bytes().to_vec()
+                }};
+            }
+            let want = match hash {
+                HashAlgorithm::Sha1 => one_shot!(Sha1),
+                HashAlgorithm::Sha256 => one_shot!(Sha256),
+                HashAlgorithm::Sha384 => one_shot!(Sha384),
+                HashAlgorithm::Sha512 => one_shot!(Sha512),
+            };
+            assert_eq!(want.len(), hash.digest_len());
+            for chunk in [1usize, 15, 4096, 4097] {
+                let mut mac = hash.hmac_state(&key);
+                for piece in message.chunks(chunk) {
+                    mac.update(piece);
+                }
+                assert_eq!(mac.finalize(), want, "{hash:?} fed in {chunk}-byte pieces");
+            }
+            assert_eq!(hash.hmac(&key, &message), want, "{hash:?} one-shot");
+        }
+    }
+
     /// Each variant must actually run the algorithm it names. A `match` arm that fell
     /// through to the wrong hasher would be invisible to every other test in the crate
     /// as long as writer and reader agreed on it — which, this crate being both, they
