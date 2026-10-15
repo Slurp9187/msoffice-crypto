@@ -17,7 +17,8 @@
 //! `cfb` (MIT) is the container layer, per plan D2; nothing here walks a FAT. An
 //! in-place write of an unchanged length updates no directory entry — `cfb` stamps a
 //! modified time only through `touch`/`set_modified_time`, never on `write`
-//! (`cfb-0.14.0/src/internal/stream.rs:216-233`) — so the file's own timestamps survive,
+//! (`cfb-0.15.0/src/internal/stream.rs:334-355`, where `mark_modified` only arms the
+//! buffer's flush) — so the file's own timestamps survive,
 //! as they do through the oracle.
 
 use crate::binary_office::{self, BinaryFormat};
