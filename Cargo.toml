@@ -127,7 +127,15 @@ crypto-ops = [
 legacy-binary = ["crypto-ops", "dep:rc4", "dep:md-5"]
 
 # The `msoffice-crypto` binary (plan docs/plans/msoffice-crypto-cli-2026-09-11.md).
-cli = ["crypto-ops", "dep:clap", "dep:rpassword", "dep:serde_json"]
+cli = [
+    "crypto-ops",
+    "dep:clap",
+    "dep:rpassword",
+    "dep:serde_json",
+    "dep:rustix",
+    "dep:windows-sys",
+    "dep:ctrlc",
+]
 
 [[bin]]
 name = "msoffice-crypto"
@@ -327,6 +335,30 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 secure-gate = { version = "=0.9.0-rc.12", optional = true, default-features = false, features = [
     "alloc",
 ] }
+
+# The CLI's output temporary vanishes with the process (#41): a decrypt writes plaintext
+# into it, and a Ctrl-C or a hard kill must not leave that behind. Each platform has its
+# own way, so each dependency is target-specific, and all three are `cli`-only -- none
+# reaches the library graph.
+#
+# Linux: an unnamed `O_TMPFILE`, given a name only when it is complete. `rustix` is the
+# safe interface to `open(O_TMPFILE)` and `linkat`, so this half needs no `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1", optional = true, default-features = false, features = ["fs", "std"] }
+
+# Windows: the temporary is held delete-pending and the mark cleared just before the
+# rename. Already in the `cli` graph through `rpassword`, at this version.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
+# Everywhere else -- macOS, and a Linux file system without `O_TMPFILE` -- the fallback is
+# a named temporary that a Ctrl-C handler removes. It cannot survive a hard kill, which
+# is why it is the fallback.
+[target.'cfg(not(windows))'.dependencies]
+ctrlc = { version = "3.5", optional = true }
 
 [dev-dependencies]
 # Already a normal dependency, optional under "cli" (dep:serde_json). Repeated here for the

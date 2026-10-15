@@ -994,3 +994,57 @@ fn write_atomically_cleans_the_temp_when_the_rename_fails() {
         "temp left behind after a failed rename"
     );
 }
+
+// --- Pending (#41) ---------------------------------------------------------------------
+
+/// A pending file that is dropped unkept leaves nothing, on every platform: this is the
+/// path every failure the process sees takes.
+#[test]
+fn a_pending_file_dropped_unkept_leaves_nothing() {
+    let s = UnitScratch::new("pending-drop");
+    let name = s.0.join(".out.msoffice-crypto.tmp");
+    let mut pending = Pending::create(&s.0, &name).expect("create");
+    pending.file().write_all(b"PLAINTEXT").expect("write");
+    drop(pending);
+    assert_eq!(s.entries(), Vec::<String>::new());
+}
+
+/// A kept pending file becomes the target with its contents, and leaves no temporary.
+#[test]
+fn a_kept_pending_file_becomes_the_target() {
+    let s = UnitScratch::new("pending-keep");
+    let name = s.0.join(".out.msoffice-crypto.tmp");
+    let target = s.0.join("out");
+    let mut pending = Pending::create(&s.0, &name).expect("create");
+    pending.file().write_all(b"DONE").expect("write");
+    pending.keep_as(&name, &target).expect("keep");
+    assert_eq!(std::fs::read(&target).expect("target"), b"DONE");
+    assert_eq!(s.entries(), vec!["out".to_string()]);
+}
+
+/// The fallback, constructed directly so it runs where the platform's own mechanism would
+/// otherwise be chosen: dropped unkept, its name is removed and it leaves the interrupt
+/// registry; and what the Ctrl-C handler runs removes every name still registered.
+#[cfg(not(windows))]
+#[test]
+fn the_fallback_removes_its_name_on_drop_and_on_interrupt() {
+    let s = UnitScratch::new("pending-fallback");
+    let name = s.0.join(".a.msoffice-crypto.tmp");
+    let file = File::create(&name).expect("create");
+    interrupt::register(&name);
+    drop(Pending {
+        file: Some(file),
+        how: How::Named(name.clone()),
+    });
+    assert_eq!(s.entries(), Vec::<String>::new(), "drop removes the name");
+
+    let other = s.0.join(".b.msoffice-crypto.tmp");
+    std::fs::write(&other, b"PLAINTEXT").expect("write");
+    interrupt::register(&other);
+    interrupt::remove_all();
+    assert_eq!(
+        s.entries(),
+        Vec::<String>::new(),
+        "the handler's sweep removes it"
+    );
+}

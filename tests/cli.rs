@@ -2538,3 +2538,112 @@ fn a_large_package_round_trips_through_the_binary() {
         );
     }
 }
+
+// --- a killed decrypt leaves nothing (#41) --------------------------------------------
+
+/// Whether the decrypt running as `child` has its output temporary open in `dir` yet: the
+/// moment a kill tests what #41 is about.
+///
+/// On Windows the temporary is named while it is written -- delete-pending, but listed --
+/// so it is looked for by name. On Linux it has no name at all (`O_TMPFILE`), and the one
+/// trace is the process's own descriptor, which `/proc` shows as `<dir>/#<inode>
+/// (deleted)`.
+#[cfg(any(target_os = "linux", windows))]
+fn temporary_is_open(child: &std::process::Child, dir: &Path, out_name: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let _ = child;
+        dir.join(format!(".{out_name}.msoffice-crypto.tmp"))
+            .exists()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // The named form too, so that if the binary ever falls back to a named temporary
+        // the kill still lands mid-write and the test fails on what is left behind, not
+        // on never having seen it.
+        let named = format!(".{out_name}.msoffice-crypto.tmp");
+        let fds = format!("/proc/{}/fd", child.id());
+        let Ok(entries) = std::fs::read_dir(fds) else {
+            return false;
+        };
+        let dir = dir.canonicalize().expect("scratch dir");
+        entries.filter_map(Result::ok).any(|e| {
+            std::fs::read_link(e.path())
+                .map(|t| {
+                    t.starts_with(&dir)
+                        && (t.to_string_lossy().contains("(deleted)")
+                            || t.file_name().is_some_and(|f| f == named.as_str()))
+                })
+                .unwrap_or(false)
+        })
+    }
+}
+
+/// A decrypt killed outright while it writes leaves neither the target nor a temporary.
+///
+/// Every failure the process sees removes its temporary, and the tests above prove it;
+/// this is the failure it does not see. A hard kill runs no destructor and no handler, so
+/// the file has to vanish by itself: on Linux it never had a name (`O_TMPFILE`), and on
+/// Windows it was held delete-pending, which closing the last handle -- what a killed
+/// process does -- turns into a deletion. Large enough that the decrypt is still writing
+/// when the kill lands, which the test waits to observe rather than assumes.
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn a_killed_decrypt_leaves_no_target_and_no_temporary() {
+    const LEN: usize = 96 << 20;
+    let s = Scratch::new("stream-killed");
+    let mut plain = Vec::with_capacity(LEN);
+    plain.extend_from_slice(b"PK\x03\x04");
+    plain.extend((4..LEN).map(|i| (i % 251) as u8));
+    let input = s.join("big.docx");
+    std::fs::write(&input, &plain).expect("write big");
+    drop(plain);
+    let out = encrypt_to(&s, &input, "big.sealed.docx", &[]);
+    assert_eq!(code(&out), EX_OK, "stderr: {}", stderr(&out));
+    std::fs::remove_file(&input).expect("remove the plain input");
+    let before = listing(&s);
+
+    let pw = s.join("pw.txt");
+    let target = s.join("big.out.docx");
+    let mut child = Command::new(bin())
+        .args([
+            "decrypt",
+            s.join("big.sealed.docx").to_str().expect("utf-8"),
+            "-o",
+            target.to_str().expect("utf-8"),
+            "--password-file",
+            pw.to_str().expect("utf-8"),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("binary runs");
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut seen = false;
+    while Instant::now() < deadline {
+        if temporary_is_open(&child, &s.0, "big.out.docx") {
+            seen = true;
+            break;
+        }
+        if child.try_wait().expect("poll").is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        seen,
+        "the decrypt finished or failed before its temporary was seen open"
+    );
+    child.kill().expect("kill the decrypt");
+    let status = child.wait().expect("reap");
+    assert!(!status.success(), "it was killed, not finished");
+
+    assert_eq!(
+        listing(&s),
+        before,
+        "a killed decrypt left something behind: plaintext on disk under a name nobody \
+         asked for"
+    );
+}
