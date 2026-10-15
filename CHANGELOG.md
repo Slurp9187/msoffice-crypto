@@ -73,6 +73,12 @@ pipe, and copies it out. Two orders changed: an existing output is refused befor
 password is asked for, and a failure after bytes reached stdout says so. 97-2003 documents
 are still read whole.
 
+Evidence: files written by the binary itself (`msoffice-crypto encrypt`, built from `87503c9`)
+pass the four-reader gate, run on this machine 2026-10-15: agile, SHA-256
+`d66cfca5b637249737b90dca207db3a1d281d153157e0a0031a470fa38f56a91`, and standard,
+`7cf061e6d0af209832076ced4aed38dec6d091a740c578838b0c7ba4a4851074`, each
+`GATE: PASS (4 of 4 readers ran)`; `--tamper --expect-fail` failed as required.
+
 A cancelled reader stops any of them with its own error as `Error::Io`, never as a
 damaged file. The whole-buffer functions are now `Cursor` wrappers over the same code, and
 their output is unchanged: both seeded goldens match byte for byte through either form.
