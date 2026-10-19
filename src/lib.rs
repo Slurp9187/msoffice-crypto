@@ -95,7 +95,7 @@
 //! `sha2`, `hmac`, `base64` and `rand`:
 //!
 //! ```toml
-//! msoffice-crypto = { version = "0.1.0-rc.8", features = ["crypto-ops"] }
+//! msoffice-crypto = { version = "0.1.0-rc.9", features = ["crypto-ops"] }
 //! ```
 //!
 //! <div class="warning">
@@ -134,7 +134,7 @@
 //! nothing modern needs — to that build alone:
 //!
 //! ```toml
-//! msoffice-crypto = { version = "0.1.0-rc.8", features = ["legacy-binary"] }
+//! msoffice-crypto = { version = "0.1.0-rc.9", features = ["legacy-binary"] }
 //! ```
 //!
 //! # Bounds on untrusted input
@@ -670,7 +670,7 @@ fn encryptable(class: &Classification) -> Result<(), Error> {
 ///   [`Error::UnknownContainer`] — `package` is not a plain OOXML package. Checked by
 ///   [`check_encryptable`] before anything else, so a caller can ask the same question
 ///   before it pays for a password
-/// - [`Error::BadParameters`] — `package` is over the 1 GiB this crate would
+/// - [`Error::PackageTooLarge`] — `package` is over the 1 GiB this crate would
 ///   read back
 /// - [`Error::RandomSource`] — the system RNG would not produce bytes
 /// - [`Error::CipherError`] — an AES-CBC step rejected a block (an internal
@@ -839,7 +839,7 @@ pub fn encrypt_ooxml_with_params(
 ///   [`Error::UnknownContainer`] — `package` is not a plain OOXML package. Checked by
 ///   [`check_encryptable`] before anything else, so a caller can ask the same question
 ///   before it pays for a password
-/// - [`Error::BadParameters`] — `package` is over the 1 GiB this crate would
+/// - [`Error::PackageTooLarge`] — `package` is over the 1 GiB this crate would
 ///   read back
 /// - [`Error::RandomSource`] — the system RNG would not produce bytes
 /// - [`Error::CipherError`] — an AES-ECB step returned a blob of the wrong

@@ -67,9 +67,7 @@ use crate::binary_office::{
 };
 use crate::encrypted_summary;
 use crate::error::Error;
-use crate::file_params::{
-    bad, wide, AllowedSet, Bound, FileField, FileProblem, Invariant,
-};
+use crate::file_params::{bad, wide, AllowedSet, Bound, FileField, FileProblem, Invariant};
 use crate::legacy_container::LegacyContainer;
 use crate::rc4::{self, BlockKeySchedule};
 use crate::rc4_cryptoapi::{self, CryptoApiKeySchedule};

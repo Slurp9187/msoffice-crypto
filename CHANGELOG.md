@@ -22,6 +22,56 @@ What survives that move is in two places, deliberately:
 
 ---
 
+## [0.1.0-rc.9] - Unreleased
+
+### A refusal of the file's own settings carries no text from the file
+
+Breaking. `Error::BadParameters(String)` is now
+`Error::BadParameters { field: FileField, problem: FileProblem }` (#47). `FileField` names
+the field in the specification's spelling, with separate entries where agile carries two
+copies (`keyData` and `p:encryptedKey`). `FileProblem` says what is wrong in integers and
+closed enums only: `OutOfRange`, `NotInSet`, `NotRequiredValue`, `Disagrees`,
+`DigestMismatch`, `Truncated`, `OutOfBounds`, `Unreadable`, and the fieldless faults.
+`Bound` says whose number a range is (`Spec`, `Cipher`, `Margin`, `Crate`). A caller can
+match on it and write its own sentence from the numbers. The consumer that asked for this,
+encrypted-file-vault, passed the old string through its own sanitizer.
+
+No site put file text into `BadParameters` before; the `String` was what let the next one.
+
+`Error::UnsupportedAlgorithm.name` is an `AlgorithmName`, never the file's spelling. That is
+a `KnownAlgorithm` the specification defines (MD5, RIPEMD-160, WHIRLPOOL, RC2, 3DES,
+ChainingModeCFB and the rest), `Unknown { len }` for any other name, an `AlgId`, or a fixed
+description this crate wrote. Until now the agile path put the file's own spelling here,
+truncated to 32 characters: the crate's one remaining channel for text the file chose.
+
+**Moved meaning, which compiles silently behind `#[non_exhaustive]`:**
+
+- **Invariants of this crate leave `BadParameters`** for the new
+  `Error::InvariantViolated(Invariant)`, and the CLI exits 7, not 6. They are: AES key and IV
+  lengths a screen already passed, a block size over its digest, more than 2^32 segments or
+  RC4 blocks, an in-place rewrite or EncryptionInfo placeholder changing length, a serializer
+  blob of the wrong length, integrity padding overflow, an RC4 key or block size the header
+  bounds already passed, the SHA-1 key ladder asked for more than it yields, a value that
+  does not fit `usize`, and internal slices.
+- **The stream read cap** (`EncryptionInfo`, `DataSpaceMap`, a legacy stream) is the new
+  `Error::StreamTooLarge { stream, limit }`, and the CLI exits 5, not 6. It is a measured
+  size, not a value the file declares: the reasoning that moved the 1 GiB refusals to
+  `PackageTooLarge` in rc.7.
+- **A standard file's `EncryptionVerifier.SaltSize` other than 16** is `BadParameters`,
+  not `MissingStream`, as its RC4 CryptoAPI twin always was.
+- **A missing attribute is `BadParameters` with `Missing`** everywhere in the agile parser,
+  keeping `XmlParse` for XML that does not parse. A missing `spinCount`, `keyBits`,
+  `blockSize`, `saltSize`, `saltValue`, `hashAlgorithm`, `cipherAlgorithm`,
+  `cipherChaining`, `encryptedKeyValue` or verifier blob was `XmlParse`. A missing `hashSize`
+  or HMAC attribute was already `BadParameters`; the two now agree. The CLI exit is 6
+  either way.
+- **An unknown `Pictures` record type** stays `BadParameters`, and the
+  `UnsupportedEncryptedContent` doc that said otherwise is corrected. Four docs still naming
+  `BadParameters` for the 1 GiB refusal, which has been `PackageTooLarge` since rc.7, are
+  corrected too.
+
+Which files decrypt is unchanged, and so are the bytes the writers produce.
+
 ## [0.1.0-rc.8] - 2026-10-18
 
 ### `secure-gate` moves to 0.9.0-rc.13, and the API does not move

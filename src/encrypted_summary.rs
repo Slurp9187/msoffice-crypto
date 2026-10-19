@@ -82,7 +82,6 @@ impl RestoredSummary {
     }
 }
 
-
 /// Read and decrypt the encrypted summary stream `stream`, without touching the
 /// container. `MissingStream` if it is absent: the caller asks only when `fDocProps` is
 /// clear, where [MS-PPT] §2.3.7 says it "MUST exist" and every Office-written file has
@@ -124,8 +123,10 @@ pub(crate) fn decrypt_stream(
     let (Some(array_offset), Some(array_size)) = (le32(&prefix, 0), le32(&prefix, 4)) else {
         return Err(Error::InvariantViolated(Invariant::InternalSlice));
     };
-    let array_offset = usize::try_from(array_offset).map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
-    let array_size = usize::try_from(array_size).map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
+    let array_offset = usize::try_from(array_offset)
+        .map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
+    let array_size = usize::try_from(array_size)
+        .map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
     let array_end = array_offset
         .checked_add(array_size)
         .filter(|&end| array_offset >= PREFIX_LEN && end <= data.len())
@@ -155,7 +156,8 @@ pub(crate) fn decrypt_stream(
         )
     })?;
     // Bounds the loop by the array's length before a single descriptor is read.
-    let count = usize::try_from(count).map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
+    let count =
+        usize::try_from(count).map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
     if count
         .checked_mul(DESCRIPTOR_MIN_LEN)
         .is_none_or(|need| need > array_size - COUNT_LEN)
@@ -223,8 +225,10 @@ pub(crate) fn decrypt_stream(
             return Err(bad(FileField::SummaryDescriptor, FileProblem::Duplicate));
         }
 
-        let offset = usize::try_from(offset).map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
-        let size = usize::try_from(size).map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
+        let offset = usize::try_from(offset)
+            .map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
+        let size = usize::try_from(size)
+            .map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
         let end = offset
             .checked_add(size)
             .filter(|&end| offset >= PREFIX_LEN && end <= array_offset)
@@ -243,7 +247,10 @@ pub(crate) fn decrypt_stream(
         }
         extents.push((offset, end));
 
-        let mut plain = data.get(offset..end).ok_or(Error::InvariantViolated(Invariant::InternalSlice))?.to_vec();
+        let mut plain = data
+            .get(offset..end)
+            .ok_or(Error::InvariantViolated(Invariant::InternalSlice))?
+            .to_vec();
         rc4::decrypt_with_block(schedule, &mut plain, block)?;
         entries.push((name, plain));
     }

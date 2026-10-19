@@ -110,9 +110,10 @@ release rather than a backport.
 - **`src/bin/msoffice-crypto.rs` does not carry that header either**, and the scope row above
   puts it in scope regardless. It parses no bytes of its own: every one goes to `classify`,
   `decrypt_ooxml_with_policy`, `decrypt_binary_office` or an encrypt entry point, so what
-  reaches the binary from a hostile file is the bounded attacker-chosen text inside
-  `XmlParse`, `BadParameters` and `UnsupportedAlgorithm { name }`, written to stderr as-is and
-  never re-interpolated into a `--json` field, a filename or a shell-quoted string. Its four
+  reaches the binary from a hostile file is no text at all: `BadParameters` and
+  `UnsupportedAlgorithm` carry closed enums and integers since 0.1.0-rc.9, and `XmlParse` is
+  this crate's own wording. What is printed goes to stderr as-is and is never
+  re-interpolated into a `--json` field, a filename or a shell-quoted string. Its four
   `expect` calls are on `clap` values a `required(true)` or a `default_value` guarantees.
   Report a panic there as you would one in a parser.
 

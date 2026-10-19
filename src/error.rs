@@ -249,7 +249,10 @@ pub enum Error {
     /// output lost them for good. What is decrypted now is what Office writes; what the
     /// format permits and no Office build was measured writing — a storage inside the
     /// encrypted summary stream, a stream there other than the two property sets, a
-    /// `Pictures` record that is neither a blip nor a file-block entry — lands here.
+    /// blip of a type [MS-ODRAW] does not define, a file-block entry — lands here. A
+    /// `Pictures` record of a type that is neither (a value the file declares) is
+    /// [`Error::BadParameters`] instead; this doc said otherwise until 0.1.0-rc.9 while
+    /// the code returned `BadParameters`.
     ///
     /// The payload is a fixed `&'static str` naming the kind, never file content.
     #[error("the document holds encrypted content this crate does not decrypt: {0}")]
@@ -412,9 +415,8 @@ pub enum Error {
     ///
     /// **No file byte can reach this variant.** `got`, `min` and `max` are `u32`s the
     /// caller supplied or that this crate's own `limits` module holds, and `param` and
-    /// `problem` are fieldless `Copy` enums. There is deliberately no `String` field: the
-    /// free-text channel `BadParameters` needs is exactly what makes it the wrong variant
-    /// for a caller error, and opening one here would invite the same
+    /// `problem` are fieldless `Copy` enums. There is deliberately no `String` field, the
+    /// shape `BadParameters` took too in 0.1.0-rc.9: a free-text channel invites the
     /// file-content-in-a-message defect [`Self::XmlParse`] documents having had.
     ///
     /// # Why the problem is a second enum rather than part of the first

@@ -48,8 +48,7 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
         });
     }
     let word = container.read(WORD_DOCUMENT)?;
-    let fib =
-        FibBase::parse(&word).ok_or(bad(FileField::FibWIdent, FileProblem::BadSignature))?;
+    let fib = FibBase::parse(&word).ok_or(bad(FileField::FibWIdent, FileProblem::BadSignature))?;
     if word.len() < FIB_CLEAR_LEN {
         return Err(Error::MissingStream(
             "WordDocument stream shorter than the 68-byte FIB",
@@ -61,7 +60,9 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
     if fib.obfuscated() {
         return Err(Error::UnsupportedAlgorithm {
             what: "FibBase.fObfuscated",
-            name: AlgorithmName::Fixed("XOR obfuscation of a Word document ([MS-OFFCRYPTO] 2.3.7.4)"),
+            name: AlgorithmName::Fixed(
+                "XOR obfuscation of a Word document ([MS-OFFCRYPTO] 2.3.7.4)",
+            ),
         });
     }
 

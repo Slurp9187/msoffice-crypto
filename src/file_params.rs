@@ -16,9 +16,11 @@
 //! two variants are separate. They share the `limits.rs` taxonomy, not a type
 //! ([`Bound`]).
 
-/// Which field of the file a [`crate::Error::BadParameters`] is about, in the
-/// specification's own spelling. Where the format carries two copies of one
-/// field (agile `keyData` and `p:encryptedKey`), each has its own entry.
+/// Which field of the file a [`crate::Error::BadParameters`] is about.
+///
+/// Named in the specification's own spelling. Where the format carries two
+/// copies of one field (agile `keyData` and `p:encryptedKey`), each has its own
+/// entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FileField {

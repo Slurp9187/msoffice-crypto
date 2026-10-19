@@ -85,8 +85,8 @@ pub(crate) fn decrypt_in_blocks(
         return Err(Error::InvariantViolated(Invariant::Rc4BlockSize));
     }
     for (i, chunk) in data.chunks_mut(block_size).enumerate() {
-        let block = u32::try_from(i)
-            .map_err(|_| Error::InvariantViolated(Invariant::CounterOverflow))?;
+        let block =
+            u32::try_from(i).map_err(|_| Error::InvariantViolated(Invariant::CounterOverflow))?;
         Keystream::new(&schedule.block_key(block))?.apply(chunk);
     }
     Ok(())

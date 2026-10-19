@@ -155,8 +155,8 @@ pub(crate) struct AgileKeyMaterial {
 /// caller's tuple is judged. Reached directly with an unjudged tuple — the golden tests and
 /// `malformed_input`'s builders do — the failures are still errors rather than panics: the
 /// only arithmetic here is [`round_up`], which saturates, and an out-of-range `keyBits`
-/// comes back from `derive_block_key` or `aes_cbc_encrypt` as [`Error::BadParameters`] or
-/// [`Error::CipherError`]. What it will not do is bound the *allocation* an absurd
+/// comes back from `derive_block_key` as [`Error::BadParameters`], or from
+/// `aes_cbc_encrypt` as [`Error::InvariantViolated`] or [`Error::CipherError`]. What it will not do is bound the *allocation* an absurd
 /// `saltSize` asks for, which is `validate`'s job and one reason it runs first.
 ///
 /// # Errors
@@ -450,7 +450,7 @@ pub(crate) fn held_to_length<R: Read>(reader: &mut R, len: u64, read: u64) -> Re
 /// # Errors
 ///
 /// [`Error::EncryptParams`] if `params` is not a tuple this crate will write;
-/// [`Error::BadParameters`] if `package` exceeds
+/// [`Error::PackageTooLarge`] if `package` exceeds
 /// [`limits::PAYLOAD_CEILING`] — the same 1 GiB the decrypt side refuses, checked on the
 /// input so that a file this crate writes is a file this crate can read back;
 /// [`Error::RandomSource`] if `rng` will not produce bytes;

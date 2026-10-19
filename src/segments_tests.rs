@@ -154,7 +154,9 @@ fn a_block_size_past_the_digest_is_an_error_not_a_panic() {
     assert!(
         matches!(
             &got,
-            Err(Error::InvariantViolated(crate::Invariant::BlockSizeOverDigest))
+            Err(Error::InvariantViolated(
+                crate::Invariant::BlockSizeOverDigest
+            ))
         ),
         "a 32-byte block under SHA-1 must be refused, got: {got:?}"
     );

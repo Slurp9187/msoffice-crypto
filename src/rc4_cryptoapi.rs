@@ -164,7 +164,10 @@ pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, Error> {
         });
     }
     if flags & FLAG_CRYPTO_API == 0 {
-        return Err(bad(FileField::EncryptionHeaderFlags, FileProblem::FlagClear));
+        return Err(bad(
+            FileField::EncryptionHeaderFlags,
+            FileProblem::FlagClear,
+        ));
     }
     if alg_id != 0 && alg_id != ALG_ID_RC4 {
         return Err(Error::UnsupportedAlgorithm {
@@ -584,18 +587,67 @@ mod tests {
             20,
         );
         // Too small for the fixed fields.
-        assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, 31, 16, 20)), Err(Error::BadParameters { field: FileField::EncryptionHeaderSize, problem: FileProblem::OutOfRange { got: 31, bound: Bound::Spec, .. } }))
-        );
+        assert!(matches!(
+            parse(&structure(
+                4,
+                2,
+                GOOD_FLAGS,
+                ALG_ID_RC4,
+                ALG_ID_HASH_SHA1,
+                128,
+                31,
+                16,
+                20
+            )),
+            Err(Error::BadParameters {
+                field: FileField::EncryptionHeaderSize,
+                problem: FileProblem::OutOfRange {
+                    got: 31,
+                    bound: Bound::Spec,
+                    ..
+                }
+            })
+        ));
         // Over the cap.
-        assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, RC4_ENCRYPTION_HEADER_SIZE_MAX as u32 + 1, 16, 20)), Err(Error::BadParameters { field: FileField::EncryptionHeaderSize, problem: FileProblem::OutOfRange { bound: Bound::Margin, .. } }))
-        );
+        assert!(matches!(
+            parse(&structure(
+                4,
+                2,
+                GOOD_FLAGS,
+                ALG_ID_RC4,
+                ALG_ID_HASH_SHA1,
+                128,
+                RC4_ENCRYPTION_HEADER_SIZE_MAX as u32 + 1,
+                16,
+                20
+            )),
+            Err(Error::BadParameters {
+                field: FileField::EncryptionHeaderSize,
+                problem: FileProblem::OutOfRange {
+                    bound: Bound::Margin,
+                    ..
+                }
+            })
+        ));
         // Under the cap but past the bytes present: the header would swallow the verifier
         // and run off the end.
-        assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, RC4_ENCRYPTION_HEADER_SIZE_MAX as u32, 16, 20)), Err(Error::BadParameters { field: FileField::EncryptionHeaderSize, problem: FileProblem::OutOfBounds { .. } }))
-        );
+        assert!(matches!(
+            parse(&structure(
+                4,
+                2,
+                GOOD_FLAGS,
+                ALG_ID_RC4,
+                ALG_ID_HASH_SHA1,
+                128,
+                RC4_ENCRYPTION_HEADER_SIZE_MAX as u32,
+                16,
+                20
+            )),
+            Err(Error::BadParameters {
+                field: FileField::EncryptionHeaderSize,
+                problem: FileProblem::OutOfBounds { .. }
+            })
+        ));
         // Truncations: the prefix, the header, the verifier.
         for cut in [0usize, 11, 12, 40, good.len() - 60, good.len() - 1] {
             assert!(
@@ -626,23 +678,90 @@ mod tests {
             Err(Error::UnsupportedAlgorithm { what: "EncryptionHeader.Flags", name: AlgorithmName::Fixed(name) }) if name.contains("fAES")
         ));
         assert!(matches!(
-            parse(&structure(4, 2, GOOD_FLAGS, 0x660E, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 16, 20)),
-            Err(Error::UnsupportedAlgorithm { what: "EncryptionHeader.AlgID", name: AlgorithmName::AlgId(0x660E) })
+            parse(&structure(
+                4,
+                2,
+                GOOD_FLAGS,
+                0x660E,
+                ALG_ID_HASH_SHA1,
+                128,
+                CSP_HEADER_SIZE,
+                16,
+                20
+            )),
+            Err(Error::UnsupportedAlgorithm {
+                what: "EncryptionHeader.AlgID",
+                name: AlgorithmName::AlgId(0x660E)
+            })
         ));
         assert!(matches!(
-            parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, 0x800C, 128, CSP_HEADER_SIZE, 16, 20)),
-            Err(Error::UnsupportedAlgorithm { what: "EncryptionHeader.AlgIDHash", name: AlgorithmName::AlgId(0x800C) })
+            parse(&structure(
+                4,
+                2,
+                GOOD_FLAGS,
+                ALG_ID_RC4,
+                0x800C,
+                128,
+                CSP_HEADER_SIZE,
+                16,
+                20
+            )),
+            Err(Error::UnsupportedAlgorithm {
+                what: "EncryptionHeader.AlgIDHash",
+                name: AlgorithmName::AlgId(0x800C)
+            })
         ));
         assert!(matches!(
-            parse(&structure(4, 2, FLAG_DOC_PROPS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 16, 20)),
-            Err(Error::BadParameters { field: FileField::EncryptionHeaderFlags, problem: FileProblem::FlagClear })
+            parse(&structure(
+                4,
+                2,
+                FLAG_DOC_PROPS,
+                ALG_ID_RC4,
+                ALG_ID_HASH_SHA1,
+                128,
+                CSP_HEADER_SIZE,
+                16,
+                20
+            )),
+            Err(Error::BadParameters {
+                field: FileField::EncryptionHeaderFlags,
+                problem: FileProblem::FlagClear
+            })
         ));
         // The verifier's own two sizes.
-        assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 32, 20)), Err(Error::BadParameters { field: FileField::VerifierSaltSize, problem: FileProblem::NotRequiredValue { got: 32, .. } }))
-        );
-        assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 16, 32)), Err(Error::BadParameters { field: FileField::VerifierHashSize, problem: FileProblem::NotRequiredValue { got: 32, .. } }))
-        );
+        assert!(matches!(
+            parse(&structure(
+                4,
+                2,
+                GOOD_FLAGS,
+                ALG_ID_RC4,
+                ALG_ID_HASH_SHA1,
+                128,
+                CSP_HEADER_SIZE,
+                32,
+                20
+            )),
+            Err(Error::BadParameters {
+                field: FileField::VerifierSaltSize,
+                problem: FileProblem::NotRequiredValue { got: 32, .. }
+            })
+        ));
+        assert!(matches!(
+            parse(&structure(
+                4,
+                2,
+                GOOD_FLAGS,
+                ALG_ID_RC4,
+                ALG_ID_HASH_SHA1,
+                128,
+                CSP_HEADER_SIZE,
+                16,
+                32
+            )),
+            Err(Error::BadParameters {
+                field: FileField::VerifierHashSize,
+                problem: FileProblem::NotRequiredValue { got: 32, .. }
+            })
+        ));
     }
 }

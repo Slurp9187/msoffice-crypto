@@ -616,7 +616,7 @@ pub(crate) fn encrypt_package_to<R: Read, W: Write + ?Sized>(
 ///
 /// [`Error::EncryptParams`] if `key_bits` is not one of the three key sizes §2.3.4.5
 /// defines — see [`AesKeySize::new`];
-/// [`Error::BadParameters`] if `package` exceeds
+/// [`Error::PackageTooLarge`] if `package` exceeds
 /// [`limits::PAYLOAD_CEILING`] — the same 1 GiB the decrypt side refuses, checked on the
 /// input so that a file this crate writes is a file it reads back;
 /// [`Error::RandomSource`] if `rng` will not produce bytes;

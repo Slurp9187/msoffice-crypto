@@ -1270,8 +1270,7 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // A missing attribute is a field the file left out (#47): `BadParameters` with
     // `Missing`, as every attribute here is, keeping `XmlParse` for XML that does not
     // parse. Until 0.1.0-rc.9 this one was `XmlParse` and a missing `hashSize` was not.
-    let spin_count =
-        spin_count.ok_or_else(|| bad(FileField::SpinCount, FileProblem::Missing))?;
+    let spin_count = spin_count.ok_or_else(|| bad(FileField::SpinCount, FileProblem::Missing))?;
     if spin_count > limits::SPIN_COUNT_MAX {
         return Err(bad(
             FileField::SpinCount,
@@ -1323,8 +1322,10 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // bug LibreOffice ships (`AgileEngine.cxx:99-131`, behaviour only); herumi asks them
     // per `CipherParam` (`include/crypto_util.hpp:126-167`, applied to `<keyData>` at
     // `:329` and to `<p:encryptedKey>` at `:339`), which is the shape ported here.
-    let password_hash =
-        resolve_hash(password_hash_algorithm, FileField::EncryptedKeyHashAlgorithm)?;
+    let password_hash = resolve_hash(
+        password_hash_algorithm,
+        FileField::EncryptedKeyHashAlgorithm,
+    )?;
     require_aes_cbc(
         password_cipher_algorithm,
         password_cipher_chaining,
@@ -1344,7 +1345,10 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     let password_salt_size = check_salt_size(
         password_salt_size,
         &inner_salt,
-        (FileField::EncryptedKeySaltSize, FileField::EncryptedKeySaltValue),
+        (
+            FileField::EncryptedKeySaltSize,
+            FileField::EncryptedKeySaltValue,
+        ),
     )?;
 
     // `keyBits / 8` is the block-key truncation length and `password_hash`'s digest is
@@ -1375,8 +1379,8 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // `<dataIntegrity>` element to fail — returned rubbish under `Ok`. An honest AES-128
     // file (both elements 128) opens: the cipher dispatches on the length this declares
     // (GH #13). This check is about the two elements *disagreeing*, not about the size.
-    let encrypted_key_value =
-        encrypted_key_value.ok_or_else(|| bad(FileField::EncryptedKeyValue, FileProblem::Missing))?;
+    let encrypted_key_value = encrypted_key_value
+        .ok_or_else(|| bad(FileField::EncryptedKeyValue, FileProblem::Missing))?;
     let session_key_len = (key_data_key_bits / 8) as usize;
     let block = key_data_block_size as usize;
     let wrapped_len = session_key_len.div_ceil(block) * block;
@@ -1418,10 +1422,7 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
 /// The second is [`Error::UnsupportedAlgorithm`] rather than `BadParameters`
 /// precisely so it can never be confused with a wrong password: the file is well-formed
 /// and internally consistent, and the user's password may be exactly right.
-fn resolve_hash(
-    declared: Option<String>,
-    field: FileField,
-) -> Result<HashAlgorithm, Error> {
+fn resolve_hash(declared: Option<String>, field: FileField) -> Result<HashAlgorithm, Error> {
     let name = declared.ok_or_else(|| bad(field, FileProblem::Missing))?;
     HashAlgorithm::parse(&name).ok_or_else(|| unsupported_algorithm(field.spelling(), &name))
 }
@@ -1990,7 +1991,10 @@ mod tests {
 
         // A name the spec defines is named; any other only by its length, never its text.
         for (name, want) in [
-            ("MD5", crate::AlgorithmName::Known(crate::KnownAlgorithm::Md5)),
+            (
+                "MD5",
+                crate::AlgorithmName::Known(crate::KnownAlgorithm::Md5),
+            ),
             ("SHA3-256", crate::AlgorithmName::Unknown { len: 8 }),
             ("RIPEMD160", crate::AlgorithmName::Unknown { len: 9 }),
             ("", crate::AlgorithmName::Unknown { len: 0 }),
@@ -2035,7 +2039,10 @@ mod tests {
             "got: {err:?}"
         );
         for rendered in [err.to_string(), format!("{err:?}")] {
-            assert!(!rendered.contains("EVIL") && !rendered.contains("AAAA"), "{rendered}");
+            assert!(
+                !rendered.contains("EVIL") && !rendered.contains("AAAA"),
+                "{rendered}"
+            );
             assert!(rendered.len() < 200, "{rendered}");
         }
     }
