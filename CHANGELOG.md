@@ -22,7 +22,7 @@ What survives that move is in two places, deliberately:
 
 ---
 
-## [0.1.0-rc.8] - Unreleased
+## [0.1.0-rc.8] - 2026-10-18
 
 ### `secure-gate` moves to 0.9.0-rc.13, and the API does not move
 
@@ -1818,7 +1818,7 @@ job is parsing bytes an attacker chose — and, as usefully, what does not.
 [MS-CFB]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/
 [MS-PPT]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-ppt/
 [MS-ODRAW]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-odraw/
-[0.1.0-rc.8]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.7...main
+[0.1.0-rc.8]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.7...v0.1.0-rc.8
 [0.1.0-rc.7]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.6...v0.1.0-rc.7
 [0.1.0-rc.6]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.5...v0.1.0-rc.6
 [0.1.0-rc.4]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.3...v0.1.0-rc.4
