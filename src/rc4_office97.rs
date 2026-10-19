@@ -20,6 +20,7 @@
 //! NOTICE.
 
 use crate::error::Error;
+use crate::file_params::{bad, wide, FileField, FileProblem, Invariant};
 use crate::rc4::{self, BlockKeySchedule};
 use crate::sensitive::{utf16le_password, DerivedKey, Office97Buffer, PasswordDigest};
 use md5::digest::Output;
@@ -52,19 +53,25 @@ pub(crate) fn parse(structure: &[u8]) -> Result<Office97Header, Error> {
         crate::binary_office::le16(structure, 0),
         crate::binary_office::le16(structure, 2),
     ) else {
-        return Err(Error::BadParameters(
-            "the RC4 encryption header is shorter than its 4-byte version".to_string(),
+        return Err(bad(
+            FileField::Rc4Office97Header,
+            FileProblem::Truncated {
+                have: wide(structure.len()),
+                need: 4,
+            },
         ));
     };
     if (major, minor) != (1, 1) {
         return Err(Error::UnsupportedEncryptionVersion(major, minor));
     }
     let Some(body) = structure.get(4..HEADER_LEN) else {
-        return Err(Error::BadParameters(format!(
-            "the RC4 encryption header is {} bytes; [MS-OFFCRYPTO] 2.3.6.1 lays out \
-             {HEADER_LEN}",
-            structure.len()
-        )));
+        return Err(bad(
+            FileField::Rc4Office97Header,
+            FileProblem::Truncated {
+                have: wide(structure.len()),
+                need: wide(HEADER_LEN),
+            },
+        ));
     };
     let mut header = Office97Header {
         salt: [0; SALT_LEN],
@@ -78,11 +85,7 @@ pub(crate) fn parse(structure: &[u8]) -> Result<Office97Header, Error> {
     ] {
         match body.get(range) {
             Some(src) if src.len() == dst.len() => dst.copy_from_slice(src),
-            _ => {
-                return Err(Error::BadParameters(
-                    "RC4 encryption header fields unreadable".to_string(),
-                ))
-            }
+            _ => return Err(Error::InvariantViolated(Invariant::InternalSlice)),
         }
     }
     Ok(header)

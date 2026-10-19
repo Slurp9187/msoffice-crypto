@@ -18,6 +18,7 @@
 //! `msoffcrypto/method/rc4_cryptoapi.py` (MIT); see NOTICE.
 
 use crate::error::Error;
+use crate::file_params::Invariant;
 use crate::sensitive::{DerivedKey, VerifierPlaintext};
 use rc4::{consts::*, Key, KeyInit, Rc4, StreamCipher};
 use secure_gate::{ConstantTimeEq, RevealSecret};
@@ -55,12 +56,11 @@ impl Keystream {
             cipher_for!(k, 5 => U5, 6 => U6, 7 => U7, 8 => U8, 9 => U9, 10 => U10, 11 => U11,
                 12 => U12, 13 => U13, 14 => U14, 15 => U15, 16 => U16)
         });
-        cipher.map(Self).ok_or_else(|| {
-            Error::BadParameters(format!(
-                "an RC4 key of {} bytes is outside the 5..=16 the binary formats define",
-                key.with_secret(|k| k.len())
-            ))
-        })
+        // Every caller derives a key the header's own bounds size, so a length outside
+        // 5..=16 is ours (#47).
+        cipher
+            .map(Self)
+            .ok_or(Error::InvariantViolated(Invariant::Rc4KeyLength))
     }
 
     pub(crate) fn apply(&mut self, data: &mut [u8]) {
@@ -82,16 +82,11 @@ pub(crate) fn decrypt_in_blocks(
     block_size: usize,
 ) -> Result<(), Error> {
     if block_size == 0 {
-        return Err(Error::BadParameters(
-            "an RC4 block size of zero is a bug in the caller".to_string(),
-        ));
+        return Err(Error::InvariantViolated(Invariant::Rc4BlockSize));
     }
     for (i, chunk) in data.chunks_mut(block_size).enumerate() {
-        let block = u32::try_from(i).map_err(|_| {
-            Error::BadParameters(
-                "more than 2^32 RC4 blocks; the block number is a 32-bit field".to_string(),
-            )
-        })?;
+        let block = u32::try_from(i)
+            .map_err(|_| Error::InvariantViolated(Invariant::CounterOverflow))?;
         Keystream::new(&schedule.block_key(block))?.apply(chunk);
     }
     Ok(())

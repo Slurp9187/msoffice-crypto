@@ -27,6 +27,7 @@ use crate::binary_office::{
     FIB_L_KEY_OFFSET, WORD_DOCUMENT,
 };
 use crate::error::Error;
+use crate::file_params::{bad, wide, AlgorithmName, Bound, FileField, FileProblem};
 use crate::legacy_container::LegacyContainer;
 use crate::limits::ENCRYPTION_HEADER_STRUCTURE_MAX;
 use crate::rc4::{self, BlockKeySchedule};
@@ -40,15 +41,15 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
     if container.word_is_pre_97() {
         return Err(Error::UnsupportedAlgorithm {
             what: "WordDocument stream",
-            name: "a Word 6.0/95 document (FibBase.nFib 0x0065 to 0x0069); this crate reads \
-                   Word 97 and later"
-                .to_string(),
+            name: AlgorithmName::Fixed(
+                "a Word 6.0/95 document (FibBase.nFib 0x0065 to 0x0069); this crate reads \
+                 Word 97 and later",
+            ),
         });
     }
     let word = container.read(WORD_DOCUMENT)?;
-    let fib = FibBase::parse(&word).ok_or(Error::BadParameters(
-        "the WordDocument stream does not begin with a FIB (wIdent 0xA5EC)".to_string(),
-    ))?;
+    let fib =
+        FibBase::parse(&word).ok_or(bad(FileField::FibWIdent, FileProblem::BadSignature))?;
     if word.len() < FIB_CLEAR_LEN {
         return Err(Error::MissingStream(
             "WordDocument stream shorter than the 68-byte FIB",
@@ -60,7 +61,7 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
     if fib.obfuscated() {
         return Err(Error::UnsupportedAlgorithm {
             what: "FibBase.fObfuscated",
-            name: "XOR obfuscation of a Word document ([MS-OFFCRYPTO] 2.3.7.4)".to_string(),
+            name: AlgorithmName::Fixed("XOR obfuscation of a Word document ([MS-OFFCRYPTO] 2.3.7.4)"),
         });
     }
 
@@ -70,18 +71,25 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
     let table = container.read(table_name)?;
     let l_key = usize::try_from(fib.l_key).unwrap_or(usize::MAX);
     if l_key > ENCRYPTION_HEADER_STRUCTURE_MAX {
-        return Err(Error::BadParameters(format!(
-            "FibBase.lKey is {}, over the {ENCRYPTION_HEADER_STRUCTURE_MAX} an RC4 \
-             encryption header can occupy",
-            fib.l_key
-        )));
+        return Err(bad(
+            FileField::FibLKey,
+            FileProblem::OutOfRange {
+                got: fib.l_key.into(),
+                min: 0,
+                max: wide(ENCRYPTION_HEADER_STRUCTURE_MAX),
+                bound: Bound::Margin,
+            },
+        ));
     }
     let Some(structure) = table.get(..l_key) else {
-        return Err(Error::BadParameters(format!(
-            "FibBase.lKey is {} but the table stream holds {} bytes",
-            fib.l_key,
-            table.len()
-        )));
+        return Err(bad(
+            FileField::FibLKey,
+            FileProblem::OutOfBounds {
+                offset: 0,
+                len: fib.l_key.into(),
+                end: wide(table.len()),
+            },
+        ));
     };
 
     // [MS-DOC] §2.2.6: EncryptionVersionInfo names the family.
@@ -108,8 +116,12 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
             return Err(Error::UnsupportedEncryptionVersion(major, minor))
         }
         _ => {
-            return Err(Error::BadParameters(
-                "FibBase.lKey is too small to hold an EncryptionVersionInfo".to_string(),
+            return Err(bad(
+                FileField::EncryptionVersionInfo,
+                FileProblem::Truncated {
+                    have: wide(structure.len()),
+                    need: 4,
+                },
             ))
         }
     };

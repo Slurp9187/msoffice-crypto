@@ -30,6 +30,7 @@
 //! in a build with no cipher crate at all; this module is the `crypto-ops` half.
 
 use crate::error::Error;
+use crate::file_params::Invariant;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -306,13 +307,9 @@ pub(crate) fn derive_iv(
     block_size: usize,
 ) -> Result<Vec<u8>, Error> {
     let digest = hash.digest_two(salt, suffix);
+    // The parser pins blockSize to 16, under every digest's length (#47).
     if digest.len() < block_size {
-        return Err(Error::BadParameters(format!(
-            "keyData blockSize {} exceeds the {} digest length {}",
-            block_size,
-            hash.name(),
-            digest.len()
-        )));
+        return Err(Error::InvariantViolated(Invariant::BlockSizeOverDigest));
     }
     Ok(fit_iv(&digest, block_size))
 }

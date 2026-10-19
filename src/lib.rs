@@ -230,6 +230,8 @@ mod cfb_reader;
 mod classify;
 mod data_space_map;
 mod error;
+#[cfg(feature = "crypto-ops")]
+mod file_params;
 mod limits;
 
 // The 97-2003 binary formats, GH #4: the container they are decrypted inside, the
@@ -359,6 +361,13 @@ pub use error::Error;
 /// exported, so this re-export is part of that variant, not a convenience.
 #[cfg(feature = "crypto-ops")]
 pub use error::{EncryptParam, EncryptParamProblem};
+/// What [`Error::BadParameters`], [`Error::InvariantViolated`] and
+/// [`Error::UnsupportedAlgorithm`] carry: closed enums and integers, never text the file
+/// chose. Exported for the same reason as the two above: a caller matches on them.
+#[cfg(feature = "crypto-ops")]
+pub use file_params::{
+    AlgorithmName, AllowedSet, Bound, FileField, FileProblem, Invariant, KnownAlgorithm,
+};
 #[cfg(feature = "crypto-ops")]
 pub use integrity::{IntegrityOutcome, IntegrityPolicy};
 
@@ -1193,9 +1202,10 @@ fn decrypt_ooxml_core<R: Read + Seek, W: Write>(
     if data_space_map::rights_management_in(&mut cfb).is_some() {
         return Err(Error::UnsupportedAlgorithm {
             what: "\\x06DataSpaces\\DataSpaceMap",
-            name: "rights management (IRM): the key is held by a rights-management \
-                   server, and no password opens it"
-                .to_string(),
+            name: file_params::AlgorithmName::Fixed(
+                "rights management (IRM): the key is held by a rights-management server, \
+                 and no password opens it",
+            ),
         });
     }
 
@@ -1256,10 +1266,14 @@ fn decrypt_ooxml_core<R: Read + Seek, W: Write>(
             // `header` is `[u8; 8]`, so these four bytes exist.
             let reserved = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
             if reserved != AGILE_ENCRYPTION_RESERVED {
-                return Err(Error::BadParameters(format!(
-                    "agile EncryptionInfo Reserved is {reserved:#010x}; [MS-OFFCRYPTO] \
-                     2.3.4.10 requires {AGILE_ENCRYPTION_RESERVED:#010x}"
-                )));
+                return Err(file_params::bad(
+                    FileField::AgileReserved,
+                    file_params::FileProblem::NotRequiredValue {
+                        got: reserved.into(),
+                        required: AGILE_ENCRYPTION_RESERVED.into(),
+                        bound: file_params::Bound::Spec,
+                    },
+                ));
             }
             agile::decrypt_to(
                 encryption_info.get(8..).unwrap_or_default(),

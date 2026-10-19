@@ -47,6 +47,7 @@
 //! writes none, so it never wants this module.
 
 use crate::error::Error;
+use crate::file_params::Invariant;
 use std::io::{Read, Seek, Write};
 
 // ---------------------------------------------------------------------------
@@ -332,13 +333,10 @@ where
     package.flush()?;
     drop(package);
 
+    // The stream cannot change length once the package is written after it, and the
+    // serializer is ours, so a mismatch is a fault of ours (#47).
     if info.len() != info_placeholder.len() {
-        return Err(Error::BadParameters(format!(
-            "the final EncryptionInfo is {} bytes but its placeholder was {}; the stream \
-             cannot change length once the package has been written after it",
-            info.len(),
-            info_placeholder.len()
-        )));
+        return Err(Error::InvariantViolated(Invariant::PlaceholderLength));
     }
     if info != info_placeholder {
         let mut stream = container.open_stream(ENCRYPTION_INFO)?;

@@ -33,6 +33,9 @@ use crate::binary_office::{
     BIFF_NEVER_ENCRYPTED, BOOK,
 };
 use crate::error::Error;
+use crate::file_params::{
+    bad, wide, AlgorithmName, AllowedSet, Bound, FileField, FileProblem,
+};
 use crate::legacy_container::LegacyContainer;
 use crate::rc4::{self, BlockKeySchedule};
 use crate::xor_obfuscation::XorObfuscator;
@@ -61,7 +64,7 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
     if name == BOOK {
         return Err(Error::UnsupportedAlgorithm {
             what: "Book stream",
-            name: "a BIFF5 (Excel 5.0/95) workbook; this crate reads BIFF8".to_string(),
+            name: AlgorithmName::Fixed("a BIFF5 (Excel 5.0/95) workbook; this crate reads BIFF8"),
         });
     }
     let book = container.read(name)?;
@@ -86,11 +89,10 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
     let mut out_of_order = None;
     for record in biff_records(&book) {
         let record = record.map_err(|e| {
-            Error::BadParameters(format!(
-                "Workbook record at offset {} has no readable header or declares a length \
-                 past the end of the stream",
-                e.at
-            ))
+            bad(
+                FileField::BiffRecord,
+                FileProblem::Unreadable { offset: wide(e.at) },
+            )
         })?;
         if first_id.is_none() {
             first_id = Some(record.id);
@@ -108,18 +110,18 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
         }
     }
     if first_id != Some(BIFF_BOF) {
-        return Err(Error::BadParameters(
-            "the Workbook stream does not open with BOF".to_string(),
-        ));
+        return Err(bad(FileField::WorkbookBof, FileProblem::Missing));
     }
     let Some(filepass_record) = filepass_record else {
         return Err(Error::NotEncrypted);
     };
     if let Some(out_of_order) = out_of_order {
-        return Err(Error::BadParameters(format!(
-            "FILEPASS follows record {out_of_order:#06x}, which must be encrypted; a \
-             workbook's FILEPASS directly follows BOF",
-        )));
+        return Err(bad(
+            FileField::Filepass,
+            FileProblem::OutOfOrder {
+                after_record: out_of_order,
+            },
+        ));
     }
     let filepass = &book[filepass_record.body.clone()];
 
@@ -130,10 +132,13 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
                 binary_office::le16(filepass, 2),
                 binary_office::le16(filepass, 4),
             ) else {
-                return Err(Error::BadParameters(format!(
-                    "FILEPASS declares XOR obfuscation in {} bytes; XORObfuscation takes 4",
-                    filepass.len().saturating_sub(2)
-                )));
+                return Err(bad(
+                    FileField::Filepass,
+                    FileProblem::Truncated {
+                        have: wide(filepass.len().saturating_sub(2)),
+                        need: 4,
+                    },
+                ));
             };
             let obfuscator = XorObfuscator::new(password)?;
             obfuscator.verify(key, verification_bytes)?;
@@ -166,21 +171,34 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
                     return Err(Error::UnsupportedEncryptionVersion(major, minor))
                 }
                 _ => {
-                    return Err(Error::BadParameters(
-                        "FILEPASS declares RC4 but holds no EncryptionVersionInfo".to_string(),
+                    return Err(bad(
+                        FileField::EncryptionVersionInfo,
+                        FileProblem::Truncated {
+                            have: wide(structure.len()),
+                            need: 4,
+                        },
                     ))
                 }
             };
             Scheme::Rc4(schedule, doc_props_in_the_clear)
         }
         Some(other) => {
-            return Err(Error::BadParameters(format!(
-                "FILEPASS.wEncryptionType is {other:#06x}; 0 is XOR obfuscation and 1 is RC4"
-            )))
+            return Err(bad(
+                FileField::FilepassEncryptionType,
+                FileProblem::NotInSet {
+                    got: other.into(),
+                    allowed: AllowedSet::XorOrRc4,
+                    bound: Bound::Spec,
+                },
+            ))
         }
         None => {
-            return Err(Error::BadParameters(
-                "FILEPASS is shorter than its wEncryptionType field".to_string(),
+            return Err(bad(
+                FileField::Filepass,
+                FileProblem::Truncated {
+                    have: wide(filepass.len()),
+                    need: 2,
+                },
             ))
         }
     };

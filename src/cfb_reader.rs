@@ -50,9 +50,10 @@ pub(crate) fn read_capped(
     let mut buf = Vec::new();
     stream.by_ref().take(cap as u64 + 1).read_to_end(&mut buf)?;
     if buf.len() > cap {
-        return Err(Error::BadParameters(format!(
-            "the {what} stream is larger than {cap} bytes"
-        )));
+        return Err(Error::StreamTooLarge {
+            stream: what,
+            limit: cap as u64,
+        });
     }
     Ok(buf)
 }
