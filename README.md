@@ -77,10 +77,10 @@ they cannot open.
 ```toml
 [dependencies]
 # Detection only — no cryptographic dependency.
-msoffice-crypto = "0.1.0-rc.7"
+msoffice-crypto = "0.1.0-rc.8"
 
 # Detection, decryption and encryption.
-msoffice-crypto = { version = "0.1.0-rc.7", features = ["crypto-ops"] }
+msoffice-crypto = { version = "0.1.0-rc.8", features = ["crypto-ops"] }
 ```
 
 Pre-release versions are not matched by ordinary requirements — name the full version as
@@ -377,7 +377,10 @@ crate does for Microsoft Office — same method, same author, different format f
 **Compatibility:** this crate tracks `secure-gate` 0.9.x, and **no secure-gate type crosses
 its public API** — the password is `&str` and the plaintext is `Vec<u8>`, by design. A plan
 to put its types on the boundary was withdrawn as a design error, so a consumer on a
-different secure-gate version resolves both side by side without conflict.
+different secure-gate range (0.8.x, say) resolves both side by side without conflict. Within
+0.9.x it cannot: the pin here is exact, and Cargo holds one version per semver-compatible
+range, so a consumer that also depends on secure-gate 0.9 directly must name the release this
+crate pins (`0.9.0-rc.13` for this version).
 
 ## Trademarks
 

@@ -1,6 +1,6 @@
 [package]
 name = "msoffice-crypto"
-version = "0.1.0-rc.7"
+version = "0.1.0-rc.8"
 edition = "2021"
 description = "Microsoft Office document encryption per MS-OFFCRYPTO: detect, decrypt and encrypt (agile and Office 2007 standard), with key material that zeroizes on drop and a detection build that links no cryptography. Not affiliated with Microsoft."
 rust-version = "1.85"
@@ -283,8 +283,7 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 # The pin proved itself within minutes of being added: with `=0.9.0-rc.10` written here,
 # `cargo update --precise 0.9.0-rc.11` refused -- "candidate versions found which didn't
 # match: 0.9.0-rc.11" -- so moving the line is a deliberate edit, which is the whole point.
-# rc.12 is what is pinned now, and it is the one release in this span that changed something
-# this crate calls. `Dynamic::new_with` went from handing the closure an empty growable `Vec`
+# rc.12 is the one release in this span that changed something this crate calls. `Dynamic::new_with` went from handing the closure an empty growable `Vec`
 # to handing it a pre-zeroed `&mut [u8]` of exactly `len`, which makes the heap-residue defect
 # fixed two commits earlier in this branch impossible to express rather than merely fixed --
 # see `src/rc4_cryptoapi.rs`. The all-zero slot is a documented guarantee, not an
@@ -295,6 +294,14 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 # `Fixed::new_with` is unchanged at one argument -- checked against the published source
 # rather than assumed, because `src/xor_obfuscation.rs` is its only caller here and
 # `legacy-binary` is the only configuration that compiles it.
+#
+# rc.13 is what is pinned now, and nothing this crate calls changed in it. Its one break,
+# `derive: [ConstantTimeEq]` rejected on the shaped newtype arms, reaches only a
+# `fixed_newtype!` / `dynamic_newtype!` declaration, and this crate declares none: every
+# wrapper is a plain alias in `src/sensitive.rs`. Its `sealed` feature is opt-in and is not
+# enabled here. The move is for the consumer's graph: Cargo holds one version per
+# semver-compatible range, so a consumer pinning secure-gate rc.13 exactly cannot resolve
+# against a crate still pinning rc.12 exactly -- the two pins move together or not at all.
 #
 # When it goes on, the seeded RNG is a `chacha20` dev-dependency and NOT
 # `rand_chacha`. from_rng's `TryRng + TryCryptoRng` bounds come from rand_core
@@ -332,7 +339,7 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 #
 # This is not a dependency-count argument. In the build that has key material, secure-gate
 # and its `zeroize` come along regardless -- that is what they are for.
-secure-gate = { version = "=0.9.0-rc.12", optional = true, default-features = false, features = [
+secure-gate = { version = "=0.9.0-rc.13", optional = true, default-features = false, features = [
     "alloc",
 ] }
 

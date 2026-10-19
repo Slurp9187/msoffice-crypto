@@ -15,7 +15,7 @@ true of this crate.**
 ## Dependency
 
 ```toml
-secure-gate = { version = "=0.9.0-rc.12", optional = true, default-features = false, features = ["alloc"] }
+secure-gate = { version = "=0.9.0-rc.13", optional = true, default-features = false, features = ["alloc"] }
 ```
 
 Enabled by the crate's own `crypto-ops` feature, which also turns on `secure-gate/ct-eq` and
@@ -33,9 +33,12 @@ computes against a value the *file* supplies — the textbook MAC-forgery oracle
 short-circuiting `==` leaks how many leading bytes of a forged tag were right. Marginal cost is
 zero: `subtle` is a leaf, and `hmac` pulls it in regardless via `digest`'s `mac` feature.
 
-**Every rule in the global skill is read against rc.12.** The rc.13 bump is a coordinated
-ecosystem wave — see the global skill's *upgrade* reference. This crate declares no newtypes,
-so the rc.13 `derive: [ConstantTimeEq]` break does **not** hit it.
+**Every rule in the global skill is read against rc.13**, taken in 0.1.0-rc.8. The rc.13 bump
+is a coordinated ecosystem wave — see the global skill's *upgrade* reference: two exact pins on
+one 0.9 range cannot resolve together, so the consumer moves only when this crate does. This
+crate declares no newtypes (`grep -rn 'derive:' src/` is empty), so the rc.13
+`derive: [ConstantTimeEq]` break does **not** hit it, and nothing it calls changed. The opt-in
+`sealed` feature is not enabled.
 
 ## Boundary — the public API stays plain
 

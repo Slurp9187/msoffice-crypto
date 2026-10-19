@@ -345,11 +345,19 @@ Verify with
 
 **secure-gate version.** This crate tracks 0.9.x, matching `odf-crypto`, and the
 dependency is optional on `crypto-ops` — the detection build holds no key material.
-Both this crate and the consumer named above pin `=0.9.0-rc.12` (`Cargo.toml:335` here,
-`Cargo.toml:91` there, as of encrypted-file-vault #1205), so today they resolve to one copy rather than
-two. That is a coincidence of timing and not a requirement: **no secure-gate type crosses
-this crate's public API, by design**, so a consumer on a different version resolves both
-side by side without conflict. The plan to move the boundary onto its types ("S1 part 3")
+This crate pins `=0.9.0-rc.13` (`Cargo.toml:342`). The consumer named above pins
+`=0.9.0-rc.12` (`Cargo.toml:91` there, as of encrypted-file-vault `1f4a912`, its `main` on
+2026-10-18), alongside `msoffice-crypto = "=0.1.0-rc.7"`, which is rc.12 too, so its
+graph holds one copy today. **Within 0.9.x the two must move together, and that is a
+requirement, not a convenience.** Two exact pins on one semver-compatible range cannot both
+be satisfied: a probe crate requiring `msoffice-crypto = "=0.1.0-rc.7"` and
+`secure-gate = "=0.9.0-rc.13"` fails resolution with `failed to select a version for
+secure-gate` (measured 2026-10-18). So the consumer can take rc.13 only by taking
+`0.1.0-rc.8` with it. **No secure-gate type crosses this crate's public API, by design**,
+which is what lets a consumer on a different *range* (0.8.x against this crate's 0.9.x) hold
+both side by side; it does not help two releases of the same range. This paragraph said "a
+consumer on a different version resolves both side by side without conflict" until the
+rc.13 re-pin, which was true only across ranges. The plan to move the boundary onto its types ("S1 part 3")
 was withdrawn as a design error on 2026-09-04 and is not coming back without new evidence.
 This paragraph claimed the consumer was on `=0.8.0-rc.10` until 2026-09-21 — two versions
 stale, and stale in the direction that made the side-by-side case look load-bearing when

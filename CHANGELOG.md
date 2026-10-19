@@ -22,6 +22,29 @@ What survives that move is in two places, deliberately:
 
 ---
 
+## [0.1.0-rc.8] - Unreleased
+
+### `secure-gate` moves to 0.9.0-rc.13, and the API does not move
+
+The exact pin goes from `=0.9.0-rc.12` to `=0.9.0-rc.13`. Nothing in this crate's API
+changes, and nothing it calls in secure-gate changed: the only change since rc.7 is that pin.
+
+The reason is the consumer's graph. Cargo holds one version per semver-compatible range, so
+two exact pins on 0.9 cannot both be satisfied: a probe crate requiring
+`msoffice-crypto = "=0.1.0-rc.7"` and `secure-gate = "=0.9.0-rc.13"` fails resolution with
+`failed to select a version for secure-gate`. An application that depends on secure-gate
+directly can take rc.13 only by taking this release with it, and then its graph holds one
+copy of secure-gate rather than failing to resolve. The README's compatibility note said a
+consumer "on a different secure-gate version resolves both side by side"; that holds across
+ranges (0.8 against 0.9) and never held within one, and now says so.
+
+rc.13's one breaking change, `derive: [ConstantTimeEq]` rejected on the shaped
+`fixed_newtype!` / `dynamic_newtype!` arms, does not reach this crate: it declares no
+newtypes, and every wrapper in `src/sensitive.rs` is a plain `type` alias. rc.13's opt-in
+`sealed` feature is not enabled. The dependency graph is unchanged apart from secure-gate's
+own version: the lockfile diff is that one package, and the four feature graphs keep their
+documented 13, 36, 38 and 49 crates. The detection build still links no secure-gate.
+
 ## [0.1.0-rc.7] - 2026-10-15
 
 ### Breaking: an input that is too large is `Error::PackageTooLarge`, not `BadParameters`
@@ -1795,7 +1818,9 @@ job is parsing bytes an attacker chose — and, as usefully, what does not.
 [MS-CFB]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/
 [MS-PPT]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-ppt/
 [MS-ODRAW]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-odraw/
-[0.1.0-rc.6]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.5...main
+[0.1.0-rc.8]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.7...main
+[0.1.0-rc.7]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.6...v0.1.0-rc.7
+[0.1.0-rc.6]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.5...v0.1.0-rc.6
 [0.1.0-rc.4]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.3...v0.1.0-rc.4
 [0.1.0-rc.3]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.2...v0.1.0-rc.3
 [0.1.0-rc.2]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.1...v0.1.0-rc.2
