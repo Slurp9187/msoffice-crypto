@@ -152,8 +152,10 @@ fn the_iv_follows_the_named_hash_algorithm() {
 fn a_block_size_past_the_digest_is_an_error_not_a_panic() {
     let got = Segmenter::new(HashAlgorithm::Sha1, &SALT, 32).map(|_| ());
     assert!(
-        matches!(&got, Err(Error::BadParameters(msg))
-            if msg.contains("blockSize") && msg.contains("SHA1")),
+        matches!(
+            &got,
+            Err(Error::InvariantViolated(crate::Invariant::BlockSizeOverDigest))
+        ),
         "a 32-byte block under SHA-1 must be refused, got: {got:?}"
     );
 
@@ -283,7 +285,10 @@ fn the_segment_index_refuses_to_wrap() {
         .fill(&mut reader, &mut slot)
         .map(|f| f.map(|f| f.len));
     assert!(
-        matches!(&past, Err(Error::BadParameters(msg)) if msg.contains("would wrap")),
+        matches!(
+            &past,
+            Err(Error::InvariantViolated(crate::Invariant::CounterOverflow))
+        ),
         "the segment after u32::MAX must be refused, got: {past:?}"
     );
 }

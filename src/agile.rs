@@ -1769,11 +1769,19 @@ mod tests {
         for key_bits in [192u32, 256] {
             let err = derive_block_key(HashAlgorithm::Sha1, &h, &BLOCK_KEY_VALUE, key_bits)
                 .expect_err("SHA-1 cannot produce that many key bytes");
-            let text = err.to_string();
-            assert!(matches!(err, Error::BadParameters(_)));
+            // Both halves of the pair are named: the field, and the hash in the problem.
             assert!(
-                text.contains("keyBits") && text.contains("SHA1"),
-                "the refusal must name both halves of the pair, got: {text}"
+                matches!(
+                    err,
+                    Error::BadParameters {
+                        field: FileField::EncryptedKeyKeyBits,
+                        problem: FileProblem::DigestMismatch {
+                            hash: HashAlgorithm::Sha1,
+                            ..
+                        },
+                    }
+                ),
+                "got: {err:?}"
             );
         }
         // The control: the same hash with a key it *can* fill is accepted, so the
@@ -1979,19 +1987,27 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                Error::UnsupportedAlgorithm { what, name }
-                    if *what == "keyData/@hashAlgorithm" && name == "MD5"
+                Error::UnsupportedAlgorithm {
+                    what: "keyData/@hashAlgorithm",
+                    name: crate::AlgorithmName::Known(crate::KnownAlgorithm::Md5),
+                }
             ),
             "got: {err:?}"
         );
 
-        for name in ["MD5", "SHA3-256", "RIPEMD160", ""] {
+        // A name the spec defines is named; any other only by its length, never its text.
+        for (name, want) in [
+            ("MD5", crate::AlgorithmName::Known(crate::KnownAlgorithm::Md5)),
+            ("SHA3-256", crate::AlgorithmName::Unknown { len: 8 }),
+            ("RIPEMD160", crate::AlgorithmName::Unknown { len: 9 }),
+            ("", crate::AlgorithmName::Unknown { len: 0 }),
+        ] {
             let err = parse_err(&good_key_data(), &enc_key(&[("hashAlgorithm", Some(name))]));
             assert!(
                 matches!(
                     &err,
-                    Error::UnsupportedAlgorithm { what, name: got }
-                        if *what == "p:encryptedKey/@hashAlgorithm" && got == name
+                    Error::UnsupportedAlgorithm { what: "p:encryptedKey/@hashAlgorithm", name: got }
+                        if *got == want
                 ),
                 "hashAlgorithm={name:?} got: {err:?}"
             );
@@ -2002,20 +2018,33 @@ mod tests {
         assert!(parse_with(&good_key_data(), &good_enc_key()).is_ok());
     }
 
-    /// The name lands in an error string and comes out of an attacker's XML, bounded
-    /// only by the 1 MiB `EncryptionInfo` read cap.
+    /// The name comes out of an attacker's XML, bounded only by the 1 MiB
+    /// `EncryptionInfo` read cap, and none of it reaches the error (#47): only its
+    /// length. Until 0.1.0-rc.9 the first 32 characters did.
+    ///
+    /// Falsify: put the file's spelling back into `AlgorithmName` in
+    /// `unsupported_algorithm`.
     #[test]
-    fn an_unimplemented_hash_name_is_truncated_before_it_reaches_the_error() {
-        let long = "A".repeat(4096);
+    fn an_unimplemented_hash_name_never_reaches_the_error() {
+        let long = format!("EVIL{}", "A".repeat(4092));
         let err = parse_err(
             &good_key_data(),
             &enc_key(&[("hashAlgorithm", Some(&long))]),
         );
-        let Error::UnsupportedAlgorithm { name, .. } = &err else {
-            panic!("got: {err:?}");
-        };
-        assert_eq!(name.chars().count(), 33, "32 characters plus the ellipsis");
-        assert!(err.to_string().len() < 200, "got: {err}");
+        assert!(
+            matches!(
+                &err,
+                Error::UnsupportedAlgorithm {
+                    name: crate::AlgorithmName::Unknown { len: 4096 },
+                    ..
+                }
+            ),
+            "got: {err:?}"
+        );
+        for rendered in [err.to_string(), format!("{err:?}")] {
+            assert!(!rendered.contains("EVIL") && !rendered.contains("AAAA"), "{rendered}");
+            assert!(rendered.len() < 200, "{rendered}");
+        }
     }
 
     /// `cipherAlgorithm` is required and must be AES on both elements. An RC4 or
@@ -2062,14 +2091,21 @@ mod tests {
     /// in this module is loud.
     #[test]
     fn cipher_chaining_must_be_cbc_on_both_elements() {
-        for chaining in ["ChainingModeCFB", "ChainingModeECB", ""] {
+        for (chaining, want) in [
+            (
+                "ChainingModeCFB",
+                crate::AlgorithmName::Known(crate::KnownAlgorithm::ChainingModeCfb),
+            ),
+            ("ChainingModeECB", crate::AlgorithmName::Unknown { len: 15 }),
+            ("", crate::AlgorithmName::Unknown { len: 0 }),
+        ] {
             let err = parse_err(
                 &key_data(&[("cipherChaining", Some(chaining))]),
                 &good_enc_key(),
             );
             assert!(
-                matches!(&err, Error::UnsupportedAlgorithm { what, name }
-                    if *what == "keyData/@cipherChaining" && name == chaining),
+                matches!(&err, Error::UnsupportedAlgorithm { what: "keyData/@cipherChaining", name }
+                    if *name == want),
                 "keyData chaining={chaining:?} got: {err:?}"
             );
 
@@ -2078,8 +2114,8 @@ mod tests {
                 &enc_key(&[("cipherChaining", Some(chaining))]),
             );
             assert!(
-                matches!(&err, Error::UnsupportedAlgorithm { what, name }
-                    if *what == "p:encryptedKey/@cipherChaining" && name == chaining),
+                matches!(&err, Error::UnsupportedAlgorithm { what: "p:encryptedKey/@cipherChaining", name }
+                    if *name == want),
                 "encryptedKey chaining={chaining:?} got: {err:?}"
             );
         }
@@ -2317,8 +2353,13 @@ mod tests {
             // thousands of them, and `Vec<u8>`'s `Debug` would bury the assertion.
             let got = decrypt_package(&sk, &params, &forged).map(|p| p.len());
             assert!(
-                matches!(&got, Err(Error::BadParameters(msg))
-                    if msg.contains("EncryptedPackage declares")),
+                matches!(
+                    &got,
+                    Err(Error::BadParameters {
+                        field: FileField::EncryptedPackageSize,
+                        problem: FileProblem::OutOfRange { got, max, .. },
+                    }) if *got == declared && *max == ciphertext_len
+                ),
                 "declared={declared} got: {got:?}"
             );
         }
@@ -2358,8 +2399,13 @@ mod tests {
         for key_bits in ["0", "255", "257", "512", "4294967295"] {
             let err = parse_err(&key_data(&[("keyBits", Some(key_bits))]), &good_enc_key());
             assert!(
-                matches!(&err, Error::BadParameters(msg)
-                    if msg.contains("keyData/@keyBits")),
+                matches!(
+                    &err,
+                    Error::BadParameters {
+                        field: FileField::KeyDataKeyBits,
+                        problem: FileProblem::NotInSet { .. },
+                    }
+                ),
                 "keyData keyBits={key_bits} got: {err:?}"
             );
         }
@@ -2370,8 +2416,17 @@ mod tests {
         // writer used the first 16.
         let err = parse_err(&key_data(&[("keyBits", Some("128"))]), &good_enc_key());
         assert!(
-            matches!(&err, Error::BadParameters(msg)
-                if msg.contains("keyData/@keyBits") && msg.contains("encryptedKeyValue")),
+            matches!(
+                &err,
+                Error::BadParameters {
+                    field: FileField::EncryptedKeyValue,
+                    problem: FileProblem::Disagrees {
+                        got: 32,
+                        expected: 16,
+                        with: FileField::KeyDataKeyBits,
+                    },
+                }
+            ),
             "keyData keyBits=128 got: {err:?}"
         );
 
@@ -2393,8 +2448,17 @@ mod tests {
             .err()
             .expect("a 24-byte encryptedKeyValue must be refused");
         assert!(
-            matches!(&err, Error::BadParameters(msg)
-                if msg.contains("keyData/@keyBits") && msg.contains("24 bytes")),
+            matches!(
+                &err,
+                Error::BadParameters {
+                    field: FileField::EncryptedKeyValue,
+                    problem: FileProblem::Disagrees {
+                        got: 24,
+                        expected: 32,
+                        with: FileField::KeyDataKeyBits,
+                    },
+                }
+            ),
             "keyData keyBits=192 over 24 bytes got: {err:?}"
         );
     }
@@ -2419,8 +2483,17 @@ mod tests {
             params.key_data_key_bits = key_bits;
             let got = decrypt_package(&sk, &params, &stream).map(|p| p.len());
             assert!(
-                matches!(&got, Err(Error::BadParameters(msg))
-                    if msg.contains("keyData/@keyBits") && msg.contains("session key")),
+                matches!(
+                    &got,
+                    Err(Error::BadParameters {
+                        field: FileField::SessionKey,
+                        problem: FileProblem::Disagrees {
+                            got: 32,
+                            with: FileField::KeyDataKeyBits,
+                            ..
+                        },
+                    })
+                ),
                 "keyData keyBits={key_bits} got: {got:?}"
             );
         }
@@ -2728,8 +2801,13 @@ mod tests {
                     .clone_from(&params.encrypted_verifier_hash_value);
                 let got = verify_password(&crossed, &right);
                 assert!(
-                    matches!(&got, Err(Error::BadParameters(msg))
-                        if msg.contains("encryptedVerifierHashInput/Value")),
+                    matches!(
+                        &got,
+                        Err(Error::BadParameters {
+                            field: FileField::EncryptedVerifierHashValue,
+                            problem: FileProblem::Disagrees { .. },
+                        })
+                    ),
                     "a {hash:?} verifier read as {other:?} must be refused by the length \
                      guard, got: {got:?}"
                 );
@@ -2761,7 +2839,11 @@ mod tests {
             assert!(
                 matches!(
                     verify_password(&params, &h_final),
-                    Err(Error::BadParameters(_))
+                    Err(Error::BadParameters {
+                        field: FileField::EncryptedVerifierHashInput
+                            | FileField::EncryptedVerifierHashValue,
+                        problem: FileProblem::Disagrees { .. },
+                    })
                 ),
                 "input={vi_len} value={vh_len} must be an error"
             );
@@ -2787,7 +2869,14 @@ mod tests {
         sha384.password_hash = HashAlgorithm::Sha512;
         assert!(matches!(
             verify_password(&sha384, &PasswordDigest::new(vec![0u8; 64])),
-            Err(Error::BadParameters(_))
+            Err(Error::BadParameters {
+                field: FileField::EncryptedVerifierHashValue,
+                problem: FileProblem::Disagrees {
+                    got: 48,
+                    expected: 64,
+                    ..
+                },
+            })
         ));
     }
 
@@ -2950,12 +3039,14 @@ mod tests {
             .err()
             .expect("two password key encryptors");
         assert!(
-            matches!(err, Error::BadParameters(_)),
-            "expected BadParameters, got {err:?}"
-        );
-        assert!(
-            err.to_string().contains("PasswordKeyEncryptor"),
-            "the refusal must name the element, got: {err}"
+            matches!(
+                err,
+                Error::BadParameters {
+                    field: FileField::PasswordKeyEncryptor,
+                    problem: FileProblem::Duplicate,
+                }
+            ),
+            "expected the duplicate encryptor refusal, got {err:?}"
         );
         // The control: one of them alone parses, so the refusal is about the pair.
         let one = format!(

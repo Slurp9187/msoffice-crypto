@@ -1009,7 +1009,10 @@ mod tests {
         };
         assert!(matches!(
             verify(&sk, &material, b""),
-            Err(Error::BadParameters(_))
+            Err(Error::BadParameters {
+                field: crate::FileField::KeyDataHashSize,
+                problem: crate::FileProblem::DigestMismatch { got: 32, .. },
+            })
         ));
     }
 
@@ -1032,7 +1035,11 @@ mod tests {
             };
             assert!(matches!(
                 verify(&sk, &material, b""),
-                Err(Error::BadParameters(_))
+                Err(Error::BadParameters {
+                    field: crate::FileField::EncryptedHmacKey
+                        | crate::FileField::EncryptedHmacValue,
+                    problem: crate::FileProblem::Disagrees { .. },
+                })
             ));
         }
     }
@@ -1050,7 +1057,14 @@ mod tests {
         };
         assert!(matches!(
             verify(&sk, &material, b""),
-            Err(Error::BadParameters(_))
+            Err(Error::BadParameters {
+                field: crate::FileField::KeyDataBlockSize,
+                problem: crate::FileProblem::NotRequiredValue {
+                    got: 32,
+                    required: 16,
+                    ..
+                },
+            })
         ));
     }
 

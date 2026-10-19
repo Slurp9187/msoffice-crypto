@@ -530,7 +530,10 @@ mod tests {
             // One byte past the digest is an error, not a 0x36 tail.
             let err = derive_iv(hash, b"salt", b"", hash.digest_len() + 1)
                 .expect_err("blockSize past the digest must be refused");
-            assert!(matches!(err, Error::BadParameters(_)));
+            assert!(matches!(
+                err,
+                Error::InvariantViolated(crate::Invariant::BlockSizeOverDigest)
+            ));
         }
     }
 }

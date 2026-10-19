@@ -15,7 +15,10 @@
 //! carries a control differing only in the field under test, so a green result cannot
 //! come from the synthetic container being rejected for some unrelated reason.
 
-use crate::{decrypt_ooxml, Error};
+use crate::{
+    decrypt_ooxml, AlgorithmName, AllowedSet, Bound, Error, FileField, FileProblem, HashAlgorithm,
+    KnownAlgorithm,
+};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use std::io::Write;
 
@@ -236,7 +239,16 @@ fn agile_key_bits_out_of_range_is_an_error_not_a_panic() {
         let err = decrypt_ooxml(&data, "irrelevant")
             .expect_err("keyBits outside the ECMA-376 set must be refused");
         assert!(
-            matches!(err, Error::BadParameters(_)) && err.to_string().contains("keyBits"),
+            matches!(
+                err,
+                Error::BadParameters {
+                    field: FileField::EncryptedKeyKeyBits,
+                    problem: FileProblem::NotInSet {
+                        allowed: AllowedSet::AesKeyBits,
+                        ..
+                    },
+                }
+            ),
             "keyBits={key_bits} must be refused by name, got: {err}"
         );
     }
@@ -302,8 +314,16 @@ fn agile_key_data_key_bits_disagreeing_with_the_session_key_blob_is_refused_by_n
     let err = decrypt_ooxml(&data, "irrelevant")
         .expect_err("a keyData/@keyBits the session key cannot satisfy must be refused");
     assert!(
-        matches!(&err, Error::BadParameters(msg)
-            if msg.contains("keyData/@keyBits")),
+        matches!(
+            &err,
+            Error::BadParameters {
+                field: FileField::EncryptedKeyValue,
+                problem: FileProblem::Disagrees {
+                    with: FileField::KeyDataKeyBits,
+                    ..
+                },
+            }
+        ),
         "keyData keyBits=128 must be refused by name, got: {err:?}"
     );
     let data = build_cfb(
@@ -334,8 +354,13 @@ fn agile_key_data_key_bits_disagreeing_with_the_session_key_blob_is_refused_by_n
         );
         let err = decrypt_ooxml(&data, "irrelevant").expect_err("out-of-set keyBits is refused");
         assert!(
-            matches!(&err, Error::BadParameters(msg)
-                if msg.contains("keyData/@keyBits")),
+            matches!(
+                &err,
+                Error::BadParameters {
+                    field: FileField::KeyDataKeyBits,
+                    problem: FileProblem::NotInSet { .. },
+                }
+            ),
             "keyData keyBits={key_data_key_bits} got: {err:?}"
         );
     }
@@ -368,7 +393,11 @@ fn agile_key_data_key_bits_of_256_reaches_the_verifier_comparison() {
 /// password may be exactly right and there is nothing the user can do about it.
 #[test]
 fn agile_unimplemented_hash_name_is_its_own_error_not_a_wrong_password() {
-    for (name, size) in [("MD5", 16usize), ("SHA3-512", 64), ("BLAKE2b", 64)] {
+    for (name, size, want) in [
+        ("MD5", 16usize, AlgorithmName::Known(KnownAlgorithm::Md5)),
+        ("SHA3-512", 64, AlgorithmName::Unknown { len: 8 }),
+        ("BLAKE2b", 64, AlgorithmName::Unknown { len: 7 }),
+    ] {
         let data = build_cfb(
             &agile_encryption_info_with_hash(0, 256, name, size),
             &encrypted_package(),
@@ -376,8 +405,8 @@ fn agile_unimplemented_hash_name_is_its_own_error_not_a_wrong_password() {
         let err = decrypt_ooxml(&data, "irrelevant")
             .expect_err("an unimplemented hashAlgorithm must be refused");
         assert!(
-            matches!(&err, Error::UnsupportedAlgorithm { what, name: got }
-                if *what == "p:encryptedKey/@hashAlgorithm" && got == name),
+            matches!(&err, Error::UnsupportedAlgorithm { what: "p:encryptedKey/@hashAlgorithm", name: got }
+                if *got == want),
             "hashAlgorithm={name} got: {err:?}"
         );
     }
@@ -422,12 +451,18 @@ fn agile_key_bits_longer_than_the_named_digest_is_refused_by_name() {
         );
         let err =
             decrypt_ooxml(&data, "irrelevant").expect_err("SHA-1 cannot fill a 24- or 32-byte key");
-        let text = err.to_string();
         assert!(
-            matches!(err, Error::BadParameters(_))
-                && text.contains("keyBits")
-                && text.contains("SHA1"),
-            "keyBits={key_bits} got: {text}"
+            matches!(
+                err,
+                Error::BadParameters {
+                    field: FileField::EncryptedKeyKeyBits,
+                    problem: FileProblem::DigestMismatch {
+                        hash: HashAlgorithm::Sha1,
+                        ..
+                    },
+                }
+            ),
+            "keyBits={key_bits} got: {err:?}"
         );
     }
 
@@ -458,7 +493,14 @@ fn agile_key_bits_longer_than_the_named_digest_is_refused_by_name() {
 /// `IntegrityOutcome::Verified` and the caller would receive rubbish.
 #[test]
 fn agile_cipher_chaining_other_than_cbc_is_its_own_error() {
-    for chaining in ["ChainingModeCFB", "ChainingModeGCM", "ChainingModeECB"] {
+    for (chaining, want) in [
+        (
+            "ChainingModeCFB",
+            AlgorithmName::Known(KnownAlgorithm::ChainingModeCfb),
+        ),
+        ("ChainingModeGCM", AlgorithmName::Unknown { len: 15 }),
+        ("ChainingModeECB", AlgorithmName::Unknown { len: 15 }),
+    ] {
         let data = build_cfb(
             &agile_encryption_info_full(
                 0,
@@ -474,8 +516,8 @@ fn agile_cipher_chaining_other_than_cbc_is_its_own_error() {
         let err = decrypt_ooxml(&data, "irrelevant")
             .expect_err("an unimplemented cipherChaining must be refused");
         assert!(
-            matches!(&err, Error::UnsupportedAlgorithm { what, name }
-                if *what == "p:encryptedKey/@cipherChaining" && name == chaining),
+            matches!(&err, Error::UnsupportedAlgorithm { what: "p:encryptedKey/@cipherChaining", name }
+                if *name == want),
             "cipherChaining={chaining} got: {err:?}"
         );
     }
@@ -536,7 +578,17 @@ fn agile_reserved_word_must_be_0x40_not_zero() {
         let err =
             decrypt_ooxml(&data, "irrelevant").expect_err("a wrong Reserved word must be refused");
         assert!(
-            matches!(&err, Error::BadParameters(msg) if msg.contains("Reserved")),
+            matches!(
+                &err,
+                Error::BadParameters {
+                    field: FileField::AgileReserved,
+                    problem: FileProblem::NotRequiredValue {
+                        required: 0x40,
+                        bound: Bound::Spec,
+                        ..
+                    },
+                }
+            ),
             "reserved={reserved:#010x} must be refused by name, got: {err:?}"
         );
     }
@@ -598,7 +650,17 @@ fn agile_spin_count_above_the_ceiling_is_refused_before_the_spin_runs() {
     let elapsed = start.elapsed();
 
     assert!(
-        matches!(err, Error::BadParameters(_)) && err.to_string().contains("spinCount"),
+        matches!(
+            err,
+            Error::BadParameters {
+                field: FileField::SpinCount,
+                problem: FileProblem::OutOfRange {
+                    max: 10_000_000,
+                    bound: Bound::Spec,
+                    ..
+                },
+            }
+        ),
         "the refusal must name spinCount, got: {err}"
     );
     assert!(
@@ -785,7 +847,7 @@ fn standard_rc4_cryptoapi_is_named_not_reported_as_a_wrong_password() {
         let err = decrypt_ooxml(&data, "irrelevant").expect_err("RC4 CryptoAPI is not implemented");
         assert!(
             matches!(&err, Error::UnsupportedAlgorithm { what, name }
-                if *what == "EncryptionHeader/@AlgID" && name.contains("RC4")),
+                if *what == "EncryptionHeader/@AlgID" && name.to_string().contains("RC4")),
             "flags={flags:#x} algId={alg_id:#x} got: {err:?}"
         );
     }
@@ -842,7 +904,13 @@ fn standard_key_size_other_than_128_is_an_error_not_a_panic() {
         );
         let err = decrypt_ooxml(&data, "irrelevant").expect_err("AlgID 0x660E means a 128-bit key");
         assert!(
-            matches!(err, Error::BadParameters(_)) && err.to_string().contains("KeySize"),
+            matches!(
+                err,
+                Error::BadParameters {
+                    field: FileField::EncryptionHeaderKeySize,
+                    ..
+                }
+            ),
             "KeySize={key_size_bits} must be refused by name, got: {err}"
         );
     }

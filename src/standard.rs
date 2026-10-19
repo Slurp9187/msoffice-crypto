@@ -907,7 +907,13 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("EncryptionHeaderSize {declared} must be refused"));
             assert!(
-                matches!(err, Error::BadParameters(_) | Error::MissingStream(_)),
+                matches!(
+                    err,
+                    Error::BadParameters {
+                        field: FileField::EncryptionHeaderSize,
+                        ..
+                    } | Error::MissingStream(_)
+                ),
                 "declared={declared} got {err:?}"
             );
         }
@@ -937,9 +943,10 @@ mod tests {
             match &err {
                 Error::UnsupportedAlgorithm { what, name } => {
                     assert_eq!(*what, "EncryptionHeader/@AlgIDHash");
-                    assert!(
-                        name.contains(&format!("{alg_id_hash:#010x}")),
-                        "the refusal must name the value, got: {name}"
+                    assert_eq!(
+                        *name,
+                        AlgorithmName::AlgId(alg_id_hash),
+                        "the refusal must name the value"
                     );
                 }
                 other => panic!("expected UnsupportedAlgorithm, got {other:?}"),
@@ -969,12 +976,14 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("VerifierHashSize {verifier_hash_size} must be refused"));
             assert!(
-                matches!(err, Error::BadParameters(_)),
-                "expected BadParameters for {verifier_hash_size}, got {err:?}"
-            );
-            assert!(
-                err.to_string().contains("VerifierHashSize"),
-                "the refusal must name the field, got: {err}"
+                matches!(
+                    err,
+                    Error::BadParameters {
+                        field: FileField::VerifierHashSize,
+                        problem: FileProblem::NotRequiredValue { got, required: 20, .. },
+                    } if got == u64::from(verifier_hash_size)
+                ),
+                "expected the VerifierHashSize refusal for {verifier_hash_size}, got {err:?}"
             );
         }
         // The control.
@@ -1027,7 +1036,7 @@ mod tests {
             assert!(
                 matches!(
                     derive_standard_key("pw", b"1234567890123456", key_size_bytes),
-                    Err(Error::BadParameters(_))
+                    Err(Error::InvariantViolated(Invariant::KeyLadderLength))
                 ),
                 "key_size_bytes={key_size_bytes} must be an error"
             );
@@ -1052,14 +1061,14 @@ mod tests {
             assert!(
                 matches!(
                     aes_ecb_decrypt(&vec![0u8; key_len], &[0u8; 16]),
-                    Err(Error::BadParameters(_))
+                    Err(Error::InvariantViolated(Invariant::AesKeyLength))
                 ),
                 "a {key_len}-byte key must be an error, not a panic"
             );
             assert!(
                 matches!(
                     aes_ecb_encrypt(&vec![0u8; key_len], &[0u8; 16]),
-                    Err(Error::BadParameters(_))
+                    Err(Error::InvariantViolated(Invariant::AesKeyLength))
                 ),
                 "a {key_len}-byte key must be an error on the encrypt side too"
             );
@@ -1117,8 +1126,13 @@ mod tests {
             // them and `Vec<u8>`'s `Debug` would bury the assertion.
             let got = decrypt_package(&key, &forged).map(|p| p.len());
             assert!(
-                matches!(&got, Err(Error::BadParameters(msg))
-                    if msg.contains("EncryptedPackage declares")),
+                matches!(
+                    &got,
+                    Err(Error::BadParameters {
+                        field: FileField::EncryptedPackageSize,
+                        problem: FileProblem::OutOfRange { .. },
+                    })
+                ),
                 "declared={declared} got: {got:?}"
             );
         }
@@ -1181,7 +1195,7 @@ mod tests {
             let err = aes_key_bits(flags, alg_id).expect_err("must be refused");
             assert!(
                 matches!(&err, Error::UnsupportedAlgorithm { what, name }
-                    if *what == "EncryptionHeader/@AlgID" && name.contains(expected)),
+                    if *what == "EncryptionHeader/@AlgID" && name.to_string().contains(expected)),
                 "flags={flags:#x} algId={alg_id:#x} got: {err:?}"
             );
         }
@@ -1435,8 +1449,16 @@ mod tests {
                 panic!("AlgID {alg_id:#010x} with KeySize {key_size_bits} must be refused")
             });
             assert!(
-                matches!(&err, Error::BadParameters(msg)
-                    if msg.contains("KeySize") && msg.contains("AlgID")),
+                matches!(
+                    &err,
+                    Error::BadParameters {
+                        field: FileField::EncryptionHeaderKeySize,
+                        problem: FileProblem::Disagrees {
+                            with: FileField::EncryptionHeaderAlgId,
+                            ..
+                        },
+                    }
+                ),
                 "AlgID={alg_id:#010x} KeySize={key_size_bits} must name both fields, got: {err}"
             );
         }
@@ -1474,7 +1496,13 @@ mod tests {
                     .err()
                     .unwrap_or_else(|| panic!("KeySize {key_size_bits} must be refused"));
                 assert!(
-                    matches!(&err, Error::BadParameters(msg) if msg.contains("KeySize")),
+                    matches!(
+                        &err,
+                        Error::BadParameters {
+                            field: FileField::EncryptionHeaderKeySize,
+                            ..
+                        }
+                    ),
                     "KeySize={key_size_bits} algId={alg_id:#010x} got: {err}"
                 );
             }

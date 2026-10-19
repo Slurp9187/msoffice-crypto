@@ -282,8 +282,11 @@ fn a_blob_of_the_wrong_length_is_refused_by_the_writer() {
         mutate(&mut p);
         let got = write(&p).map(|s| s.len());
         assert!(
-            matches!(&got, Err(Error::BadParameters(msg)) if msg.contains(what)),
-            "a wrong-length {what} must be refused by name, got: {got:?}"
+            matches!(
+                &got,
+                Err(Error::InvariantViolated(crate::Invariant::SerializedLength))
+            ),
+            "a wrong-length {what} must be refused, got: {got:?}"
         );
     }
 }
@@ -329,10 +332,7 @@ fn the_wrapped_key_is_sized_from_key_datas_key_bits_rounded_up_to_the_block() {
     assert!(
         matches!(
             &got,
-            Err(Error::BadParameters(msg))
-                if msg.contains("p:encryptedKey/@encryptedKeyValue")
-                    && msg.contains("is 24 bytes")
-                    && msg.contains("at 32")
+            Err(Error::InvariantViolated(crate::Invariant::SerializedLength))
         ),
         "a bare 24-byte AES-192 key must be refused: the blob is roundUp(24, 16) = 32, \
          got: {got:?}"

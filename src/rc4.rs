@@ -206,7 +206,7 @@ mod tests {
             assert!(
                 matches!(
                     Keystream::new(&DerivedKey::new(vec![0u8; len])),
-                    Err(Error::BadParameters(_))
+                    Err(Error::InvariantViolated(crate::Invariant::Rc4KeyLength))
                 ),
                 "{len}-byte key must be refused"
             );

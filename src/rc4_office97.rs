@@ -238,7 +238,13 @@ mod tests {
         assert_eq!(h.encrypted_verifier_hash, ENCRYPTED_VERIFIER_HASH);
         for cut in [0usize, 3, 4, 51] {
             assert!(
-                matches!(parse(&s[..cut]), Err(Error::BadParameters(_))),
+                matches!(
+                    parse(&s[..cut]),
+                    Err(Error::BadParameters {
+                        field: crate::FileField::Rc4Office97Header,
+                        problem: crate::FileProblem::Truncated { .. },
+                    })
+                ),
                 "cut {cut}"
             );
         }

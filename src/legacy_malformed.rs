@@ -74,8 +74,14 @@ fn biff(records: &[(u16, &[u8])]) -> Vec<u8> {
     out
 }
 
-fn bad_parameters_naming(got: &Result<Vec<u8>, Error>, needle: &str) -> bool {
-    matches!(got, Err(Error::BadParameters(m)) if m.contains(needle))
+/// Refused as `field`, with a problem `problem` accepts: the structured value, never a
+/// message (#47).
+fn bad_parameters_naming(
+    got: &Result<Vec<u8>, Error>,
+    field: crate::FileField,
+    problem: fn(&crate::FileProblem) -> bool,
+) -> bool {
+    matches!(got, Err(Error::BadParameters { field: f, problem: p }) if *f == field && problem(p))
 }
 
 // ---- Word ------------------------------------------------------------------------------
@@ -100,18 +106,28 @@ const TABLE_KEY_SIZE_AT: u64 = 28;
 )]
 fn word_l_key_is_bounded_before_it_slices_the_table_stream() {
     let doc = fixture(DOC);
-    for (what, l_key, needle) in [
-        ("u32::MAX", u32::MAX, "over the"),
+    let over: fn(&crate::FileProblem) -> bool =
+        |p| matches!(p, crate::FileProblem::OutOfRange { .. });
+    let short: fn(&crate::FileProblem) -> bool =
+        |p| matches!(p, crate::FileProblem::Truncated { .. });
+    for (what, l_key, field, problem) in [
+        ("u32::MAX", u32::MAX, crate::FileField::FibLKey, over),
         (
             "over the structure cap",
             crate::limits::ENCRYPTION_HEADER_STRUCTURE_MAX as u32 + 1,
-            "over the",
+            crate::FileField::FibLKey,
+            over,
         ),
-        ("too short for a version", 3, "too small"),
+        (
+            "too short for a version",
+            3,
+            crate::FileField::EncryptionVersionInfo,
+            short,
+        ),
     ] {
         let tampered = patch_stream(&doc, "/WordDocument", FIB_L_KEY_AT, &l_key.to_le_bytes());
         let got = decrypt_binary_office(&tampered, PASSWORD);
-        assert!(bad_parameters_naming(&got, needle), "{what}: {got:?}");
+        assert!(bad_parameters_naming(&got, field, problem), "{what}: {got:?}");
     }
     // Under the cap but past the stream: the fixture's own lKey over a table stream cut
     // to 100 bytes. The cap cannot catch this one; only the check against the stream can.
@@ -122,7 +138,7 @@ fn word_l_key_is_bounded_before_it_slices_the_table_stream() {
         PASSWORD,
     );
     assert!(
-        bad_parameters_naming(&got, "table stream holds 100"),
+        bad_parameters_naming(&got, crate::FileField::FibLKey, |p| matches!(p, crate::FileProblem::OutOfBounds { .. })),
         "{got:?}"
     );
     // Control: the fixture decrypts as it is, so the refusals above are the field's.
@@ -189,7 +205,7 @@ fn word_key_size_is_bounded_and_verified() {
         let tampered = patch_stream(&doc, "/1Table", TABLE_KEY_SIZE_AT, &bits.to_le_bytes());
         let got = decrypt_binary_office(&tampered, PASSWORD);
         assert!(
-            bad_parameters_naming(&got, "KeySize"),
+            bad_parameters_naming(&got, crate::FileField::EncryptionHeaderKeySize, |p| matches!(p, crate::FileProblem::NotInSet { .. })),
             "KeySize {bits}: {got:?}"
         );
     }
@@ -225,7 +241,7 @@ fn word_document_shorter_than_the_fib_is_refused() {
         &cfb_with(&[("/WordDocument", &not_a_fib), ("/1Table", &table)]),
         PASSWORD,
     );
-    assert!(bad_parameters_naming(&got, "wIdent"), "{got:?}");
+    assert!(bad_parameters_naming(&got, crate::FileField::FibWIdent, |p| matches!(p, crate::FileProblem::BadSignature)), "{got:?}");
 }
 
 /// Office 97/2000 RC4 end to end, on a container built with a test-side writer over the
@@ -358,14 +374,14 @@ fn excel_record_length_past_the_stream_is_refused() {
     overshoot.extend_from_slice(&0x4000u16.to_le_bytes()); // claims 16 KiB, has none
     let got = decrypt_binary_office(&cfb_with(&[("/Workbook", &overshoot)]), PASSWORD);
     assert!(
-        bad_parameters_naming(&got, "past the end of the stream"),
+        bad_parameters_naming(&got, crate::FileField::BiffRecord, |p| matches!(p, crate::FileProblem::Unreadable { .. })),
         "{got:?}"
     );
 
     let mut cut = biff(&[(BOF, &BOF_BODY), (FILEPASS, &filepass)]);
     cut.extend_from_slice(&[0xC1]); // one byte of the next record id
     let got = decrypt_binary_office(&cfb_with(&[("/Workbook", &cut)]), PASSWORD);
-    assert!(bad_parameters_naming(&got, "no readable header"), "{got:?}");
+    assert!(bad_parameters_naming(&got, crate::FileField::BiffRecord, |p| matches!(p, crate::FileProblem::Unreadable { .. })), "{got:?}");
 
     // A FILEPASS whose own body is cut short: detection still says "encrypted", but a
     // decrypt needs the body and refuses.
@@ -374,7 +390,7 @@ fn excel_record_length_past_the_stream_is_refused() {
     short.extend_from_slice(&200u16.to_le_bytes());
     let got = decrypt_binary_office(&cfb_with(&[("/Workbook", &short)]), PASSWORD);
     assert!(
-        bad_parameters_naming(&got, "past the end of the stream"),
+        bad_parameters_naming(&got, crate::FileField::BiffRecord, |p| matches!(p, crate::FileProblem::Unreadable { .. })),
         "{got:?}"
     );
 }
@@ -405,7 +421,7 @@ fn excel_filepass_out_of_order_is_refused_and_absence_is_not_encrypted() {
     let out_of_order = biff(&[(BOF, &BOF_BODY), (MMS, &[0, 0]), (FILEPASS, &filepass)]);
     let got = decrypt_binary_office(&cfb_with(&[("/Workbook", &out_of_order)]), PASSWORD);
     assert!(
-        bad_parameters_naming(&got, "FILEPASS follows record 0x00c1"),
+        bad_parameters_naming(&got, crate::FileField::Filepass, |p| matches!(p, crate::FileProblem::OutOfOrder { after_record: 0x00C1 })),
         "{got:?}"
     );
 
@@ -421,7 +437,7 @@ fn excel_filepass_out_of_order_is_refused_and_absence_is_not_encrypted() {
 
     let not_bof = biff(&[(MMS, &[0, 0]), (FILEPASS, &filepass)]);
     let got = decrypt_binary_office(&cfb_with(&[("/Workbook", &not_bof)]), PASSWORD);
-    assert!(bad_parameters_naming(&got, "open with BOF"), "{got:?}");
+    assert!(bad_parameters_naming(&got, crate::FileField::WorkbookBof, |p| matches!(p, crate::FileProblem::Missing)), "{got:?}");
 }
 
 /// The FILEPASS body's own discriminators: an `wEncryptionType` that is neither scheme,
@@ -449,7 +465,7 @@ fn excel_filepass_shapes_are_refused_by_name() {
             PASSWORD,
         );
         assert!(
-            matches!(got, Err(Error::BadParameters(_))),
+            matches!(got, Err(Error::BadParameters { .. })),
             "{what}: {got:?}"
         );
     }
@@ -625,7 +641,7 @@ fn powerpoint_offsets_are_bounded_before_they_are_followed() {
         let tampered = patch_stream(&ppt, "/Current User", 16, &offset.to_le_bytes());
         let got = decrypt_binary_office(&tampered, PASSWORD);
         assert!(
-            bad_parameters_naming(&got, "no UserEditAtom"),
+            bad_parameters_naming(&got, crate::FileField::UserEditAtom, |p| matches!(p, crate::FileProblem::Unreadable { .. })),
             "{what}: {got:?}"
         );
     }
@@ -634,7 +650,7 @@ fn powerpoint_offsets_are_bounded_before_they_are_followed() {
     let tampered = patch_stream(&ppt, PPT_DOC, o.edit_at + 8 + 12, &0u32.to_le_bytes());
     let got = decrypt_binary_office(&tampered, PASSWORD);
     assert!(
-        bad_parameters_naming(&got, "no readable PersistDirectoryAtom"),
+        bad_parameters_naming(&got, crate::FileField::PersistDirectory, |p| matches!(p, crate::FileProblem::Unreadable { .. })),
         "{got:?}"
     );
 
@@ -642,7 +658,7 @@ fn powerpoint_offsets_are_bounded_before_they_are_followed() {
     let tampered = patch_stream(&ppt, PPT_DOC, o.directory_at + 4, &u32::MAX.to_le_bytes());
     let got = decrypt_binary_office(&tampered, PASSWORD);
     assert!(
-        bad_parameters_naming(&got, "no readable PersistDirectoryAtom"),
+        bad_parameters_naming(&got, crate::FileField::PersistDirectory, |p| matches!(p, crate::FileProblem::Unreadable { .. })),
         "{got:?}"
     );
 
@@ -651,7 +667,7 @@ fn powerpoint_offsets_are_bounded_before_they_are_followed() {
     let tampered = patch_stream(&ppt, PPT_DOC, o.directory_at + 8, &1u32.to_le_bytes());
     let got = decrypt_binary_office(&tampered, PASSWORD);
     assert!(
-        bad_parameters_naming(&got, "no readable PersistDirectoryAtom"),
+        bad_parameters_naming(&got, crate::FileField::PersistDirectory, |p| matches!(p, crate::FileProblem::Unreadable { .. })),
         "{got:?}"
     );
 
@@ -661,7 +677,7 @@ fn powerpoint_offsets_are_bounded_before_they_are_followed() {
         let tampered = patch_stream(&ppt, PPT_DOC, o.first_offset_at, &offset.to_le_bytes());
         let got = decrypt_binary_office(&tampered, PASSWORD);
         assert!(
-            bad_parameters_naming(&got, "at or beyond the persist directory"),
+            bad_parameters_naming(&got, crate::FileField::PersistObject, |p| matches!(p, crate::FileProblem::OutOfRange { .. })),
             "offset {offset}: {got:?}"
         );
     }
@@ -670,7 +686,7 @@ fn powerpoint_offsets_are_bounded_before_they_are_followed() {
     let tampered = patch_stream(&ppt, PPT_DOC, o.edit_at + 8 + 0x1C, &999u32.to_le_bytes());
     let got = decrypt_binary_office(&tampered, PASSWORD);
     assert!(
-        bad_parameters_naming(&got, "not in the persist directory"),
+        bad_parameters_naming(&got, crate::FileField::EncryptSessionPersistIdRef, |p| matches!(p, crate::FileProblem::Unrecognized { .. })),
         "{got:?}"
     );
 
@@ -679,7 +695,7 @@ fn powerpoint_offsets_are_bounded_before_they_are_followed() {
     let tampered = patch_stream(&ppt, PPT_DOC, o.edit_at + 8 + 0x1C, &1u32.to_le_bytes());
     let got = decrypt_binary_office(&tampered, PASSWORD);
     assert!(
-        bad_parameters_naming(&got, "no CryptSession10Container"),
+        bad_parameters_naming(&got, crate::FileField::CryptSession10Container, |p| matches!(p, crate::FileProblem::Unreadable { .. })),
         "{got:?}"
     );
 }
@@ -697,7 +713,7 @@ fn powerpoint_user_edit_shapes_decide_by_name() {
     let chained = patch_stream(&ppt, PPT_DOC, o.edit_at + 8 + 8, &1u32.to_le_bytes());
     let got = decrypt_binary_office(&chained, PASSWORD);
     assert!(
-        bad_parameters_naming(&got, "exactly one user edit"),
+        bad_parameters_naming(&got, crate::FileField::OffsetLastEdit, |p| matches!(p, crate::FileProblem::NotRequiredValue { .. })),
         "{got:?}"
     );
 
@@ -709,7 +725,7 @@ fn powerpoint_user_edit_shapes_decide_by_name() {
 
     let odd = patch_stream(&ppt, PPT_DOC, o.edit_at + 4, &0x30u32.to_le_bytes());
     let got = decrypt_binary_office(&odd, PASSWORD);
-    assert!(bad_parameters_naming(&got, "no UserEditAtom"), "{got:?}");
+    assert!(bad_parameters_naming(&got, crate::FileField::UserEditAtom, |p| matches!(p, crate::FileProblem::Unreadable { .. })), "{got:?}");
 }
 
 /// The header inside the container is parsed with the same bounds as Word's: KeySize 0
@@ -729,7 +745,7 @@ fn powerpoint_key_size_is_bounded_and_verified() {
     ));
     let off_grid = patch_stream(&ppt, PPT_DOC, o.key_size_at, &200u32.to_le_bytes());
     let got = decrypt_binary_office(&off_grid, PASSWORD);
-    assert!(bad_parameters_naming(&got, "KeySize"), "{got:?}");
+    assert!(bad_parameters_naming(&got, crate::FileField::EncryptionHeaderKeySize, |p| matches!(p, crate::FileProblem::NotInSet { .. })), "{got:?}");
 }
 
 /// A container that is a CFB but none of the three formats, and one that is not a CFB.
@@ -853,8 +869,12 @@ mod encrypted_summary_input {
         decrypt_stream(&assemble(streams, array_plain, prefix), &schedule())
     }
 
-    fn bad_naming<T: std::fmt::Debug>(got: &Result<T, Error>, needle: &str) -> bool {
-        matches!(got, Err(Error::BadParameters(m)) if m.contains(needle))
+    fn bad_naming<T: std::fmt::Debug>(
+        got: &Result<T, Error>,
+        field: crate::FileField,
+        problem: fn(&crate::FileProblem) -> bool,
+    ) -> bool {
+        matches!(got, Err(Error::BadParameters { field: f, problem: p }) if *f == field && problem(p))
     }
 
     #[test]
@@ -869,7 +889,7 @@ mod encrypted_summary_input {
     fn the_prefix_and_the_array_must_lie_inside_the_stream() {
         let s = schedule();
         let got = decrypt_stream(&[0u8; 7], &s);
-        assert!(bad_naming(&got, "alone take 8"), "{got:?}");
+        assert!(bad_naming(&got, crate::FileField::SummaryStream, |p| matches!(p, crate::FileProblem::Truncated { .. })), "{got:?}");
 
         let arr = array(2, &office_shape());
         let end = 8 + (SI.len() + DSI.len()) as u32;
@@ -879,16 +899,16 @@ mod encrypted_summary_input {
             &arr,
             Some([end, arr.len() as u32 + 1]),
         );
-        assert!(bad_naming(&got, "does not lie between"), "{got:?}");
+        assert!(bad_naming(&got, crate::FileField::SummaryDescriptorArray, |p| matches!(p, crate::FileProblem::OutOfBounds { .. })), "{got:?}");
         // Inside the prefix.
         let got = run(&[(SI, 0), (DSI, 1)], &arr, Some([4, arr.len() as u32]));
-        assert!(bad_naming(&got, "does not lie between"), "{got:?}");
+        assert!(bad_naming(&got, crate::FileField::SummaryDescriptorArray, |p| matches!(p, crate::FileProblem::OutOfBounds { .. })), "{got:?}");
         // Wrapping.
         let got = run(&[(SI, 0), (DSI, 1)], &arr, Some([u32::MAX, u32::MAX]));
-        assert!(bad_naming(&got, "does not lie between"), "{got:?}");
+        assert!(bad_naming(&got, crate::FileField::SummaryDescriptorArray, |p| matches!(p, crate::FileProblem::OutOfBounds { .. })), "{got:?}");
         // Too small for its count.
         let got = run(&[(SI, 0), (DSI, 1)], &arr, Some([end, 3]));
-        assert!(bad_naming(&got, "its count alone"), "{got:?}");
+        assert!(bad_naming(&got, crate::FileField::SummaryDescriptorArray, |p| matches!(p, crate::FileProblem::Truncated { .. })), "{got:?}");
     }
 
     #[test]
@@ -896,11 +916,11 @@ mod encrypted_summary_input {
         // A count the array could hold at its smallest descriptors, but these are not the
         // smallest: the third runs off the end, and is named.
         let got = run(&[(SI, 0), (DSI, 1)], &array(3, &office_shape()), None);
-        assert!(bad_naming(&got, "descriptor 2 is truncated"), "{got:?}");
+        assert!(bad_naming(&got, crate::FileField::SummaryDescriptor, |p| matches!(p, crate::FileProblem::Truncated { .. })), "{got:?}");
         // One it could not hold however short the names: refused before the loop.
         let got = run(&[(SI, 0), (DSI, 1)], &array(1_000, &office_shape()), None);
         assert!(
-            bad_naming(&got, "EncryptedStreamDescriptorCount is 1000"),
+            bad_naming(&got, crate::FileField::SummaryDescriptorCount, |p| matches!(p, crate::FileProblem::OutOfRange { got: 1000, .. })),
             "{got:?}"
         );
         let got = run(
@@ -909,7 +929,7 @@ mod encrypted_summary_input {
             None,
         );
         assert!(
-            bad_naming(&got, "EncryptedStreamDescriptorCount"),
+            bad_naming(&got, crate::FileField::SummaryDescriptorCount, |p| matches!(p, crate::FileProblem::OutOfRange { .. })),
             "{got:?}"
         );
     }
@@ -920,7 +940,7 @@ mod encrypted_summary_input {
         arr[4 + 10] = 200; // the first NameSize, past the array
         let got = run(&[(SI, 0), (DSI, 1)], &arr, None);
         assert!(
-            bad_naming(&got, "runs past the descriptor array"),
+            bad_naming(&got, crate::FileField::SummaryStreamName, |p| matches!(p, crate::FileProblem::OutOfBounds { .. })),
             "{got:?}"
         );
 
@@ -928,7 +948,7 @@ mod encrypted_summary_input {
         let nul = 4 + 16 + 2 * "\u{5}SummaryInformation".encode_utf16().count();
         arr[nul] = b'x';
         let got = run(&[(SI, 0), (DSI, 1)], &arr, None);
-        assert!(bad_naming(&got, "not NUL-terminated"), "{got:?}");
+        assert!(bad_naming(&got, crate::FileField::SummaryStreamName, |p| matches!(p, crate::FileProblem::Unterminated)), "{got:?}");
     }
 
     #[test]
@@ -955,13 +975,13 @@ mod encrypted_summary_input {
         let mut descs = office_shape();
         descs[1].name = "\u{5}SummaryInformation";
         let got = run(&[(SI, 0), (DSI, 1)], &array(2, &descs), None);
-        assert!(bad_naming(&got, "already named"), "{got:?}");
+        assert!(bad_naming(&got, crate::FileField::SummaryDescriptor, |p| matches!(p, crate::FileProblem::Duplicate)), "{got:?}");
 
         let mut descs = office_shape();
         descs[1].size += 1; // into the descriptor array
         let got = run(&[(SI, 0), (DSI, 1)], &array(2, &descs), None);
         assert!(
-            bad_naming(&got, "does not lie between the prefix"),
+            bad_naming(&got, crate::FileField::SummaryStreamExtent, |p| matches!(p, crate::FileProblem::OutOfBounds { .. })),
             "{got:?}"
         );
 
@@ -969,14 +989,14 @@ mod encrypted_summary_input {
         descs[0].offset = 0; // over the prefix
         let got = run(&[(SI, 0), (DSI, 1)], &array(2, &descs), None);
         assert!(
-            bad_naming(&got, "does not lie between the prefix"),
+            bad_naming(&got, crate::FileField::SummaryStreamExtent, |p| matches!(p, crate::FileProblem::OutOfBounds { .. })),
             "{got:?}"
         );
 
         let mut descs = office_shape();
         descs[1].offset -= 1; // one byte into the first
         let got = run(&[(SI, 0), (DSI, 1)], &array(2, &descs), None);
-        assert!(bad_naming(&got, "overlaps"), "{got:?}");
+        assert!(bad_naming(&got, crate::FileField::SummaryStreamExtent, |p| matches!(p, crate::FileProblem::Overlaps)), "{got:?}");
     }
 
     /// Each stream is read under its descriptor's block, not under the step-2 text's 0:
@@ -1063,8 +1083,12 @@ mod pictures_input {
         blip(0xF01E, 0x6E0, &[UID, &[0xFF], PNG_DATA], None)
     }
 
-    fn bad_naming(got: &Result<(), Error>, needle: &str) -> bool {
-        matches!(got, Err(Error::BadParameters(m)) if m.contains(needle))
+    fn bad_naming(
+        got: &Result<(), Error>,
+        field: crate::FileField,
+        problem: fn(&crate::FileProblem) -> bool,
+    ) -> bool {
+        matches!(got, Err(Error::BadParameters { field: f, problem: p }) if *f == field && problem(p))
     }
 
     #[test]
@@ -1089,15 +1113,15 @@ mod pictures_input {
         let mut stream = png();
         stream.extend_from_slice(&[0; 5]);
         let got = decrypt_pictures(&schedule(), &mut stream);
-        assert!(bad_naming(&got, "a record header takes 8"), "{got:?}");
+        assert!(bad_naming(&got, crate::FileField::PicturesRecord, |p| matches!(p, crate::FileProblem::Truncated { .. })), "{got:?}");
 
         let mut stream = blip(0xF01E, 0x6E0, &[UID, &[0xFF], PNG_DATA], Some(1_000));
         let got = decrypt_pictures(&schedule(), &mut stream);
-        assert!(bad_naming(&got, "declares 1000 bytes"), "{got:?}");
+        assert!(bad_naming(&got, crate::FileField::PicturesRecord, |p| matches!(p, crate::FileProblem::OutOfBounds { len: 1000, .. })), "{got:?}");
 
         let mut stream = blip(0xF01E, 0x6E0, &[&UID[..10]], None);
         let got = decrypt_pictures(&schedule(), &mut stream);
-        assert!(bad_naming(&got, "shorter than its fixed fields"), "{got:?}");
+        assert!(bad_naming(&got, crate::FileField::PicturesRecord, |p| matches!(p, crate::FileProblem::Truncated { .. })), "{got:?}");
     }
 
     #[test]
@@ -1118,12 +1142,12 @@ mod pictures_input {
 
         let mut stream = blip(0x1234, 0, &[UID], None);
         let got = decrypt_pictures(&schedule(), &mut stream);
-        assert!(bad_naming(&got, "neither a blip"), "{got:?}");
+        assert!(bad_naming(&got, crate::FileField::PicturesRecord, |p| matches!(p, crate::FileProblem::NotInSet { .. })), "{got:?}");
 
         // A PNG with a JPEG's instance.
         let mut stream = blip(0xF01E, 0x46A, &[UID, &[0xFF]], None);
         let got = decrypt_pictures(&schedule(), &mut stream);
-        assert!(bad_naming(&got, "does not define for it"), "{got:?}");
+        assert!(bad_naming(&got, crate::FileField::PicturesRecord, |p| matches!(p, crate::FileProblem::Unrecognized { .. })), "{got:?}");
     }
 }
 
@@ -1177,7 +1201,7 @@ mod refused_by_name {
             crate::decrypt_binary_office(&super::fixture("excel95_plain.xls"), super::PASSWORD)
                 .map(|p| p.len());
         assert!(
-            matches!(&got, Err(Error::UnsupportedAlgorithm { name, .. }) if name.contains("BIFF5")),
+            matches!(&got, Err(Error::UnsupportedAlgorithm { name, .. }) if name.to_string().contains("BIFF5")),
             "{got:?}"
         );
     }
@@ -1206,7 +1230,7 @@ mod refused_by_name {
                 .map(|p| p.len());
             let is_refusal = matches!(
                 &got,
-                Err(Error::UnsupportedAlgorithm { name, .. }) if name.contains("Word 6.0/95")
+                Err(Error::UnsupportedAlgorithm { name, .. }) if name.to_string().contains("Word 6.0/95")
             );
             assert_eq!(is_refusal, refused, "{fixture} nFib {n_fib:#06x}: {got:?}");
         }
@@ -1247,7 +1271,7 @@ mod refused_by_name {
 
         let got = crate::decrypt_ooxml(&irm, super::PASSWORD).map(|p| p.len());
         assert!(
-            matches!(&got, Err(Error::UnsupportedAlgorithm { name, .. }) if name.contains("IRM")),
+            matches!(&got, Err(Error::UnsupportedAlgorithm { name, .. }) if name.to_string().contains("IRM")),
             "{got:?}"
         );
         // Control: the map removed, the same container is a missing EncryptionInfo.
