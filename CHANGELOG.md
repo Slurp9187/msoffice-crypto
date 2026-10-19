@@ -72,6 +72,19 @@ truncated to 32 characters: the crate's one remaining channel for text the file 
 
 Which files decrypt is unchanged, and so are the bytes the writers produce.
 
+**The four-reader gate, run on the final tree** (2026-10-19, tree `00f0a29`, clean): no
+written byte changed, but error construction did in encrypt-path files, so it was run once.
+Artifact `msoffice_crypto_encrypt_ooxml.docx`, SHA-256
+`0d9d83309587a555e1b09b072ad45aab20205cb776ca7b3c482331536d0d4cf4`:
+
+- Word 16.0 build 16.0.19127: PASS (opened, content matches; wrong password refused
+  `0x800A1520`)
+- LibreOffice 26.8.0.3: PASS (opened, content matches; wrong password asked for another)
+- msoffcrypto-tool 6.0.0: PASS (byte-identical, `dataIntegrity` HMAC verifies)
+- office-crypto 0.3: PASS (byte-identical)
+
+`GATE: PASS (4 of 4 readers ran)`.
+
 ## [0.1.0-rc.8] - 2026-10-18
 
 ### `secure-gate` moves to 0.9.0-rc.13, and the API does not move
