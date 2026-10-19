@@ -1,4 +1,4 @@
-Status: Planned (2026-10-19). Five scope points went to the owner with recommendations (§ Open points), and this plan follows the recommendations until the answers arrive. No code has landed.
+Status: Approved, in progress (2026-10-19). The owner answered all five open points as recommended (2026-10-19 UTC; § Open points).
 
 # Plan: a refusal of the file's own settings carries no text from the file
 
@@ -97,7 +97,7 @@ BadParameters { field: FileField, problem: FileProblem },
   `BadParameters`. These are made consistent: a missing attribute is
   `FileProblem::Missing`, keeping `XmlParse` for XML that does not parse.
 
-## Open points (sent to the owner 2026-10-19 UTC, with recommendations)
+## Open points (answered by the owner 2026-10-19 UTC: all five as recommended)
 
 1. The 29 invariant and plumbing sites leave `BadParameters` for
    `InvariantViolated(Invariant)`, exit 6 → 7. Recommended: yes.
