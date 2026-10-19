@@ -47,6 +47,18 @@ pub enum FileField {
     KeyDataSaltValue,
     /// `p:encryptedKey/@saltValue`, its decoded length.
     EncryptedKeySaltValue,
+    /// `keyData/@hashAlgorithm`.
+    KeyDataHashAlgorithm,
+    /// `p:encryptedKey/@hashAlgorithm`.
+    EncryptedKeyHashAlgorithm,
+    /// `keyData/@cipherAlgorithm`.
+    KeyDataCipherAlgorithm,
+    /// `p:encryptedKey/@cipherAlgorithm`.
+    EncryptedKeyCipherAlgorithm,
+    /// `keyData/@cipherChaining`.
+    KeyDataCipherChaining,
+    /// `p:encryptedKey/@cipherChaining`.
+    EncryptedKeyCipherChaining,
     /// `p:encryptedKey/@encryptedKeyValue`, its decoded length.
     EncryptedKeyValue,
     /// `p:encryptedKey/@encryptedVerifierHashInput`, its decoded length.
@@ -137,11 +149,12 @@ pub enum FileField {
     SummaryStreamExtent,
 }
 
-impl core::fmt::Display for FileField {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl FileField {
+    /// The field's spelling, as the specification writes it.
+    pub fn spelling(self) -> &'static str {
         // Exhaustive, with no `_` arm: a new field fails to compile here until it
         // is given its spelling.
-        f.write_str(match self {
+        match self {
             Self::AgileReserved => "agile EncryptionInfo Reserved",
             Self::SpinCount => "p:encryptedKey/@spinCount",
             Self::KeyDataKeyBits => "keyData/@keyBits",
@@ -154,6 +167,12 @@ impl core::fmt::Display for FileField {
             Self::EncryptedKeySaltSize => "p:encryptedKey/@saltSize",
             Self::KeyDataSaltValue => "keyData/@saltValue",
             Self::EncryptedKeySaltValue => "p:encryptedKey/@saltValue",
+            Self::KeyDataHashAlgorithm => "keyData/@hashAlgorithm",
+            Self::EncryptedKeyHashAlgorithm => "p:encryptedKey/@hashAlgorithm",
+            Self::KeyDataCipherAlgorithm => "keyData/@cipherAlgorithm",
+            Self::EncryptedKeyCipherAlgorithm => "p:encryptedKey/@cipherAlgorithm",
+            Self::KeyDataCipherChaining => "keyData/@cipherChaining",
+            Self::EncryptedKeyCipherChaining => "p:encryptedKey/@cipherChaining",
             Self::EncryptedKeyValue => "p:encryptedKey/@encryptedKeyValue",
             Self::EncryptedVerifierHashInput => "p:encryptedKey/@encryptedVerifierHashInput",
             Self::EncryptedVerifierHashValue => "p:encryptedKey/@encryptedVerifierHashValue",
@@ -193,7 +212,13 @@ impl core::fmt::Display for FileField {
             Self::SummaryDescriptor => "an EncryptedStreamDescriptor",
             Self::SummaryStreamName => "an EncryptedStreamDescriptor's stream name",
             Self::SummaryStreamExtent => "an encrypted stream's extent",
-        })
+        }
+    }
+}
+
+impl core::fmt::Display for FileField {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.spelling())
     }
 }
 

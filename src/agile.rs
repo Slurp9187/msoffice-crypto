@@ -1207,7 +1207,7 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // A file whose only key encryptors are certificate ones is encrypted to a
     // certificate holder, not to a password — a different fact from "this attribute is
     // missing", and the one the caller needs to hear. Without it the first `ok_or_else`
-    // below reports `missing spinCount`, which invites the reader to look for a
+    // below reports `spinCount` missing, which invites the reader to look for a
     // truncated file.
     if saw_certificate_encryptor && !saw_password_encryptor {
         return Err(Error::XmlParse(
@@ -1267,7 +1267,11 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // that works, on a file no writer produced. The refusal is what stops both; only the
     // thing it stops is different now. `digest_two_into` carries a `debug_assert` saying
     // so at the other end.
-    let spin_count = spin_count.ok_or_else(|| Error::XmlParse("missing spinCount".into()))?;
+    // A missing attribute is a field the file left out (#47): `BadParameters` with
+    // `Missing`, as every attribute here is, keeping `XmlParse` for XML that does not
+    // parse. Until 0.1.0-rc.9 this one was `XmlParse` and a missing `hashSize` was not.
+    let spin_count =
+        spin_count.ok_or_else(|| bad(FileField::SpinCount, FileProblem::Missing))?;
     if spin_count > limits::SPIN_COUNT_MAX {
         return Err(bad(
             FileField::SpinCount,
@@ -1283,16 +1287,12 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
 
     // `<keyData>` governs the package IVs as well as the dataIntegrity tag, so all of
     // these are required for *any* agile file, not only one that carries a tag.
-    let key_data_hash = resolve_hash(
-        key_data_hash_algorithm,
-        "keyData/@hashAlgorithm",
-        "missing keyData.hashAlgorithm",
-    )?;
+    let key_data_hash = resolve_hash(key_data_hash_algorithm, FileField::KeyDataHashAlgorithm)?;
     require_aes_cbc(
         key_data_cipher_algorithm,
         key_data_cipher_chaining,
-        "keyData/@cipherAlgorithm",
-        "keyData/@cipherChaining",
+        FileField::KeyDataCipherAlgorithm,
+        FileField::KeyDataCipherChaining,
     )?;
     // The third member of herumi's cipher tuple, asked of this element as well as of its
     // sibling (`include/crypto_util.hpp:147-153`, reached for `<keyData>` at `:329`). It
@@ -1303,12 +1303,11 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // added without the other.
     let key_data_key_bits = check_key_bits(key_data_key_bits, FileField::KeyDataKeyBits)?;
     let key_data_block_size = check_block_size(key_data_block_size, FileField::KeyDataBlockSize)?;
-    let outer_salt = inner_or_outer_salt(outer_salt, "missing keyData.saltValue")?;
+    let outer_salt = inner_or_outer_salt(outer_salt, FileField::KeyDataSaltValue)?;
     check_salt_size(
         key_data_salt_size,
         &outer_salt,
         (FileField::KeyDataSaltSize, FileField::KeyDataSaltValue),
-        "missing keyData.saltSize",
     )?;
     // `keyData/@hashSize` is the one attribute here a tag-less file may legitimately
     // omit — only the two dataIntegrity blobs are cut to it — so it stays `Option` and
@@ -1324,19 +1323,16 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // bug LibreOffice ships (`AgileEngine.cxx:99-131`, behaviour only); herumi asks them
     // per `CipherParam` (`include/crypto_util.hpp:126-167`, applied to `<keyData>` at
     // `:329` and to `<p:encryptedKey>` at `:339`), which is the shape ported here.
-    let password_hash = resolve_hash(
-        password_hash_algorithm,
-        "p:encryptedKey/@hashAlgorithm",
-        "missing encryptedKey.hashAlgorithm",
-    )?;
+    let password_hash =
+        resolve_hash(password_hash_algorithm, FileField::EncryptedKeyHashAlgorithm)?;
     require_aes_cbc(
         password_cipher_algorithm,
         password_cipher_chaining,
-        "p:encryptedKey/@cipherAlgorithm",
-        "p:encryptedKey/@cipherChaining",
+        FileField::EncryptedKeyCipherAlgorithm,
+        FileField::EncryptedKeyCipherChaining,
     )?;
     let password_hash_size = password_hash_size
-        .ok_or_else(|| Error::XmlParse("missing encryptedKey.hashSize".into()))?;
+        .ok_or_else(|| bad(FileField::EncryptedKeyHashSize, FileProblem::Missing))?;
     check_hash_size(
         password_hash_size,
         password_hash,
@@ -1344,12 +1340,11 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     )?;
     let password_block_size =
         check_block_size(password_block_size, FileField::EncryptedKeyBlockSize)?;
-    let inner_salt = inner_or_outer_salt(inner_salt, "missing encryptedKey.saltValue")?;
+    let inner_salt = inner_or_outer_salt(inner_salt, FileField::EncryptedKeySaltValue)?;
     let password_salt_size = check_salt_size(
         password_salt_size,
         &inner_salt,
         (FileField::EncryptedKeySaltSize, FileField::EncryptedKeySaltValue),
-        "missing encryptedKey.saltSize",
     )?;
 
     // `keyBits / 8` is the block-key truncation length and `password_hash`'s digest is
@@ -1381,7 +1376,7 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // file (both elements 128) opens: the cipher dispatches on the length this declares
     // (GH #13). This check is about the two elements *disagreeing*, not about the size.
     let encrypted_key_value =
-        encrypted_key_value.ok_or_else(|| Error::XmlParse("missing encryptedKeyValue".into()))?;
+        encrypted_key_value.ok_or_else(|| bad(FileField::EncryptedKeyValue, FileProblem::Missing))?;
     let session_key_len = (key_data_key_bits / 8) as usize;
     let block = key_data_block_size as usize;
     let wrapped_len = session_key_len.div_ceil(block) * block;
@@ -1403,9 +1398,9 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
         key_bits,
         encrypted_key_value,
         encrypted_verifier_hash_input: encrypted_verifier_hash_input
-            .ok_or_else(|| Error::XmlParse("missing encryptedVerifierHashInput".into()))?,
+            .ok_or_else(|| bad(FileField::EncryptedVerifierHashInput, FileProblem::Missing))?,
         encrypted_verifier_hash_value: encrypted_verifier_hash_value
-            .ok_or_else(|| Error::XmlParse("missing encryptedVerifierHashValue".into()))?,
+            .ok_or_else(|| bad(FileField::EncryptedVerifierHashValue, FileProblem::Missing))?,
         data_integrity,
         key_data_hash,
         key_data_block_size,
@@ -1425,11 +1420,10 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
 /// and internally consistent, and the user's password may be exactly right.
 fn resolve_hash(
     declared: Option<String>,
-    what: &'static str,
-    missing: &'static str,
+    field: FileField,
 ) -> Result<HashAlgorithm, Error> {
-    let name = declared.ok_or_else(|| Error::XmlParse(missing.into()))?;
-    HashAlgorithm::parse(&name).ok_or_else(|| unsupported_algorithm(what, &name))
+    let name = declared.ok_or_else(|| bad(field, FileProblem::Missing))?;
+    HashAlgorithm::parse(&name).ok_or_else(|| unsupported_algorithm(field.spelling(), &name))
 }
 
 /// One element's `cipherAlgorithm` must be `AES` and its `cipherChaining`
@@ -1454,16 +1448,16 @@ fn resolve_hash(
 fn require_aes_cbc(
     cipher: Option<String>,
     chaining: Option<String>,
-    cipher_what: &'static str,
-    chaining_what: &'static str,
+    cipher_field: FileField,
+    chaining_field: FileField,
 ) -> Result<(), Error> {
-    let cipher = cipher.ok_or_else(|| Error::XmlParse(format!("missing {cipher_what}")))?;
+    let cipher = cipher.ok_or_else(|| bad(cipher_field, FileProblem::Missing))?;
     if cipher != "AES" {
-        return Err(unsupported_algorithm(cipher_what, &cipher));
+        return Err(unsupported_algorithm(cipher_field.spelling(), &cipher));
     }
-    let chaining = chaining.ok_or_else(|| Error::XmlParse(format!("missing {chaining_what}")))?;
+    let chaining = chaining.ok_or_else(|| bad(chaining_field, FileProblem::Missing))?;
     if chaining != "ChainingModeCBC" {
-        return Err(unsupported_algorithm(chaining_what, &chaining));
+        return Err(unsupported_algorithm(chaining_field.spelling(), &chaining));
     }
     Ok(())
 }
@@ -1481,7 +1475,7 @@ fn require_aes_cbc(
 /// value is additionally paired with the named digest's length in the caller, and
 /// `<keyData>`'s with the length of `encryptedKeyValue`.
 fn check_key_bits(declared: Option<u32>, field: FileField) -> Result<u32, Error> {
-    let declared = declared.ok_or_else(|| Error::XmlParse(format!("missing {field}")))?;
+    let declared = declared.ok_or_else(|| bad(field, FileProblem::Missing))?;
     if !limits::AGILE_KEY_BITS_ALLOWED.contains(&declared) {
         return Err(bad(
             field,
@@ -1506,7 +1500,7 @@ fn check_key_bits(declared: Option<u32>, field: FileField) -> Result<u32, Error>
 /// it is a file we cannot decrypt at all. Pinning says that one frame earlier and with
 /// a message naming the attribute, which `derive_iv`'s digest-length error would not.
 fn check_block_size(declared: Option<u32>, field: FileField) -> Result<u32, Error> {
-    let declared = declared.ok_or_else(|| Error::XmlParse(format!("missing {field}")))?;
+    let declared = declared.ok_or_else(|| bad(field, FileProblem::Missing))?;
     if declared as usize != AES_BLOCK_LEN {
         return Err(bad(
             field,
@@ -1566,9 +1560,8 @@ fn check_salt_size(
     declared: Option<u32>,
     salt: &[u8],
     (field, value_field): (FileField, FileField),
-    missing: &'static str,
 ) -> Result<u32, Error> {
-    let declared = declared.ok_or_else(|| Error::XmlParse(missing.into()))?;
+    let declared = declared.ok_or_else(|| bad(field, FileProblem::Missing))?;
     // Two rules, two refusals: the range first, then the equality with saltValue.
     if !limits::AGILE_SALT_SIZE.contains(&declared) {
         return Err(bad(
@@ -1596,8 +1589,8 @@ fn check_salt_size(
 
 /// A required `saltValue`. Named for the two fields it produces so neither call site
 /// reads as the other's.
-fn inner_or_outer_salt(declared: Option<Vec<u8>>, missing: &'static str) -> Result<Vec<u8>, Error> {
-    declared.ok_or_else(|| Error::XmlParse(missing.into()))
+fn inner_or_outer_salt(declared: Option<Vec<u8>>, field: FileField) -> Result<Vec<u8>, Error> {
+    declared.ok_or_else(|| bad(field, FileProblem::Missing))
 }
 
 // The three helpers below read attribute values the same way `classify` does, and the
@@ -2074,12 +2067,23 @@ mod tests {
             );
         }
 
-        // Absent is a parse error, not a silent "probably AES".
-        for (kd, ek) in [
-            (key_data(&[("cipherAlgorithm", None)]), good_enc_key()),
-            (good_key_data(), enc_key(&[("cipherAlgorithm", None)])),
+        // Absent is refused as missing, not a silent "probably AES".
+        for (kd, ek, field) in [
+            (
+                key_data(&[("cipherAlgorithm", None)]),
+                good_enc_key(),
+                FileField::KeyDataCipherAlgorithm,
+            ),
+            (
+                good_key_data(),
+                enc_key(&[("cipherAlgorithm", None)]),
+                FileField::EncryptedKeyCipherAlgorithm,
+            ),
         ] {
-            assert!(matches!(parse_err(&kd, &ek), Error::XmlParse(_)));
+            assert!(matches!(
+                parse_err(&kd, &ek),
+                Error::BadParameters { field: f, problem: FileProblem::Missing } if f == field
+            ));
         }
     }
 
@@ -2120,13 +2124,24 @@ mod tests {
             );
         }
 
-        // Absent is a parse error, not a silent "probably CBC" — the guess would be
+        // Absent is refused as missing, not a silent "probably CBC" — the guess would be
         // unobservable when wrong, which is the whole argument for making it.
-        for (kd, ek) in [
-            (key_data(&[("cipherChaining", None)]), good_enc_key()),
-            (good_key_data(), enc_key(&[("cipherChaining", None)])),
+        for (kd, ek, field) in [
+            (
+                key_data(&[("cipherChaining", None)]),
+                good_enc_key(),
+                FileField::KeyDataCipherChaining,
+            ),
+            (
+                good_key_data(),
+                enc_key(&[("cipherChaining", None)]),
+                FileField::EncryptedKeyCipherChaining,
+            ),
         ] {
-            assert!(matches!(parse_err(&kd, &ek), Error::XmlParse(_)));
+            assert!(matches!(
+                parse_err(&kd, &ek),
+                Error::BadParameters { field: f, problem: FileProblem::Missing } if f == field
+            ));
         }
 
         // The control: `ChainingModeCBC` on both, everything else identical, parses.
@@ -2389,10 +2404,13 @@ mod tests {
         // agrees with it: the control.
         assert!(parse_with(&good_key_data(), &good_enc_key()).is_ok());
 
-        // Absent is a parse error, not a silent "probably the same as its sibling".
+        // Absent is refused as missing, not a silent "probably the same as its sibling".
         assert!(matches!(
             parse_err(&key_data(&[("keyBits", None)]), &good_enc_key()),
-            Error::XmlParse(_)
+            Error::BadParameters {
+                field: FileField::KeyDataKeyBits,
+                problem: FileProblem::Missing,
+            }
         ));
 
         // Outside the ECMA-376 set, refused by name on this element too.
