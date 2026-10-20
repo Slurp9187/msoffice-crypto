@@ -40,6 +40,7 @@ use std::io::Read;
 
 pub(crate) use crate::cfb_reader::read_full;
 use crate::error::Error;
+use crate::file_params::Invariant;
 use crate::hash::{derive_iv, HashAlgorithm};
 
 /// [MS-OFFCRYPTO] §2.3.4.15 — the agile package segment length.
@@ -100,13 +101,9 @@ impl<'a> Segmenter<'a> {
         salt: &'a [u8],
         block_size: usize,
     ) -> Result<Self, Error> {
+        // The parser pins blockSize to 16, under every digest's length (#47).
         if block_size > hash.digest_len() {
-            return Err(Error::BadParameters(format!(
-                "keyData blockSize {} exceeds the {} digest length {}",
-                block_size,
-                hash.name(),
-                hash.digest_len()
-            )));
+            return Err(Error::InvariantViolated(Invariant::BlockSizeOverDigest));
         }
         Ok(Self {
             salt,
@@ -138,10 +135,9 @@ impl<'a> Segmenter<'a> {
         if len == 0 {
             return Ok(None);
         }
+        // 2^32 segments of 4096 bytes is 16 TiB: past any stream a CFB holds (#47).
         let Some(index) = self.next_index else {
-            return Err(Error::BadParameters(format!(
-                "the payload needs more than 2^32 {SEGMENT_LEN}-byte segments; the IV's                  LE32 index would wrap"
-            )));
+            return Err(Error::InvariantViolated(Invariant::CounterOverflow));
         };
         self.next_index = index.checked_add(1);
 

@@ -56,6 +56,7 @@
 //! expression from it is reproduced here).
 
 use crate::error::Error;
+use crate::file_params::{bad, wide, Bound, FileField, FileProblem, Invariant};
 use crate::hash::{derive_iv, HashAlgorithm, HmacState};
 use crate::sensitive::{IntegrityKey, IntegrityTag, SessionKey};
 use secure_gate::{ConstantTimeEq, RevealSecret};
@@ -335,17 +336,23 @@ impl IntegrityCheck {
         // the algorithm before trusting it, exactly as herumi does when parsing
         // (`include/crypto_util.hpp:156-166`).
         if hash_size != hash.digest_len() {
-            return Err(Error::BadParameters(format!(
-                "keyData hashSize {} does not match hashAlgorithm {} (expected {})",
-                hash_size,
-                hash.name(),
-                hash.digest_len()
-            )));
+            return Err(bad(
+                FileField::KeyDataHashSize,
+                FileProblem::DigestMismatch {
+                    got: wide(hash_size),
+                    hash,
+                },
+            ));
         }
         if block_size != AES_BLOCK_LEN {
-            return Err(Error::BadParameters(format!(
-                "keyData blockSize {block_size} is not the AES block size ({AES_BLOCK_LEN})"
-            )));
+            return Err(bad(
+                FileField::KeyDataBlockSize,
+                FileProblem::NotRequiredValue {
+                    got: wide(block_size),
+                    required: wide(AES_BLOCK_LEN),
+                    bound: Bound::Cipher,
+                },
+            ));
         }
 
         let iv1 = derive_iv(
@@ -366,14 +373,14 @@ impl IntegrityCheck {
             material.encrypted_hmac_key,
             &iv1,
             hash_size,
-            "encryptedHmacKey",
+            FileField::EncryptedHmacKey,
         )?);
         let expected = IntegrityTag::new(unwrap_blob(
             session_key,
             material.encrypted_hmac_value,
             &iv2,
             hash_size,
-            "encryptedHmacValue",
+            FileField::EncryptedHmacValue,
         )?);
 
         Ok(Self {
@@ -432,15 +439,19 @@ fn unwrap_blob(
     blob: &[u8],
     iv: &[u8],
     hash_size: usize,
-    what: &'static str,
+    field: FileField,
 ) -> Result<Vec<u8>, Error> {
+    // A whole number of AES blocks, at least `hashSize` long: the length `hashSize`
+    // padded up to the block is the one it must have.
     if blob.len() < hash_size || blob.len() % AES_BLOCK_LEN != 0 {
-        return Err(Error::BadParameters(format!(
-            "dataIntegrity {what} is {} bytes; expected a non-zero multiple of {} at least {} long",
-            blob.len(),
-            AES_BLOCK_LEN,
-            hash_size
-        )));
+        return Err(bad(
+            field,
+            FileProblem::Disagrees {
+                got: wide(blob.len()),
+                expected: wide(hash_size.div_ceil(AES_BLOCK_LEN) * AES_BLOCK_LEN),
+                with: FileField::KeyDataHashSize,
+            },
+        ));
     }
     let mut plain = session_key.with_secret(|k| crate::agile::aes_cbc_decrypt(blob, k, iv))?;
     plain.truncate(hash_size);
@@ -561,11 +572,10 @@ pub(crate) fn seal(
     hmac_key: &IntegrityKey,
     mac: HmacState,
 ) -> Result<IntegrityBlobs, Error> {
-    // The same pin `verify` applies: this crate writes AES-CBC and nothing else.
+    // The same pin `verify` applies: this crate writes AES-CBC and nothing else. The
+    // encrypt side chose the block size itself, so a mismatch is ours (#47).
     if block_size != AES_BLOCK_LEN {
-        return Err(Error::BadParameters(format!(
-            "keyData blockSize {block_size} is not the AES block size ({AES_BLOCK_LEN})"
-        )));
+        return Err(Error::InvariantViolated(Invariant::AesIvLength));
     }
     let iv1 = derive_iv(hash, key_data_salt, &BLOCK_DATA_INTEGRITY_KEY, block_size)?;
     let iv2 = derive_iv(hash, key_data_salt, &BLOCK_DATA_INTEGRITY_VALUE, block_size)?;
@@ -579,11 +589,7 @@ pub(crate) fn seal(
     let padded_len = |len: usize| -> Result<usize, Error> {
         len.div_ceil(block_size)
             .checked_mul(block_size)
-            .ok_or_else(|| {
-                Error::BadParameters(format!(
-                    "padding {len} bytes up to a multiple of {block_size} overflows"
-                ))
-            })
+            .ok_or(Error::InvariantViolated(Invariant::IntegrityPadding))
     };
 
     // Pad INTO a wrapped buffer allocated at the final length -- never draw short and
@@ -748,7 +754,7 @@ mod tests {
                     m.encrypted_hmac_key,
                     &iv1,
                     m.hash_size as usize,
-                    "key",
+                    FileField::EncryptedHmacKey,
                 )
                 .expect("Office's key blob unwraps"),
             );
@@ -1003,7 +1009,10 @@ mod tests {
         };
         assert!(matches!(
             verify(&sk, &material, b""),
-            Err(Error::BadParameters(_))
+            Err(Error::BadParameters {
+                field: crate::FileField::KeyDataHashSize,
+                problem: crate::FileProblem::DigestMismatch { got: 32, .. },
+            })
         ));
     }
 
@@ -1026,7 +1035,11 @@ mod tests {
             };
             assert!(matches!(
                 verify(&sk, &material, b""),
-                Err(Error::BadParameters(_))
+                Err(Error::BadParameters {
+                    field: crate::FileField::EncryptedHmacKey
+                        | crate::FileField::EncryptedHmacValue,
+                    problem: crate::FileProblem::Disagrees { .. },
+                })
             ));
         }
     }
@@ -1044,7 +1057,14 @@ mod tests {
         };
         assert!(matches!(
             verify(&sk, &material, b""),
-            Err(Error::BadParameters(_))
+            Err(Error::BadParameters {
+                field: crate::FileField::KeyDataBlockSize,
+                problem: crate::FileProblem::NotRequiredValue {
+                    got: 32,
+                    required: 16,
+                    ..
+                },
+            })
         ));
     }
 

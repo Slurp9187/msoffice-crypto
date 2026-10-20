@@ -38,6 +38,9 @@
 //! stream, then compare) and relies on the caller discarding it.
 use crate::classify::local_name;
 use crate::error::Error;
+use crate::file_params::{
+    algorithm_name, bad, wide, AllowedSet, Bound, FileField, FileProblem, Invariant,
+};
 use crate::hash::{fit_iv, HashAlgorithm};
 use crate::integrity::{IntegrityCheck, IntegrityMaterial, IntegrityOutcome, IntegrityPolicy};
 use crate::limits;
@@ -234,11 +237,9 @@ impl AgileParams {
         &'a self,
         di: &'a DataIntegrity,
     ) -> Result<IntegrityMaterial<'a>, Error> {
-        let hash_size = self.key_data_hash_size.ok_or_else(|| {
-            Error::BadParameters(
-                "<dataIntegrity> is present but keyData/@hashSize is missing".into(),
-            )
-        })?;
+        let hash_size = self
+            .key_data_hash_size
+            .ok_or_else(|| bad(FileField::KeyDataHashSize, FileProblem::Missing))?;
         Ok(IntegrityMaterial {
             key_data_salt: &self.outer_salt,
             block_size: self.key_data_block_size,
@@ -475,20 +476,28 @@ pub(crate) fn verify_password(params: &AgileParams, h_final: &PasswordDigest) ->
     // Checked on the *ciphertext*, before either blob is decrypted: AES-CBC preserves
     // length, so this is the same test one frame earlier and it bounds the work a
     // hostile file can buy. An under-length blob used to panic on the slice instead.
-    if params.encrypted_verifier_hash_input.len() != input_len
-        || params.encrypted_verifier_hash_value.len() != value_len
-    {
-        return Err(Error::BadParameters(format!(
-            "encryptedVerifierHashInput/Value are {}/{} bytes; {} with saltSize {} and \
-             blockSize {} requires {}/{}",
-            params.encrypted_verifier_hash_input.len(),
-            params.encrypted_verifier_hash_value.len(),
-            hash.name(),
-            params.password_salt_size,
-            block_size,
-            input_len,
-            value_len
-        )));
+    // The input blob is `saltSize` rounded up to the block; the value blob is the
+    // digest of `hashAlgorithm` (whose length `hashSize` must equal) rounded up.
+    if params.encrypted_verifier_hash_input.len() != input_len {
+        return Err(bad(
+            FileField::EncryptedVerifierHashInput,
+            FileProblem::Disagrees {
+                got: wide(params.encrypted_verifier_hash_input.len()),
+                expected: wide(input_len),
+                with: FileField::EncryptedKeySaltSize,
+            },
+        ));
+    }
+    if params.encrypted_verifier_hash_value.len() != value_len {
+        let _ = hash;
+        return Err(bad(
+            FileField::EncryptedVerifierHashValue,
+            FileProblem::Disagrees {
+                got: wide(params.encrypted_verifier_hash_value.len()),
+                expected: wide(value_len),
+                with: FileField::EncryptedKeyHashSize,
+            },
+        ));
     }
 
     let verifier_input_key =
@@ -602,11 +611,14 @@ fn decrypt_package_to<S: Read + Seek, W: Write>(
     let key_len = (params.key_data_key_bits / 8) as usize;
     let actual = encryption_key.with_secret(|k| k.len());
     if actual != key_len {
-        return Err(Error::BadParameters(format!(
-            "keyData/@keyBits is {} ({key_len} bytes) but the session key recovered \
-             from encryptedKeyValue is {actual} bytes",
-            params.key_data_key_bits
-        )));
+        return Err(bad(
+            FileField::SessionKey,
+            FileProblem::Disagrees {
+                got: wide(actual),
+                expected: wide(key_len),
+                with: FileField::KeyDataKeyBits,
+            },
+        ));
     }
 
     let declared_size = u64::from_le_bytes(prefix);
@@ -629,10 +641,15 @@ fn decrypt_package_to<S: Read + Seek, W: Write>(
     // Compared as `u64`, before the `as usize` cast: on a 32-bit target that cast
     // truncates, and a declared size of `2^32 + 16` would otherwise pass as 16.
     if declared_size > data_len {
-        return Err(Error::BadParameters(format!(
-            "EncryptedPackage declares {declared_size} plaintext bytes but carries only \
-             {data_len} bytes of ciphertext"
-        )));
+        return Err(bad(
+            FileField::EncryptedPackageSize,
+            FileProblem::OutOfRange {
+                got: declared_size,
+                min: 0,
+                max: data_len,
+                bound: Bound::Spec,
+            },
+        ));
     }
 
     let mut mac = check.map(IntegrityCheck::start);
@@ -799,29 +816,28 @@ pub(crate) fn derive_block_key(
 /// `hashAlgorithm` can produce", shared by the parse-time check and `derive_block_key`
 /// so the two cannot drift apart.
 fn unusable_key_bits(key_bits: u32, hash: HashAlgorithm) -> Error {
-    Error::BadParameters(format!(
-        "p:encryptedKey/@keyBits is {} ({} bytes) but hashAlgorithm {} yields only {}; \
-         no writer produces this combination and this crate refuses to pad the digest",
-        key_bits,
-        key_bits / 8,
-        hash.name(),
-        hash.digest_len()
-    ))
+    // No writer produces this combination, and this crate refuses to pad the digest
+    // with 0x36 bytes as §2.3.4.11 would.
+    bad(
+        FileField::EncryptedKeyKeyBits,
+        FileProblem::DigestMismatch {
+            got: key_bits.into(),
+            hash,
+        },
+    )
 }
 
 /// Build [`Error::UnsupportedAlgorithm`] from a name the *file* chose.
 ///
-/// The name is bounded here and nowhere else: it is XML attribute text limited only by
-/// `limits::ENCRYPTION_INFO_READ_CAP`, so a 1 MiB `hashAlgorithm="AAAA…"` would otherwise
-/// land whole in an error string. 32 characters is generous — the longest legitimate
-/// value is `SHA-512` — and the cut is on a char boundary, not a byte one.
+/// The name never reaches the error (#47): it is XML attribute text limited only by
+/// `limits::ENCRYPTION_INFO_READ_CAP`. A name the specification defines is named by its
+/// [`crate::KnownAlgorithm`]; any other only by its length. Until 0.1.0-rc.9 the file's
+/// own spelling went in, truncated to 32 characters.
 fn unsupported_algorithm(what: &'static str, name: &str) -> Error {
-    const MAX_CHARS: usize = 32;
-    let mut shown: String = name.chars().take(MAX_CHARS).collect();
-    if name.chars().nth(MAX_CHARS).is_some() {
-        shown.push('…');
+    Error::UnsupportedAlgorithm {
+        what,
+        name: algorithm_name(name),
     }
-    Error::UnsupportedAlgorithm { what, name: shown }
 }
 
 /// AES-CBC decrypt with NoPadding, AES-128/192/256 by key length. `ciphertext` must be a
@@ -955,18 +971,13 @@ pub(crate) fn aes_cbc_encrypt_in_place(buf: &mut [u8], key: &[u8], iv: &[u8]) ->
 /// than a live path. A key of any length AES does not define must produce an error rather
 /// than a crash in the caller's process.
 fn check_cbc_lengths(key: &[u8], iv: &[u8]) -> Result<(), Error> {
+    // Both are screened before a key exists (keyBits against its set, blockSize pinned
+    // to 16), so reaching either refusal is a fault of ours (#47).
     if !AES_KEY_LENS.contains(&key.len()) {
-        return Err(Error::BadParameters(format!(
-            "AES-CBC takes a 16-, 24- or 32-byte key; this file's parameters produced {}",
-            key.len()
-        )));
+        return Err(Error::InvariantViolated(Invariant::AesKeyLength));
     }
     if iv.len() != AES_BLOCK_LEN {
-        return Err(Error::BadParameters(format!(
-            "AES-CBC needs a {}-byte IV; this file's parameters produced {}",
-            AES_BLOCK_LEN,
-            iv.len()
-        )));
+        return Err(Error::InvariantViolated(Invariant::AesIvLength));
     }
     Ok(())
 }
@@ -1125,10 +1136,9 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
                         // key wraps the session key, and taking the last is a guess whose
                         // only symptom is a correct password reported wrong.
                         if saw_password_encryptor {
-                            return Err(Error::BadParameters(
-                                "the EncryptionInfo carries more than one PasswordKeyEncryptor; \
-                                 [MS-OFFCRYPTO] 2.3.4.10 admits exactly one"
-                                    .into(),
+                            return Err(bad(
+                                FileField::PasswordKeyEncryptor,
+                                FileProblem::Duplicate,
                             ));
                         }
                         saw_password_encryptor = true;
@@ -1197,7 +1207,7 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // A file whose only key encryptors are certificate ones is encrypted to a
     // certificate holder, not to a password — a different fact from "this attribute is
     // missing", and the one the caller needs to hear. Without it the first `ok_or_else`
-    // below reports `missing spinCount`, which invites the reader to look for a
+    // below reports `spinCount` missing, which invites the reader to look for a
     // truncated file.
     if saw_certificate_encryptor && !saw_password_encryptor {
         return Err(Error::XmlParse(
@@ -1219,10 +1229,13 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
             encrypted_hmac_key,
             encrypted_hmac_value,
         }),
-        (true, _, _) => {
-            return Err(Error::BadParameters(
-                "<dataIntegrity> is missing encryptedHmacKey or encryptedHmacValue".into(),
-            ))
+        (true, key, _) => {
+            let field = if key.is_none() {
+                FileField::EncryptedHmacKey
+            } else {
+                FileField::EncryptedHmacValue
+            };
+            return Err(bad(field, FileProblem::Missing));
         }
     };
 
@@ -1254,28 +1267,31 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // that works, on a file no writer produced. The refusal is what stops both; only the
     // thing it stops is different now. `digest_two_into` carries a `debug_assert` saying
     // so at the other end.
-    let spin_count = spin_count.ok_or_else(|| Error::XmlParse("missing spinCount".into()))?;
+    // A missing attribute is a field the file left out (#47): `BadParameters` with
+    // `Missing`, as every attribute here is, keeping `XmlParse` for XML that does not
+    // parse. Until 0.1.0-rc.9 this one was `XmlParse` and a missing `hashSize` was not.
+    let spin_count = spin_count.ok_or_else(|| bad(FileField::SpinCount, FileProblem::Missing))?;
     if spin_count > limits::SPIN_COUNT_MAX {
-        return Err(Error::BadParameters(format!(
-            "p:encryptedKey/@spinCount is {spin_count}; [MS-OFFCRYPTO] 2.3.4.10 bounds it \
-             at {} (Office writes 100000)",
-            limits::SPIN_COUNT_MAX
-        )));
+        return Err(bad(
+            FileField::SpinCount,
+            FileProblem::OutOfRange {
+                got: spin_count.into(),
+                min: 0,
+                max: limits::SPIN_COUNT_MAX.into(),
+                bound: Bound::Spec,
+            },
+        ));
     }
-    let key_bits = check_key_bits(key_bits, "p:encryptedKey/@keyBits")?;
+    let key_bits = check_key_bits(key_bits, FileField::EncryptedKeyKeyBits)?;
 
     // `<keyData>` governs the package IVs as well as the dataIntegrity tag, so all of
     // these are required for *any* agile file, not only one that carries a tag.
-    let key_data_hash = resolve_hash(
-        key_data_hash_algorithm,
-        "keyData/@hashAlgorithm",
-        "missing keyData.hashAlgorithm",
-    )?;
+    let key_data_hash = resolve_hash(key_data_hash_algorithm, FileField::KeyDataHashAlgorithm)?;
     require_aes_cbc(
         key_data_cipher_algorithm,
         key_data_cipher_chaining,
-        "keyData/@cipherAlgorithm",
-        "keyData/@cipherChaining",
+        FileField::KeyDataCipherAlgorithm,
+        FileField::KeyDataCipherChaining,
     )?;
     // The third member of herumi's cipher tuple, asked of this element as well as of its
     // sibling (`include/crypto_util.hpp:147-153`, reached for `<keyData>` at `:329`). It
@@ -1284,14 +1300,13 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // file, while `cipherAlgorithm="RC4"` is a well-formed one this crate has not
     // implemented — but the two calls stay adjacent on both elements so neither can be
     // added without the other.
-    let key_data_key_bits = check_key_bits(key_data_key_bits, "keyData/@keyBits")?;
-    let key_data_block_size = check_block_size(key_data_block_size, "keyData/@blockSize")?;
-    let outer_salt = inner_or_outer_salt(outer_salt, "missing keyData.saltValue")?;
+    let key_data_key_bits = check_key_bits(key_data_key_bits, FileField::KeyDataKeyBits)?;
+    let key_data_block_size = check_block_size(key_data_block_size, FileField::KeyDataBlockSize)?;
+    let outer_salt = inner_or_outer_salt(outer_salt, FileField::KeyDataSaltValue)?;
     check_salt_size(
         key_data_salt_size,
         &outer_salt,
-        "keyData/@saltSize",
-        "missing keyData.saltSize",
+        (FileField::KeyDataSaltSize, FileField::KeyDataSaltValue),
     )?;
     // `keyData/@hashSize` is the one attribute here a tag-less file may legitimately
     // omit — only the two dataIntegrity blobs are cut to it — so it stays `Option` and
@@ -1299,7 +1314,7 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // against the named algorithm exactly like its `<p:encryptedKey>` twin: optional is
     // "need not be present", never "may contradict the file's own hashAlgorithm".
     if let Some(declared) = key_data_hash_size {
-        check_hash_size(declared, key_data_hash, "keyData/@hashSize")?;
+        check_hash_size(declared, key_data_hash, FileField::KeyDataHashSize)?;
     }
 
     // The same five questions, asked again of `<p:encryptedKey>` and answered from that
@@ -1309,29 +1324,31 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // `:329` and to `<p:encryptedKey>` at `:339`), which is the shape ported here.
     let password_hash = resolve_hash(
         password_hash_algorithm,
-        "p:encryptedKey/@hashAlgorithm",
-        "missing encryptedKey.hashAlgorithm",
+        FileField::EncryptedKeyHashAlgorithm,
     )?;
     require_aes_cbc(
         password_cipher_algorithm,
         password_cipher_chaining,
-        "p:encryptedKey/@cipherAlgorithm",
-        "p:encryptedKey/@cipherChaining",
+        FileField::EncryptedKeyCipherAlgorithm,
+        FileField::EncryptedKeyCipherChaining,
     )?;
     let password_hash_size = password_hash_size
-        .ok_or_else(|| Error::XmlParse("missing encryptedKey.hashSize".into()))?;
+        .ok_or_else(|| bad(FileField::EncryptedKeyHashSize, FileProblem::Missing))?;
     check_hash_size(
         password_hash_size,
         password_hash,
-        "p:encryptedKey/@hashSize",
+        FileField::EncryptedKeyHashSize,
     )?;
-    let password_block_size = check_block_size(password_block_size, "p:encryptedKey/@blockSize")?;
-    let inner_salt = inner_or_outer_salt(inner_salt, "missing encryptedKey.saltValue")?;
+    let password_block_size =
+        check_block_size(password_block_size, FileField::EncryptedKeyBlockSize)?;
+    let inner_salt = inner_or_outer_salt(inner_salt, FileField::EncryptedKeySaltValue)?;
     let password_salt_size = check_salt_size(
         password_salt_size,
         &inner_salt,
-        "p:encryptedKey/@saltSize",
-        "missing encryptedKey.saltSize",
+        (
+            FileField::EncryptedKeySaltSize,
+            FileField::EncryptedKeySaltValue,
+        ),
     )?;
 
     // `keyBits / 8` is the block-key truncation length and `password_hash`'s digest is
@@ -1362,18 +1379,20 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
     // `<dataIntegrity>` element to fail — returned rubbish under `Ok`. An honest AES-128
     // file (both elements 128) opens: the cipher dispatches on the length this declares
     // (GH #13). This check is about the two elements *disagreeing*, not about the size.
-    let encrypted_key_value =
-        encrypted_key_value.ok_or_else(|| Error::XmlParse("missing encryptedKeyValue".into()))?;
+    let encrypted_key_value = encrypted_key_value
+        .ok_or_else(|| bad(FileField::EncryptedKeyValue, FileProblem::Missing))?;
     let session_key_len = (key_data_key_bits / 8) as usize;
     let block = key_data_block_size as usize;
     let wrapped_len = session_key_len.div_ceil(block) * block;
     if encrypted_key_value.len() != wrapped_len {
-        return Err(Error::BadParameters(format!(
-            "keyData/@keyBits is {key_data_key_bits} ({session_key_len} bytes, {wrapped_len} \
-             once padded to keyData/@blockSize {key_data_block_size}) but encryptedKeyValue \
-             decodes to {} bytes; the two must agree",
-            encrypted_key_value.len()
-        )));
+        return Err(bad(
+            FileField::EncryptedKeyValue,
+            FileProblem::Disagrees {
+                got: wide(encrypted_key_value.len()),
+                expected: wide(wrapped_len),
+                with: FileField::KeyDataKeyBits,
+            },
+        ));
     }
 
     Ok(AgileParams {
@@ -1383,9 +1402,9 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
         key_bits,
         encrypted_key_value,
         encrypted_verifier_hash_input: encrypted_verifier_hash_input
-            .ok_or_else(|| Error::XmlParse("missing encryptedVerifierHashInput".into()))?,
+            .ok_or_else(|| bad(FileField::EncryptedVerifierHashInput, FileProblem::Missing))?,
         encrypted_verifier_hash_value: encrypted_verifier_hash_value
-            .ok_or_else(|| Error::XmlParse("missing encryptedVerifierHashValue".into()))?,
+            .ok_or_else(|| bad(FileField::EncryptedVerifierHashValue, FileProblem::Missing))?,
         data_integrity,
         key_data_hash,
         key_data_block_size,
@@ -1403,13 +1422,9 @@ pub(crate) fn parse_encryption_info(xml_data: &[u8]) -> Result<AgileParams, Erro
 /// The second is [`Error::UnsupportedAlgorithm`] rather than `BadParameters`
 /// precisely so it can never be confused with a wrong password: the file is well-formed
 /// and internally consistent, and the user's password may be exactly right.
-fn resolve_hash(
-    declared: Option<String>,
-    what: &'static str,
-    missing: &'static str,
-) -> Result<HashAlgorithm, Error> {
-    let name = declared.ok_or_else(|| Error::XmlParse(missing.into()))?;
-    HashAlgorithm::parse(&name).ok_or_else(|| unsupported_algorithm(what, &name))
+fn resolve_hash(declared: Option<String>, field: FileField) -> Result<HashAlgorithm, Error> {
+    let name = declared.ok_or_else(|| bad(field, FileProblem::Missing))?;
+    HashAlgorithm::parse(&name).ok_or_else(|| unsupported_algorithm(field.spelling(), &name))
 }
 
 /// One element's `cipherAlgorithm` must be `AES` and its `cipherChaining`
@@ -1434,16 +1449,16 @@ fn resolve_hash(
 fn require_aes_cbc(
     cipher: Option<String>,
     chaining: Option<String>,
-    cipher_what: &'static str,
-    chaining_what: &'static str,
+    cipher_field: FileField,
+    chaining_field: FileField,
 ) -> Result<(), Error> {
-    let cipher = cipher.ok_or_else(|| Error::XmlParse(format!("missing {cipher_what}")))?;
+    let cipher = cipher.ok_or_else(|| bad(cipher_field, FileProblem::Missing))?;
     if cipher != "AES" {
-        return Err(unsupported_algorithm(cipher_what, &cipher));
+        return Err(unsupported_algorithm(cipher_field.spelling(), &cipher));
     }
-    let chaining = chaining.ok_or_else(|| Error::XmlParse(format!("missing {chaining_what}")))?;
+    let chaining = chaining.ok_or_else(|| bad(chaining_field, FileProblem::Missing))?;
     if chaining != "ChainingModeCBC" {
-        return Err(unsupported_algorithm(chaining_what, &chaining));
+        return Err(unsupported_algorithm(chaining_field.spelling(), &chaining));
     }
     Ok(())
 }
@@ -1460,13 +1475,17 @@ fn require_aes_cbc(
 /// The bound is necessary and not sufficient on either element: `<p:encryptedKey>`'s
 /// value is additionally paired with the named digest's length in the caller, and
 /// `<keyData>`'s with the length of `encryptedKeyValue`.
-fn check_key_bits(declared: Option<u32>, what: &'static str) -> Result<u32, Error> {
-    let declared = declared.ok_or_else(|| Error::XmlParse(format!("missing {what}")))?;
+fn check_key_bits(declared: Option<u32>, field: FileField) -> Result<u32, Error> {
+    let declared = declared.ok_or_else(|| bad(field, FileProblem::Missing))?;
     if !limits::AGILE_KEY_BITS_ALLOWED.contains(&declared) {
-        return Err(Error::BadParameters(format!(
-            "{what} is {declared}; ECMA-376 defines {:?} for AES",
-            limits::AGILE_KEY_BITS_ALLOWED
-        )));
+        return Err(bad(
+            field,
+            FileProblem::NotInSet {
+                got: declared.into(),
+                allowed: AllowedSet::AesKeyBits,
+                bound: Bound::Cipher,
+            },
+        ));
     }
     Ok(declared)
 }
@@ -1481,13 +1500,17 @@ fn check_key_bits(declared: Option<u32>, what: &'static str) -> Result<u32, Erro
 /// multiple of it — so a `blockSize="4096"` file is not a file we decrypt differently,
 /// it is a file we cannot decrypt at all. Pinning says that one frame earlier and with
 /// a message naming the attribute, which `derive_iv`'s digest-length error would not.
-fn check_block_size(declared: Option<u32>, what: &'static str) -> Result<u32, Error> {
-    let declared = declared.ok_or_else(|| Error::XmlParse(format!("missing {what}")))?;
+fn check_block_size(declared: Option<u32>, field: FileField) -> Result<u32, Error> {
+    let declared = declared.ok_or_else(|| bad(field, FileProblem::Missing))?;
     if declared as usize != AES_BLOCK_LEN {
-        return Err(Error::BadParameters(format!(
-            "{what} is {declared}; this crate implements AES-CBC only, whose block size \
-             is {AES_BLOCK_LEN}"
-        )));
+        return Err(bad(
+            field,
+            FileProblem::NotRequiredValue {
+                got: declared.into(),
+                required: wide(AES_BLOCK_LEN),
+                bound: Bound::Cipher,
+            },
+        ));
     }
     Ok(declared)
 }
@@ -1505,14 +1528,15 @@ fn check_block_size(declared: Option<u32>, what: &'static str) -> Result<u32, Er
 /// point it becomes a length. That is deliberate duplication, not drift: this one is
 /// reached by every agile file, that one only by a file carrying `<dataIntegrity>`, and
 /// the value crosses a module boundary in between.
-fn check_hash_size(declared: u32, hash: HashAlgorithm, what: &'static str) -> Result<(), Error> {
+fn check_hash_size(declared: u32, hash: HashAlgorithm, field: FileField) -> Result<(), Error> {
     if declared as usize != hash.digest_len() {
-        return Err(Error::BadParameters(format!(
-            "{what} is {} but hashAlgorithm {} produces {}",
-            declared,
-            hash.name(),
-            hash.digest_len()
-        )));
+        return Err(bad(
+            field,
+            FileProblem::DigestMismatch {
+                got: declared.into(),
+                hash,
+            },
+        ));
     }
     Ok(())
 }
@@ -1536,26 +1560,38 @@ fn check_hash_size(declared: u32, hash: HashAlgorithm, what: &'static str) -> Re
 fn check_salt_size(
     declared: Option<u32>,
     salt: &[u8],
-    what: &'static str,
-    missing: &'static str,
+    (field, value_field): (FileField, FileField),
 ) -> Result<u32, Error> {
-    let declared = declared.ok_or_else(|| Error::XmlParse(missing.into()))?;
-    if !limits::AGILE_SALT_SIZE.contains(&declared) || declared as usize != salt.len() {
-        return Err(Error::BadParameters(format!(
-            "{what} is {declared} but saltValue decodes to {} bytes (the spec requires \
-             them equal, and saltSize in {}..={})",
-            salt.len(),
-            limits::AGILE_SALT_SIZE.start(),
-            limits::AGILE_SALT_SIZE.end()
-        )));
+    let declared = declared.ok_or_else(|| bad(field, FileProblem::Missing))?;
+    // Two rules, two refusals: the range first, then the equality with saltValue.
+    if !limits::AGILE_SALT_SIZE.contains(&declared) {
+        return Err(bad(
+            field,
+            FileProblem::OutOfRange {
+                got: declared.into(),
+                min: (*limits::AGILE_SALT_SIZE.start()).into(),
+                max: (*limits::AGILE_SALT_SIZE.end()).into(),
+                bound: Bound::Spec,
+            },
+        ));
+    }
+    if declared as usize != salt.len() {
+        return Err(bad(
+            field,
+            FileProblem::Disagrees {
+                got: declared.into(),
+                expected: wide(salt.len()),
+                with: value_field,
+            },
+        ));
     }
     Ok(declared)
 }
 
 /// A required `saltValue`. Named for the two fields it produces so neither call site
 /// reads as the other's.
-fn inner_or_outer_salt(declared: Option<Vec<u8>>, missing: &'static str) -> Result<Vec<u8>, Error> {
-    declared.ok_or_else(|| Error::XmlParse(missing.into()))
+fn inner_or_outer_salt(declared: Option<Vec<u8>>, field: FileField) -> Result<Vec<u8>, Error> {
+    declared.ok_or_else(|| bad(field, FileProblem::Missing))
 }
 
 // The three helpers below read attribute values the same way `classify` does, and the
@@ -1727,11 +1763,19 @@ mod tests {
         for key_bits in [192u32, 256] {
             let err = derive_block_key(HashAlgorithm::Sha1, &h, &BLOCK_KEY_VALUE, key_bits)
                 .expect_err("SHA-1 cannot produce that many key bytes");
-            let text = err.to_string();
-            assert!(matches!(err, Error::BadParameters(_)));
+            // Both halves of the pair are named: the field, and the hash in the problem.
             assert!(
-                text.contains("keyBits") && text.contains("SHA1"),
-                "the refusal must name both halves of the pair, got: {text}"
+                matches!(
+                    err,
+                    Error::BadParameters {
+                        field: FileField::EncryptedKeyKeyBits,
+                        problem: FileProblem::DigestMismatch {
+                            hash: HashAlgorithm::Sha1,
+                            ..
+                        },
+                    }
+                ),
+                "got: {err:?}"
             );
         }
         // The control: the same hash with a key it *can* fill is accepted, so the
@@ -1937,19 +1981,30 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                Error::UnsupportedAlgorithm { what, name }
-                    if *what == "keyData/@hashAlgorithm" && name == "MD5"
+                Error::UnsupportedAlgorithm {
+                    what: "keyData/@hashAlgorithm",
+                    name: crate::AlgorithmName::Known(crate::KnownAlgorithm::Md5),
+                }
             ),
             "got: {err:?}"
         );
 
-        for name in ["MD5", "SHA3-256", "RIPEMD160", ""] {
+        // A name the spec defines is named; any other only by its length, never its text.
+        for (name, want) in [
+            (
+                "MD5",
+                crate::AlgorithmName::Known(crate::KnownAlgorithm::Md5),
+            ),
+            ("SHA3-256", crate::AlgorithmName::Unknown { len: 8 }),
+            ("RIPEMD160", crate::AlgorithmName::Unknown { len: 9 }),
+            ("", crate::AlgorithmName::Unknown { len: 0 }),
+        ] {
             let err = parse_err(&good_key_data(), &enc_key(&[("hashAlgorithm", Some(name))]));
             assert!(
                 matches!(
                     &err,
-                    Error::UnsupportedAlgorithm { what, name: got }
-                        if *what == "p:encryptedKey/@hashAlgorithm" && got == name
+                    Error::UnsupportedAlgorithm { what: "p:encryptedKey/@hashAlgorithm", name: got }
+                        if *got == want
                 ),
                 "hashAlgorithm={name:?} got: {err:?}"
             );
@@ -1960,20 +2015,36 @@ mod tests {
         assert!(parse_with(&good_key_data(), &good_enc_key()).is_ok());
     }
 
-    /// The name lands in an error string and comes out of an attacker's XML, bounded
-    /// only by the 1 MiB `EncryptionInfo` read cap.
+    /// The name comes out of an attacker's XML, bounded only by the 1 MiB
+    /// `EncryptionInfo` read cap, and none of it reaches the error (#47): only its
+    /// length. Until 0.1.0-rc.9 the first 32 characters did.
+    ///
+    /// Falsify: put the file's spelling back into `AlgorithmName` in
+    /// `unsupported_algorithm`.
     #[test]
-    fn an_unimplemented_hash_name_is_truncated_before_it_reaches_the_error() {
-        let long = "A".repeat(4096);
+    fn an_unimplemented_hash_name_never_reaches_the_error() {
+        let long = format!("EVIL{}", "A".repeat(4092));
         let err = parse_err(
             &good_key_data(),
             &enc_key(&[("hashAlgorithm", Some(&long))]),
         );
-        let Error::UnsupportedAlgorithm { name, .. } = &err else {
-            panic!("got: {err:?}");
-        };
-        assert_eq!(name.chars().count(), 33, "32 characters plus the ellipsis");
-        assert!(err.to_string().len() < 200, "got: {err}");
+        assert!(
+            matches!(
+                &err,
+                Error::UnsupportedAlgorithm {
+                    name: crate::AlgorithmName::Unknown { len: 4096 },
+                    ..
+                }
+            ),
+            "got: {err:?}"
+        );
+        for rendered in [err.to_string(), format!("{err:?}")] {
+            assert!(
+                !rendered.contains("EVIL") && !rendered.contains("AAAA"),
+                "{rendered}"
+            );
+            assert!(rendered.len() < 200, "{rendered}");
+        }
     }
 
     /// `cipherAlgorithm` is required and must be AES on both elements. An RC4 or
@@ -2003,12 +2074,23 @@ mod tests {
             );
         }
 
-        // Absent is a parse error, not a silent "probably AES".
-        for (kd, ek) in [
-            (key_data(&[("cipherAlgorithm", None)]), good_enc_key()),
-            (good_key_data(), enc_key(&[("cipherAlgorithm", None)])),
+        // Absent is refused as missing, not a silent "probably AES".
+        for (kd, ek, field) in [
+            (
+                key_data(&[("cipherAlgorithm", None)]),
+                good_enc_key(),
+                FileField::KeyDataCipherAlgorithm,
+            ),
+            (
+                good_key_data(),
+                enc_key(&[("cipherAlgorithm", None)]),
+                FileField::EncryptedKeyCipherAlgorithm,
+            ),
         ] {
-            assert!(matches!(parse_err(&kd, &ek), Error::XmlParse(_)));
+            assert!(matches!(
+                parse_err(&kd, &ek),
+                Error::BadParameters { field: f, problem: FileProblem::Missing } if f == field
+            ));
         }
     }
 
@@ -2020,14 +2102,21 @@ mod tests {
     /// in this module is loud.
     #[test]
     fn cipher_chaining_must_be_cbc_on_both_elements() {
-        for chaining in ["ChainingModeCFB", "ChainingModeECB", ""] {
+        for (chaining, want) in [
+            (
+                "ChainingModeCFB",
+                crate::AlgorithmName::Known(crate::KnownAlgorithm::ChainingModeCfb),
+            ),
+            ("ChainingModeECB", crate::AlgorithmName::Unknown { len: 15 }),
+            ("", crate::AlgorithmName::Unknown { len: 0 }),
+        ] {
             let err = parse_err(
                 &key_data(&[("cipherChaining", Some(chaining))]),
                 &good_enc_key(),
             );
             assert!(
-                matches!(&err, Error::UnsupportedAlgorithm { what, name }
-                    if *what == "keyData/@cipherChaining" && name == chaining),
+                matches!(&err, Error::UnsupportedAlgorithm { what: "keyData/@cipherChaining", name }
+                    if *name == want),
                 "keyData chaining={chaining:?} got: {err:?}"
             );
 
@@ -2036,19 +2125,30 @@ mod tests {
                 &enc_key(&[("cipherChaining", Some(chaining))]),
             );
             assert!(
-                matches!(&err, Error::UnsupportedAlgorithm { what, name }
-                    if *what == "p:encryptedKey/@cipherChaining" && name == chaining),
+                matches!(&err, Error::UnsupportedAlgorithm { what: "p:encryptedKey/@cipherChaining", name }
+                    if *name == want),
                 "encryptedKey chaining={chaining:?} got: {err:?}"
             );
         }
 
-        // Absent is a parse error, not a silent "probably CBC" — the guess would be
+        // Absent is refused as missing, not a silent "probably CBC" — the guess would be
         // unobservable when wrong, which is the whole argument for making it.
-        for (kd, ek) in [
-            (key_data(&[("cipherChaining", None)]), good_enc_key()),
-            (good_key_data(), enc_key(&[("cipherChaining", None)])),
+        for (kd, ek, field) in [
+            (
+                key_data(&[("cipherChaining", None)]),
+                good_enc_key(),
+                FileField::KeyDataCipherChaining,
+            ),
+            (
+                good_key_data(),
+                enc_key(&[("cipherChaining", None)]),
+                FileField::EncryptedKeyCipherChaining,
+            ),
         ] {
-            assert!(matches!(parse_err(&kd, &ek), Error::XmlParse(_)));
+            assert!(matches!(
+                parse_err(&kd, &ek),
+                Error::BadParameters { field: f, problem: FileProblem::Missing } if f == field
+            ));
         }
 
         // The control: `ChainingModeCBC` on both, everything else identical, parses.
@@ -2275,8 +2375,13 @@ mod tests {
             // thousands of them, and `Vec<u8>`'s `Debug` would bury the assertion.
             let got = decrypt_package(&sk, &params, &forged).map(|p| p.len());
             assert!(
-                matches!(&got, Err(Error::BadParameters(msg))
-                    if msg.contains("EncryptedPackage declares")),
+                matches!(
+                    &got,
+                    Err(Error::BadParameters {
+                        field: FileField::EncryptedPackageSize,
+                        problem: FileProblem::OutOfRange { got, max, .. },
+                    }) if *got == declared && *max == ciphertext_len
+                ),
                 "declared={declared} got: {got:?}"
             );
         }
@@ -2306,18 +2411,26 @@ mod tests {
         // agrees with it: the control.
         assert!(parse_with(&good_key_data(), &good_enc_key()).is_ok());
 
-        // Absent is a parse error, not a silent "probably the same as its sibling".
+        // Absent is refused as missing, not a silent "probably the same as its sibling".
         assert!(matches!(
             parse_err(&key_data(&[("keyBits", None)]), &good_enc_key()),
-            Error::XmlParse(_)
+            Error::BadParameters {
+                field: FileField::KeyDataKeyBits,
+                problem: FileProblem::Missing,
+            }
         ));
 
         // Outside the ECMA-376 set, refused by name on this element too.
         for key_bits in ["0", "255", "257", "512", "4294967295"] {
             let err = parse_err(&key_data(&[("keyBits", Some(key_bits))]), &good_enc_key());
             assert!(
-                matches!(&err, Error::BadParameters(msg)
-                    if msg.contains("keyData/@keyBits")),
+                matches!(
+                    &err,
+                    Error::BadParameters {
+                        field: FileField::KeyDataKeyBits,
+                        problem: FileProblem::NotInSet { .. },
+                    }
+                ),
                 "keyData keyBits={key_bits} got: {err:?}"
             );
         }
@@ -2328,8 +2441,17 @@ mod tests {
         // writer used the first 16.
         let err = parse_err(&key_data(&[("keyBits", Some("128"))]), &good_enc_key());
         assert!(
-            matches!(&err, Error::BadParameters(msg)
-                if msg.contains("keyData/@keyBits") && msg.contains("encryptedKeyValue")),
+            matches!(
+                &err,
+                Error::BadParameters {
+                    field: FileField::EncryptedKeyValue,
+                    problem: FileProblem::Disagrees {
+                        got: 32,
+                        expected: 16,
+                        with: FileField::KeyDataKeyBits,
+                    },
+                }
+            ),
             "keyData keyBits=128 got: {err:?}"
         );
 
@@ -2351,8 +2473,17 @@ mod tests {
             .err()
             .expect("a 24-byte encryptedKeyValue must be refused");
         assert!(
-            matches!(&err, Error::BadParameters(msg)
-                if msg.contains("keyData/@keyBits") && msg.contains("24 bytes")),
+            matches!(
+                &err,
+                Error::BadParameters {
+                    field: FileField::EncryptedKeyValue,
+                    problem: FileProblem::Disagrees {
+                        got: 24,
+                        expected: 32,
+                        with: FileField::KeyDataKeyBits,
+                    },
+                }
+            ),
             "keyData keyBits=192 over 24 bytes got: {err:?}"
         );
     }
@@ -2377,8 +2508,17 @@ mod tests {
             params.key_data_key_bits = key_bits;
             let got = decrypt_package(&sk, &params, &stream).map(|p| p.len());
             assert!(
-                matches!(&got, Err(Error::BadParameters(msg))
-                    if msg.contains("keyData/@keyBits") && msg.contains("session key")),
+                matches!(
+                    &got,
+                    Err(Error::BadParameters {
+                        field: FileField::SessionKey,
+                        problem: FileProblem::Disagrees {
+                            got: 32,
+                            with: FileField::KeyDataKeyBits,
+                            ..
+                        },
+                    })
+                ),
                 "keyData keyBits={key_bits} got: {got:?}"
             );
         }
@@ -2686,8 +2826,13 @@ mod tests {
                     .clone_from(&params.encrypted_verifier_hash_value);
                 let got = verify_password(&crossed, &right);
                 assert!(
-                    matches!(&got, Err(Error::BadParameters(msg))
-                        if msg.contains("encryptedVerifierHashInput/Value")),
+                    matches!(
+                        &got,
+                        Err(Error::BadParameters {
+                            field: FileField::EncryptedVerifierHashValue,
+                            problem: FileProblem::Disagrees { .. },
+                        })
+                    ),
                     "a {hash:?} verifier read as {other:?} must be refused by the length \
                      guard, got: {got:?}"
                 );
@@ -2719,7 +2864,11 @@ mod tests {
             assert!(
                 matches!(
                     verify_password(&params, &h_final),
-                    Err(Error::BadParameters(_))
+                    Err(Error::BadParameters {
+                        field: FileField::EncryptedVerifierHashInput
+                            | FileField::EncryptedVerifierHashValue,
+                        problem: FileProblem::Disagrees { .. },
+                    })
                 ),
                 "input={vi_len} value={vh_len} must be an error"
             );
@@ -2745,7 +2894,14 @@ mod tests {
         sha384.password_hash = HashAlgorithm::Sha512;
         assert!(matches!(
             verify_password(&sha384, &PasswordDigest::new(vec![0u8; 64])),
-            Err(Error::BadParameters(_))
+            Err(Error::BadParameters {
+                field: FileField::EncryptedVerifierHashValue,
+                problem: FileProblem::Disagrees {
+                    got: 48,
+                    expected: 64,
+                    ..
+                },
+            })
         ));
     }
 
@@ -2908,12 +3064,14 @@ mod tests {
             .err()
             .expect("two password key encryptors");
         assert!(
-            matches!(err, Error::BadParameters(_)),
-            "expected BadParameters, got {err:?}"
-        );
-        assert!(
-            err.to_string().contains("PasswordKeyEncryptor"),
-            "the refusal must name the element, got: {err}"
+            matches!(
+                err,
+                Error::BadParameters {
+                    field: FileField::PasswordKeyEncryptor,
+                    problem: FileProblem::Duplicate,
+                }
+            ),
+            "expected the duplicate encryptor refusal, got {err:?}"
         );
         // The control: one of them alone parses, so the refusal is about the pair.
         let one = format!(

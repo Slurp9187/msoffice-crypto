@@ -259,6 +259,7 @@ src/cfb_reader.rs      capped stream reads, and read_full, which every reader-dr
 src/limits.rs          every bound, each with cited provenance
 src/sensitive.rs       secure-gate aliases — the only place they are declared   (+ sensitive_tests.rs)
 src/error.rs           Error -- the crate's single public error type
+src/file_params.rs     what Error::BadParameters, InvariantViolated and UnsupportedAlgorithm carry: closed enums and integers, never file text   (crypto-ops)
 src/bin/msoffice-crypto.rs  the CLI: exit codes, clap wiring, classify rendering, the decrypt dispatch and the streamed atomic write   (+ msoffice-crypto_tests.rs)
 src/malformed_input.rs hostile-input tests, containers built at runtime
 src/dataspaces.rs      the \x06DataSpaces writer and the CFB container, timestamps zeroed   (+ dataspaces_tests.rs)

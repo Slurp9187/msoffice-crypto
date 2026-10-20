@@ -24,6 +24,7 @@
 use crate::binary_office::{self, BinaryFormat};
 use crate::cfb_reader::read_capped;
 use crate::error::Error;
+use crate::file_params::Invariant;
 use crate::limits::LEGACY_STREAM_READ_CAP;
 use std::io::{Cursor, Seek, SeekFrom, Write};
 
@@ -85,12 +86,9 @@ impl LegacyContainer {
             .cfb
             .open_stream(name)
             .map_err(|_| Error::MissingStream(what))?;
+        // A decrypt never changes a stream's length, so this is ours (#47).
         if stream.len() != bytes.len() as u64 {
-            return Err(Error::BadParameters(format!(
-                "rewriting {what} with {} bytes where the stream holds {}",
-                bytes.len(),
-                stream.len()
-            )));
+            return Err(Error::InvariantViolated(Invariant::RewriteLength));
         }
         stream.seek(SeekFrom::Start(0))?;
         stream.write_all(bytes)?;

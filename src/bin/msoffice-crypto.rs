@@ -1376,10 +1376,10 @@ fn describe(e: &Error) -> String {
         // attribute as the flag the caller actually typed (`--spin-count`, not
         // `spinCount`), which is the one thing the library's message cannot know.
         //
-        // WrongPassword, MissingStream, BadParameters, XmlParse, CipherError,
-        // RandomSource, Io and any future variant: forwarded. XmlParse, BadParameters and
-        // UnsupportedAlgorithm carry bounded attacker-chosen text; it goes to stderr
-        // as-is and is never re-interpolated into a path or a JSON field.
+        // WrongPassword, MissingStream, BadParameters, InvariantViolated, XmlParse,
+        // CipherError, RandomSource, Io and any future variant: forwarded. Since
+        // 0.1.0-rc.9 neither BadParameters nor UnsupportedAlgorithm carries text the file
+        // chose (closed enums and integers); XmlParse is this crate's own wording.
         _ => e.to_string(),
     }
 }
@@ -1396,7 +1396,12 @@ fn exit_code(e: &Error) -> u8 {
     match e {
         Error::NotACfbFile => EX_NOT_OFFICE,
         Error::MissingStream(_) => EX_MALFORMED,
-        Error::BadParameters(_) => EX_MALFORMED,
+        Error::BadParameters { .. } => EX_MALFORMED,
+        // A fault of this crate's, not the file's: "could not classify the failure" is
+        // not quite it, but 7 is the number that blames neither the file nor the caller.
+        Error::InvariantViolated(_) => EX_INTERNAL,
+        // Not malformed: a stream over a read cap of ours, as `PackageTooLarge` below.
+        Error::StreamTooLarge { .. } => EX_REFUSED,
         Error::Io(_) => EX_IO,
         // `legacy-binary`, NOT `crypto-ops`: this variant does not exist in the plain
         // `cli` column, and copying the gate off a neighbouring arm breaks that build.

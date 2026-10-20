@@ -45,6 +45,7 @@
 //! own reader refuses is a bug generator, and this crate is both halves.
 
 use crate::error::Error;
+use crate::file_params::Invariant;
 use crate::EncryptParams;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
@@ -187,7 +188,9 @@ pub(crate) fn write(p: &EncryptionInfoParams<'_>) -> Result<Vec<u8>, Error> {
     // `tests/fixtures/agile_aes192_sha384.docx`.
     let key_value_blob = round_up_to_block(to_len(params.key_data_key_bits / 8));
 
-    for (what, got, want) in [
+    // `what` names each blob for a reader of this list; a mismatch is a serializer
+    // fault of ours (#47), whose kind is the whole report.
+    for (_what, got, want) in [
         (
             "keyData/@saltValue",
             p.key_data_salt.len(),
@@ -226,23 +229,7 @@ pub(crate) fn write(p: &EncryptionInfoParams<'_>) -> Result<Vec<u8>, Error> {
         ),
     ] {
         if got != want {
-            // Every value interpolated here is a caller-chosen integer or a fixed enum
-            // name — no attacker text reaches this message, so there is nothing to bound
-            // or truncate. It names the parameters rather than a tuple this crate no
-            // longer fixes: "AES-256/SHA-512" was true when the tuple was a constant and
-            // would now be a typed lie about whatever the caller actually asked for.
-            return Err(Error::BadParameters(format!(
-                "{what} is {got} bytes; hashAlgorithm={hash} (hashSize {hash_size}), \
-                 keyData keyBits={kd_bits} saltSize={kd_salt}, p:encryptedKey \
-                 keyBits={pw_bits} saltSize={pw_salt} and blockSize={block} fix it at \
-                 {want}",
-                hash = params.hash.name(),
-                kd_bits = params.key_data_key_bits,
-                kd_salt = params.key_data_salt_size,
-                pw_bits = params.password_key_bits,
-                pw_salt = params.password_salt_size,
-                block = AES_BLOCK_LEN,
-            )));
+            return Err(Error::InvariantViolated(Invariant::SerializedLength));
         }
     }
 

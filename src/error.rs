@@ -198,16 +198,46 @@ pub enum Error {
     #[cfg(feature = "crypto-ops")]
     CipherError,
 
-    /// A parameter the file declares is out of range, or is inconsistent with a sibling
-    /// parameter.
+    /// A value the file declares is out of range, or disagrees with another it declares.
     ///
-    /// The message describes the *shape* of the problem — a length, an attribute name,
-    /// an algorithm name. It never carries key material or file content.
+    /// `field` names it in the specification's spelling and `problem` says what is wrong,
+    /// with the value the file declares and what was allowed. **No byte of the file is in
+    /// it**: every payload is a fieldless enum or an integer, so a caller may match on it
+    /// and quote its numbers. Until 0.1.0-rc.9 this was a `String`.
     ///
     /// Contrast [`Error::UnsupportedAlgorithm`], which is the file being
-    /// internally consistent about something this crate has not implemented.
-    #[error("unsupported or inconsistent encryption parameter: {0}")]
-    BadParameters(String),
+    /// internally consistent about something this crate has not implemented, and
+    /// [`Error::InvariantViolated`], which is a fault of this crate's.
+    #[error("{field} {problem}")]
+    #[cfg(feature = "crypto-ops")]
+    BadParameters {
+        /// Which field.
+        field: crate::FileField,
+        /// What is wrong with it.
+        problem: crate::FileProblem,
+    },
+
+    /// An invariant of this crate's failed: something upstream should have refused the
+    /// input first. Reaching it is a bug here, not a property of the file, so it is not
+    /// [`Error::BadParameters`] (which it was until 0.1.0-rc.9).
+    #[error("internal invariant violated: {0}")]
+    #[cfg(feature = "crypto-ops")]
+    InvariantViolated(crate::Invariant),
+
+    /// A stream is larger than this crate reads whole: more than `limit` bytes. The
+    /// read stops one byte past the limit, so its whole size is not known.
+    ///
+    /// A measured size, not a value the file declares, so not a bad parameter (the
+    /// reasoning that moved the 1 GiB refusals to `PackageTooLarge` in 0.1.0-rc.7).
+    /// `stream` is this crate's own name for it, never the file's. Until 0.1.0-rc.9 this
+    /// was a `BadParameters` message.
+    #[error("the {stream} stream is larger than {limit} bytes, the most this crate reads")]
+    StreamTooLarge {
+        /// Which stream, as this crate names it.
+        stream: &'static str,
+        /// The most read.
+        limit: u64,
+    },
 
     /// A legacy binary document carries encrypted content of a kind this crate does not
     /// decrypt, so [`crate::decrypt_binary_office()`] refuses the file rather than return
@@ -219,7 +249,10 @@ pub enum Error {
     /// output lost them for good. What is decrypted now is what Office writes; what the
     /// format permits and no Office build was measured writing — a storage inside the
     /// encrypted summary stream, a stream there other than the two property sets, a
-    /// `Pictures` record that is neither a blip nor a file-block entry — lands here.
+    /// blip of a type [MS-ODRAW] does not define, a file-block entry — lands here. A
+    /// `Pictures` record of a type that is neither (a value the file declares) is
+    /// [`Error::BadParameters`] instead; this doc said otherwise until 0.1.0-rc.9 while
+    /// the code returned `BadParameters`.
     ///
     /// The payload is a fixed `&'static str` naming the kind, never file content.
     #[error("the document holds encrypted content this crate does not decrypt: {0}")]
@@ -237,9 +270,10 @@ pub enum Error {
     /// worse than the alternative this crate exists to improve on.
     ///
     /// `what` names the attribute — a fixed set of `&'static str`, never formatted, so
-    /// this cannot become a second free-text channel. `name` is the file's own spelling,
-    /// truncated: it is attacker-chosen XML attribute text, bounded only by
-    /// `limits::ENCRYPTION_INFO_READ_CAP` (1 MiB) before it reaches here.
+    /// this cannot become a second free-text channel. `name` is closed too
+    /// ([`crate::AlgorithmName`]): a name the specification defines, or an unknown name
+    /// by its length alone. Until 0.1.0-rc.9 it was the file's own spelling, truncated
+    /// to 32 characters.
     ///
     /// # This refusal is authorised by the format, which is a third thing
     ///
@@ -273,11 +307,9 @@ pub enum Error {
     UnsupportedAlgorithm {
         /// Which attribute named it, e.g. `p:encryptedKey/@hashAlgorithm`.
         what: &'static str,
-        /// Either the algorithm name as the file spells it, truncated to 32 characters
-        /// by `agile::unsupported_algorithm` — the one path where this is
-        /// attacker-chosen text — or a fixed description of what was refused, sometimes a
-        /// formatted `AlgID`. Never key material, and never unbounded file text.
-        name: String,
+        /// What was named: a known algorithm, an unknown name's length, an `AlgID`, or a
+        /// fixed description of what was refused. Never text the file chose.
+        name: crate::AlgorithmName,
     },
 
     /// The `dataIntegrity` HMAC did not match the `EncryptedPackage` stream.
@@ -383,9 +415,8 @@ pub enum Error {
     ///
     /// **No file byte can reach this variant.** `got`, `min` and `max` are `u32`s the
     /// caller supplied or that this crate's own `limits` module holds, and `param` and
-    /// `problem` are fieldless `Copy` enums. There is deliberately no `String` field: the
-    /// free-text channel `BadParameters` needs is exactly what makes it the wrong variant
-    /// for a caller error, and opening one here would invite the same
+    /// `problem` are fieldless `Copy` enums. There is deliberately no `String` field, the
+    /// shape `BadParameters` took too in 0.1.0-rc.9: a free-text channel invites the
     /// file-content-in-a-message defect [`Self::XmlParse`] documents having had.
     ///
     /// # Why the problem is a second enum rather than part of the first
@@ -525,7 +556,7 @@ pub enum Error {
     ///   plaintext package, measured before anything is written.
     ///
     /// Until 0.1.0-rc.7 the 1 GiB refusals were [`Self::BadParameters`], whose meaning is
-    /// a parameter *the file* declares. An input's size is not one.
+    /// a value *the file* declares. An input's size is not one.
     #[error("the input is {len} bytes; this path takes at most {limit}")]
     #[cfg(feature = "crypto-ops")]
     PackageTooLarge {
@@ -896,7 +927,11 @@ mod exit_code_canary {
             #[cfg(feature = "crypto-ops")]
             Error::NotACfbFile => 3,
             Error::MissingStream(_) => 6,
-            Error::BadParameters(_) => 6,
+            #[cfg(feature = "crypto-ops")]
+            Error::BadParameters { .. } => 6,
+            #[cfg(feature = "crypto-ops")]
+            Error::InvariantViolated(_) => 7,
+            Error::StreamTooLarge { .. } => 5,
             Error::Io(_) => 2,
             #[cfg(feature = "legacy-binary")]
             Error::NotEncrypted => 5,

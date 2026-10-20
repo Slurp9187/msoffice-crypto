@@ -67,6 +67,7 @@ use crate::binary_office::{
 };
 use crate::encrypted_summary;
 use crate::error::Error;
+use crate::file_params::{bad, wide, AllowedSet, Bound, FileField, FileProblem, Invariant};
 use crate::legacy_container::LegacyContainer;
 use crate::rc4::{self, BlockKeySchedule};
 use crate::rc4_cryptoapi::{self, CryptoApiKeySchedule};
@@ -88,8 +89,9 @@ const BITMAP_TAG_LEN: usize = 1;
 /// `RecordHeader` — [MS-ODRAW] §2.2.1.
 const RECORD_HEADER_LEN: usize = 8;
 
-fn bad(msg: impl Into<String>) -> Error {
-    Error::BadParameters(msg.into())
+/// A file offset that does not fit this host's `usize`: ours to report (#47).
+fn unrepresentable(_: std::num::TryFromIntError) -> Error {
+    Error::InvariantViolated(Invariant::Unrepresentable)
 }
 
 /// Decrypt the container in place. The container is left untouched on any error.
@@ -101,46 +103,60 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
     let edit_offset = binary_office::current_edit_offset(&current_user).ok_or(
         Error::MissingStream("Current User stream shorter than its atom"),
     )?;
-    let edit_offset = usize::try_from(edit_offset).map_err(|_| bad("offsetToCurrentEdit"))?;
+    let edit_offset = usize::try_from(edit_offset).map_err(unrepresentable)?;
     let atom = binary_office::user_edit_atom(&mut src, edit_offset as u64).ok_or_else(|| {
-        bad(format!(
-            "no UserEditAtom at offsetToCurrentEdit {edit_offset} (stream of {} bytes)",
-            doc.len()
-        ))
+        bad(
+            FileField::UserEditAtom,
+            FileProblem::Unreadable {
+                offset: wide(edit_offset),
+            },
+        )
     })?;
     if atom.rec_len == USER_EDIT_ATOM_LEN_PLAIN {
         return Err(Error::NotEncrypted);
     }
     debug_assert_eq!(atom.rec_len, USER_EDIT_ATOM_LEN_ENCRYPTED);
+    // An encrypted presentation contains exactly one user edit ([MS-PPT] 2.3.7).
     if atom.offset_last_edit != 0 {
-        return Err(bad(format!(
-            "UserEditAtom.offsetLastEdit is {}; an encrypted presentation contains exactly \
-             one user edit ([MS-PPT] 2.3.7)",
-            atom.offset_last_edit
-        )));
+        return Err(bad(
+            FileField::OffsetLastEdit,
+            FileProblem::NotRequiredValue {
+                got: atom.offset_last_edit.into(),
+                required: 0,
+                bound: Bound::Spec,
+            },
+        ));
     }
-    let directory_offset = usize::try_from(atom.offset_persist_directory)
-        .map_err(|_| bad("offsetPersistDirectory"))?;
+    let directory_offset =
+        usize::try_from(atom.offset_persist_directory).map_err(unrepresentable)?;
     let directory = binary_office::persist_directory(&mut src, directory_offset as u64)
         .ok_or_else(|| {
-            bad(format!(
-                "no readable PersistDirectoryAtom at offsetPersistDirectory {directory_offset}"
-            ))
+            bad(
+                FileField::PersistDirectory,
+                FileProblem::Unreadable {
+                    offset: wide(directory_offset),
+                },
+            )
         })?;
     let session_id = atom
         .encrypt_session_persist_id_ref
-        .ok_or_else(|| bad("UserEditAtom carries no encryptSessionPersistIdRef"))?;
+        .ok_or_else(|| bad(FileField::EncryptSessionPersistIdRef, FileProblem::Missing))?;
     let session_offset = *directory.get(&session_id).ok_or_else(|| {
-        bad(format!(
-            "encryptSessionPersistIdRef {session_id} is not in the persist directory"
-        ))
+        bad(
+            FileField::EncryptSessionPersistIdRef,
+            FileProblem::Unrecognized {
+                got: session_id.into(),
+            },
+        )
     })?;
     let structure = binary_office::crypt_session_container(&mut src, u64::from(session_offset))
         .ok_or_else(|| {
-            bad(format!(
-                "no CryptSession10Container at persist object {session_id} (offset \
-                 {session_offset})"
-            ))
+            bad(
+                FileField::CryptSession10Container,
+                FileProblem::Unreadable {
+                    offset: session_offset.into(),
+                },
+            )
         })?;
     let session_len = binary_office::record_header(&mut src, u64::from(session_offset))
         .map(|rh| rh.rec_len)
@@ -173,12 +189,19 @@ pub(crate) fn decrypt(container: &mut LegacyContainer, password: &str) -> Result
     // bounds the total work by the stream's length once the extents are disjoint.
     let mut objects: Vec<(u32, usize)> = Vec::with_capacity(directory.len());
     for (&id, &offset) in &directory {
-        let offset = usize::try_from(offset).map_err(|_| bad("persist offset"))?;
+        let offset = usize::try_from(offset).map_err(unrepresentable)?;
+        // Every persist object lies below the directory ([MS-PPT] 2.3.5).
         if offset >= directory_offset {
-            return Err(bad(format!(
-                "persist object {id} at offset {offset} lies at or beyond the persist \
-                 directory at {directory_offset}"
-            )));
+            let _ = id;
+            return Err(bad(
+                FileField::PersistObject,
+                FileProblem::OutOfRange {
+                    got: wide(offset),
+                    min: 0,
+                    max: wide(directory_offset.saturating_sub(1)),
+                    bound: Bound::Spec,
+                },
+            ));
         }
         objects.push((id, offset));
     }
@@ -250,11 +273,14 @@ pub(crate) fn decrypt_pictures(
         let header = pictures
             .get_mut(at..at + RECORD_HEADER_LEN)
             .ok_or_else(|| {
-                bad(format!(
-                    "Pictures record {index} at offset {at}: {} bytes remain, a record header \
-                 takes {RECORD_HEADER_LEN}",
-                    len - at
-                ))
+                let _ = index;
+                bad(
+                    FileField::PicturesRecord,
+                    FileProblem::Truncated {
+                        have: wide(len - at),
+                        need: wide(RECORD_HEADER_LEN),
+                    },
+                )
             })?;
         rc4::decrypt_with_block(schedule, header, 0)?;
         let ver_instance = u16::from_le_bytes([header[0], header[1]]);
@@ -268,21 +294,29 @@ pub(crate) fn decrypt_pictures(
             .and_then(|n| body_start.checked_add(n))
             .filter(|&end| end <= len)
             .ok_or_else(|| {
-                bad(format!(
-                    "Pictures record {index} declares {rec_len} bytes; {} remain in the stream",
-                    len - body_start
-                ))
+                bad(
+                    FileField::PicturesRecord,
+                    FileProblem::OutOfBounds {
+                        offset: wide(body_start),
+                        len: rec_len.into(),
+                        end: wide(len),
+                    },
+                )
             })?;
         let body = pictures
             .get_mut(body_start..body_end)
-            .ok_or_else(|| bad("Pictures record body"))?;
+            .ok_or(Error::InvariantViolated(Invariant::InternalSlice))?;
         let mut field_start = 0usize;
         for size in fields {
             let field_end = field_start + size;
             let field = body.get_mut(field_start..field_end).ok_or_else(|| {
-                bad(format!(
-                    "Pictures record {index} is {rec_len} bytes, shorter than its fixed fields"
-                ))
+                bad(
+                    FileField::PicturesRecord,
+                    FileProblem::Truncated {
+                        have: rec_len.into(),
+                        need: wide(field_end),
+                    },
+                )
             })?;
             rc4::decrypt_with_block(schedule, field, 0)?;
             field_start = field_end;
@@ -320,18 +354,26 @@ fn blip_fields(rec_type: u16, ver_instance: u16) -> Result<Vec<usize>, Error> {
                 "a Pictures record of a blip type [MS-ODRAW] does not define",
             ))
         }
+        // A record type is a value the file declares, so this is a bad parameter;
+        // `UnsupportedEncryptedContent` is for content of a known kind not decrypted.
         other => {
-            return Err(bad(format!(
-                "Pictures record type {other:#06x} is neither a blip nor a file-block entry \
-                 ([MS-ODRAW] 2.2.22)"
-            )))
+            return Err(bad(
+                FileField::PicturesRecord,
+                FileProblem::NotInSet {
+                    got: other.into(),
+                    allowed: AllowedSet::PicturesRecordTypes,
+                    bound: Bound::Spec,
+                },
+            ))
         }
     };
     if rec_ver != 0 || !pair.contains(&(instance & !1)) {
-        return Err(bad(format!(
-            "Pictures record of type {rec_type:#06x} has version {rec_ver} and instance \
-             {instance:#05x}, which [MS-ODRAW] does not define for it"
-        )));
+        return Err(bad(
+            FileField::PicturesRecord,
+            FileProblem::Unrecognized {
+                got: ver_instance.into(),
+            },
+        ));
     }
     let mut fields = vec![UID_LEN];
     if instance & 1 == 1 {

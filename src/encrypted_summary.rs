@@ -41,6 +41,7 @@
 
 use crate::binary_office::le32;
 use crate::error::Error;
+use crate::file_params::{bad, wide, Bound, FileField, FileProblem, Invariant};
 use crate::legacy_container::LegacyContainer;
 use crate::rc4::{self, BlockKeySchedule};
 
@@ -81,10 +82,6 @@ impl RestoredSummary {
     }
 }
 
-fn bad(msg: impl Into<String>) -> Error {
-    Error::BadParameters(msg.into())
-}
-
 /// Read and decrypt the encrypted summary stream `stream`, without touching the
 /// container. `MissingStream` if it is absent: the caller asks only when `fDocProps` is
 /// clear, where [MS-PPT] §2.3.7 says it "MUST exist" and every Office-written file has
@@ -113,67 +110,85 @@ pub(crate) fn decrypt_stream(
     schedule: &dyn BlockKeySchedule,
 ) -> Result<Vec<(&'static str, Vec<u8>)>, Error> {
     let Some(prefix) = data.get(..PREFIX_LEN) else {
-        return Err(bad(format!(
-            "the encrypted summary stream is {} bytes; its descriptor-array offset and size \
-             alone take {PREFIX_LEN}",
-            data.len()
-        )));
+        return Err(bad(
+            FileField::SummaryStream,
+            FileProblem::Truncated {
+                have: wide(data.len()),
+                need: wide(PREFIX_LEN),
+            },
+        ));
     };
     let mut prefix = prefix.to_vec();
     rc4::decrypt_with_block(schedule, &mut prefix, 0)?;
     let (Some(array_offset), Some(array_size)) = (le32(&prefix, 0), le32(&prefix, 4)) else {
-        return Err(bad("encrypted summary prefix"));
+        return Err(Error::InvariantViolated(Invariant::InternalSlice));
     };
-    let array_offset =
-        usize::try_from(array_offset).map_err(|_| bad("StreamDescriptorArrayOffset"))?;
-    let array_size = usize::try_from(array_size).map_err(|_| bad("StreamDescriptorArraySize"))?;
+    let array_offset = usize::try_from(array_offset)
+        .map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
+    let array_size = usize::try_from(array_size)
+        .map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
     let array_end = array_offset
         .checked_add(array_size)
         .filter(|&end| array_offset >= PREFIX_LEN && end <= data.len())
         .ok_or_else(|| {
-            bad(format!(
-                "the encrypted summary's descriptor array at {array_offset}, {array_size} \
-                 bytes, does not lie between its {PREFIX_LEN}-byte prefix and the end of \
-                 the stream at {}",
-                data.len()
-            ))
+            bad(
+                FileField::SummaryDescriptorArray,
+                FileProblem::OutOfBounds {
+                    offset: wide(array_offset),
+                    len: wide(array_size),
+                    end: wide(data.len()),
+                },
+            )
         })?;
     let mut array = data
         .get(array_offset..array_end)
-        .ok_or_else(|| bad("encrypted summary descriptor array"))?
+        .ok_or(Error::InvariantViolated(Invariant::InternalSlice))?
         .to_vec();
     rc4::decrypt_with_block(schedule, &mut array, 0)?;
 
     let count = le32(&array, 0).ok_or_else(|| {
-        bad(format!(
-            "the encrypted summary's descriptor array is {array_size} bytes; its count alone \
-             takes {COUNT_LEN}"
-        ))
+        bad(
+            FileField::SummaryDescriptorArray,
+            FileProblem::Truncated {
+                have: wide(array_size),
+                need: wide(COUNT_LEN),
+            },
+        )
     })?;
     // Bounds the loop by the array's length before a single descriptor is read.
-    let count = usize::try_from(count).map_err(|_| bad("EncryptedStreamDescriptorCount"))?;
+    let count =
+        usize::try_from(count).map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
     if count
         .checked_mul(DESCRIPTOR_MIN_LEN)
         .is_none_or(|need| need > array_size - COUNT_LEN)
     {
-        return Err(bad(format!(
-            "EncryptedStreamDescriptorCount is {count}; a {array_size}-byte array holds at \
-             most {} descriptors",
-            (array_size - COUNT_LEN) / DESCRIPTOR_MIN_LEN
-        )));
+        return Err(bad(
+            FileField::SummaryDescriptorCount,
+            FileProblem::OutOfRange {
+                got: wide(count),
+                min: 0,
+                max: wide((array_size - COUNT_LEN) / DESCRIPTOR_MIN_LEN),
+                bound: Bound::Spec,
+            },
+        ));
     }
 
     let mut entries: Vec<(&'static str, Vec<u8>)> = Vec::with_capacity(count);
     let mut extents: Vec<(usize, usize)> = Vec::with_capacity(count);
     let mut at = COUNT_LEN;
     for i in 0..count {
-        let fixed = array
-            .get(at..at + DESCRIPTOR_FIXED_LEN)
-            .ok_or_else(|| bad(format!("encrypted summary descriptor {i} is truncated")))?;
+        let _ = i;
+        let fixed = array.get(at..at + DESCRIPTOR_FIXED_LEN).ok_or_else(|| {
+            bad(
+                FileField::SummaryDescriptor,
+                FileProblem::Truncated {
+                    have: wide(array.len().saturating_sub(at)),
+                    need: wide(DESCRIPTOR_FIXED_LEN),
+                },
+            )
+        })?;
         let (Some(offset), Some(size)) = (le32(fixed, 0), le32(fixed, 4)) else {
-            return Err(bad(format!(
-                "encrypted summary descriptor {i} is truncated"
-            )));
+            return Err(Error::InvariantViolated(Invariant::InternalSlice));
         };
         let block = u32::from(u16::from_le_bytes([fixed[8], fixed[9]]));
         let name_chars = usize::from(fixed[10]);
@@ -181,15 +196,17 @@ pub(crate) fn decrypt_stream(
         at += DESCRIPTOR_FIXED_LEN;
         let name_len = 2 * name_chars;
         let name_bytes = array.get(at..at + name_len).ok_or_else(|| {
-            bad(format!(
-                "encrypted summary descriptor {i}'s name of {name_chars} characters runs \
-                 past the descriptor array"
-            ))
+            bad(
+                FileField::SummaryStreamName,
+                FileProblem::OutOfBounds {
+                    offset: wide(at),
+                    len: wide(name_len),
+                    end: wide(array.len()),
+                },
+            )
         })?;
         if array.get(at + name_len..at + name_len + 2) != Some(&[0, 0][..]) {
-            return Err(bad(format!(
-                "encrypted summary descriptor {i}'s name is not NUL-terminated"
-            )));
+            return Err(bad(FileField::SummaryStreamName, FileProblem::Unterminated));
         }
         let name = property_set_name(name_bytes);
         at += name_len + 2;
@@ -205,33 +222,34 @@ pub(crate) fn decrypt_stream(
             ));
         };
         if entries.iter().any(|(seen, _)| *seen == name) {
-            return Err(bad(format!(
-                "encrypted summary descriptor {i} names a stream an earlier one already named"
-            )));
+            return Err(bad(FileField::SummaryDescriptor, FileProblem::Duplicate));
         }
 
-        let offset = usize::try_from(offset).map_err(|_| bad("StreamOffset"))?;
-        let size = usize::try_from(size).map_err(|_| bad("StreamSize"))?;
+        let offset = usize::try_from(offset)
+            .map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
+        let size = usize::try_from(size)
+            .map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
         let end = offset
             .checked_add(size)
             .filter(|&end| offset >= PREFIX_LEN && end <= array_offset)
             .ok_or_else(|| {
-                bad(format!(
-                    "encrypted summary descriptor {i}'s stream at {offset}, {size} bytes, \
-                     does not lie between the prefix and the descriptor array at \
-                     {array_offset}"
-                ))
+                bad(
+                    FileField::SummaryStreamExtent,
+                    FileProblem::OutOfBounds {
+                        offset: wide(offset),
+                        len: wide(size),
+                        end: wide(array_offset),
+                    },
+                )
             })?;
         if extents.iter().any(|&(s, e)| offset < e && s < end) {
-            return Err(bad(format!(
-                "encrypted summary descriptor {i}'s stream overlaps an earlier one"
-            )));
+            return Err(bad(FileField::SummaryStreamExtent, FileProblem::Overlaps));
         }
         extents.push((offset, end));
 
         let mut plain = data
             .get(offset..end)
-            .ok_or_else(|| bad("encrypted summary stream extent"))?
+            .ok_or(Error::InvariantViolated(Invariant::InternalSlice))?
             .to_vec();
         rc4::decrypt_with_block(schedule, &mut plain, block)?;
         entries.push((name, plain));

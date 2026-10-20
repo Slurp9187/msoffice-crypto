@@ -77,10 +77,10 @@ they cannot open.
 ```toml
 [dependencies]
 # Detection only — no cryptographic dependency.
-msoffice-crypto = "0.1.0-rc.8"
+msoffice-crypto = "0.1.0-rc.9"
 
 # Detection, decryption and encryption.
-msoffice-crypto = { version = "0.1.0-rc.8", features = ["crypto-ops"] }
+msoffice-crypto = { version = "0.1.0-rc.9", features = ["crypto-ops"] }
 ```
 
 Pre-release versions are not matched by ordinary requirements — name the full version as
@@ -301,7 +301,7 @@ A CLI that returns 1 for everything cannot be scripted.
 | 4 | wrong password | `Error::WrongPassword` |
 | 5 | refused: nothing to do | decrypt of an unencrypted file, encrypt of an already-encrypted one, `Error::NotEncrypted` |
 | 6 | malformed or hostile file | `MissingStream`, `XmlParse`, `BadParameters`, `CipherError` |
-| 7 | internal invariant violated | `RandomSource` |
+| 7 | internal invariant violated | `RandomSource`, `InvariantViolated` |
 | 8 | **integrity** | `IntegrityCheckFailed`, `IntegrityElementMissing`, `IntegrityUnavailable` |
 | 9 | **unsupported encryption** | `UnsupportedEncryptionVersion`, `UnsupportedAlgorithm`, `UnsupportedEncryptedContent`, `Family::Unsupported`, `Family::Irm`, a Word 6.0/95 or Excel 5.0/95 document, a legacy family without `legacy-binary` |
 

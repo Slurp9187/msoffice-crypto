@@ -50,9 +50,10 @@ pub(crate) fn read_capped(
     let mut buf = Vec::new();
     stream.by_ref().take(cap as u64 + 1).read_to_end(&mut buf)?;
     if buf.len() > cap {
-        return Err(Error::BadParameters(format!(
-            "the {what} stream is larger than {cap} bytes"
-        )));
+        return Err(Error::StreamTooLarge {
+            stream: what,
+            limit: cap as u64,
+        });
     }
     Ok(buf)
 }
@@ -122,8 +123,11 @@ mod tests {
         // `Vec<u8>`'s `Debug` would bury the assertion that failed under all of it.
         let got = read_encryption_info(&over).map(|b| b.len());
         assert!(
-            matches!(&got, Err(Error::BadParameters(msg))
-                if msg.contains("EncryptionInfo") && msg.contains("larger than")),
+            matches!(
+                &got,
+                Err(Error::StreamTooLarge { stream: "EncryptionInfo", limit })
+                    if *limit == ENCRYPTION_INFO_READ_CAP as u64
+            ),
             "one byte over the cap must be refused, got: {got:?}"
         );
 

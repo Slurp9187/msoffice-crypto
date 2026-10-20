@@ -125,8 +125,24 @@ fn exit_codes_map_every_error_class() {
         EX_MALFORMED
     );
     assert_eq!(
-        exit_code(&Error::BadParameters(String::new())),
+        exit_code(&Error::BadParameters {
+            field: msoffice_crypto::FileField::SpinCount,
+            problem: msoffice_crypto::FileProblem::Missing,
+        }),
         EX_MALFORMED
+    );
+    assert_eq!(
+        exit_code(&Error::InvariantViolated(
+            msoffice_crypto::Invariant::AesKeyLength
+        )),
+        EX_INTERNAL
+    );
+    assert_eq!(
+        exit_code(&Error::StreamTooLarge {
+            stream: "EncryptionInfo",
+            limit: 1,
+        }),
+        EX_REFUSED
     );
     assert_eq!(exit_code(&Error::Io(std::io::Error::other("x"))), EX_IO);
     assert_eq!(
@@ -144,7 +160,7 @@ fn exit_codes_map_every_error_class() {
     assert_eq!(
         exit_code(&Error::UnsupportedAlgorithm {
             what: "p:encryptedKey/@hashAlgorithm",
-            name: String::new()
+            name: msoffice_crypto::AlgorithmName::Unknown { len: 0 }
         }),
         EX_UNSUPPORTED
     );

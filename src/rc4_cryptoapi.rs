@@ -17,6 +17,9 @@
 //! same things this one does, `fExternal` included, which neither can serve.
 
 use crate::error::Error;
+use crate::file_params::{
+    bad, wide, AlgorithmName, AllowedSet, Bound, FileField, FileProblem, Invariant,
+};
 use crate::limits::{RC4_ENCRYPTION_HEADER_SIZE_MAX, RC4_KEY_BITS, RC4_KEY_BITS_DEFAULT};
 use crate::rc4::{self, BlockKeySchedule};
 use crate::sensitive::{utf16le_password, DerivedKey, PasswordDigest};
@@ -87,11 +90,13 @@ pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, Error> {
     let le32 = |at: usize| crate::binary_office::le32(structure, at);
 
     let (Some(major), Some(minor), Some(header_size)) = (le16(0), le16(2), le32(8)) else {
-        return Err(Error::BadParameters(format!(
-            "the RC4 CryptoAPI encryption header structure is {} bytes; its version, \
-             flags and size prefix alone take {PREFIX_LEN}",
-            structure.len()
-        )));
+        return Err(bad(
+            FileField::EncryptionInfo,
+            FileProblem::Truncated {
+                have: wide(structure.len()),
+                need: wide(PREFIX_LEN),
+            },
+        ));
     };
     // §2.3.5.1: vMajor 2, 3 or 4 with vMinor 2. Version 1.1 is the MD5 family,
     // `rc4_office97`; a caller dispatches on the pair before arriving here, so a
@@ -101,25 +106,36 @@ pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, Error> {
     }
 
     let header_size = usize::try_from(header_size)
-        .map_err(|_| Error::BadParameters("EncryptionHeaderSize does not fit usize".to_string()))?;
+        .map_err(|_| Error::InvariantViolated(Invariant::Unrepresentable))?;
+    // The floor is the structure's own; the ceiling a margin of ours for 32 fixed bytes
+    // and a CSP name.
+    let header_range = |bound| {
+        bad(
+            FileField::EncryptionHeaderSize,
+            FileProblem::OutOfRange {
+                got: wide(header_size),
+                min: wide(HEADER_FIXED_LEN),
+                max: wide(RC4_ENCRYPTION_HEADER_SIZE_MAX),
+                bound,
+            },
+        )
+    };
     if header_size < HEADER_FIXED_LEN {
-        return Err(Error::BadParameters(format!(
-            "EncryptionHeaderSize is {header_size}; the header's fixed fields alone take \
-             {HEADER_FIXED_LEN}"
-        )));
+        return Err(header_range(Bound::Spec));
     }
     if header_size > RC4_ENCRYPTION_HEADER_SIZE_MAX {
-        return Err(Error::BadParameters(format!(
-            "EncryptionHeaderSize is {header_size}, over the {RC4_ENCRYPTION_HEADER_SIZE_MAX} \
-             this crate allows for 32 fixed bytes and a CSP name"
-        )));
+        return Err(header_range(Bound::Margin));
     }
     let header_end = PREFIX_LEN + header_size;
     let Some(header) = structure.get(PREFIX_LEN..header_end) else {
-        return Err(Error::BadParameters(format!(
-            "EncryptionHeaderSize is {header_size} but only {} bytes follow the prefix",
-            structure.len().saturating_sub(PREFIX_LEN)
-        )));
+        return Err(bad(
+            FileField::EncryptionHeaderSize,
+            FileProblem::OutOfBounds {
+                offset: wide(PREFIX_LEN),
+                len: wide(header_size),
+                end: wide(structure.len()),
+            },
+        ));
     };
 
     let h32 = |at: usize| crate::binary_office::le32(header, at);
@@ -128,9 +144,7 @@ pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, Error> {
     else {
         // Unreachable with header_size >= 32, but a slice-length assumption is not an
         // argument this crate accepts from itself either.
-        return Err(Error::BadParameters(
-            "EncryptionHeader fixed fields unreadable".to_string(),
-        ));
+        return Err(Error::InvariantViolated(Invariant::InternalSlice));
     };
 
     // Refuse by name what this path cannot serve, before touching a key size. The
@@ -140,31 +154,31 @@ pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, Error> {
     if flags & FLAG_EXTERNAL != 0 {
         return Err(Error::UnsupportedAlgorithm {
             what: WHAT_FLAGS,
-            name: "fExternal (application-defined encryption)".to_string(),
+            name: AlgorithmName::Fixed("fExternal (application-defined encryption)"),
         });
     }
     if flags & FLAG_AES != 0 {
         return Err(Error::UnsupportedAlgorithm {
             what: WHAT_FLAGS,
-            name: "fAES in a binary document".to_string(),
+            name: AlgorithmName::Fixed("fAES in a binary document"),
         });
     }
     if flags & FLAG_CRYPTO_API == 0 {
-        return Err(Error::BadParameters(
-            "EncryptionHeader.Flags has fCryptoAPI clear; [MS-OFFCRYPTO] 2.3.5.1 requires it"
-                .to_string(),
+        return Err(bad(
+            FileField::EncryptionHeaderFlags,
+            FileProblem::FlagClear,
         ));
     }
     if alg_id != 0 && alg_id != ALG_ID_RC4 {
         return Err(Error::UnsupportedAlgorithm {
             what: "EncryptionHeader.AlgID",
-            name: format!("{alg_id:#010x}"),
+            name: AlgorithmName::AlgId(alg_id),
         });
     }
     if alg_id_hash != 0 && alg_id_hash != ALG_ID_HASH_SHA1 {
         return Err(Error::UnsupportedAlgorithm {
             what: "EncryptionHeader.AlgIDHash",
-            name: format!("{alg_id_hash:#010x}"),
+            name: AlgorithmName::AlgId(alg_id_hash),
         });
     }
 
@@ -176,36 +190,48 @@ pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, Error> {
         key_size
     };
     if !RC4_KEY_BITS.contains(&key_bits) || key_bits % 8 != 0 {
-        return Err(Error::BadParameters(format!(
-            "EncryptionHeader.KeySize is {key_size}; RC4 CryptoAPI allows {}..={} bits in \
-             steps of 8",
-            RC4_KEY_BITS.start(),
-            RC4_KEY_BITS.end()
-        )));
+        return Err(bad(
+            FileField::EncryptionHeaderKeySize,
+            FileProblem::NotInSet {
+                got: key_size.into(),
+                allowed: AllowedSet::Rc4KeyBits,
+                bound: Bound::Spec,
+            },
+        ));
     }
 
     let Some(verifier) = structure.get(header_end..header_end + VERIFIER_LEN) else {
-        return Err(Error::BadParameters(format!(
-            "EncryptionVerifier missing or truncated: {} bytes follow the header, \
-             {VERIFIER_LEN} are needed",
-            structure.len().saturating_sub(header_end)
-        )));
+        return Err(bad(
+            FileField::EncryptionVerifier,
+            FileProblem::Truncated {
+                have: wide(structure.len().saturating_sub(header_end)),
+                need: wide(VERIFIER_LEN),
+            },
+        ));
     };
     let v32 = |at: usize| crate::binary_office::le32(verifier, at);
     let (Some(salt_size), Some(verifier_hash_size)) = (v32(0), v32(36)) else {
-        return Err(Error::BadParameters(
-            "EncryptionVerifier fields unreadable".to_string(),
-        ));
+        return Err(Error::InvariantViolated(Invariant::InternalSlice));
     };
     if salt_size != SALT_LEN as u32 {
-        return Err(Error::BadParameters(format!(
-            "EncryptionVerifier.SaltSize is {salt_size}; [MS-OFFCRYPTO] 2.3.5.2 requires 16"
-        )));
+        return Err(bad(
+            FileField::VerifierSaltSize,
+            FileProblem::NotRequiredValue {
+                got: salt_size.into(),
+                required: wide(SALT_LEN),
+                bound: Bound::Spec,
+            },
+        ));
     }
     if verifier_hash_size != VERIFIER_HASH_LEN as u32 {
-        return Err(Error::BadParameters(format!(
-            "EncryptionVerifier.VerifierHashSize is {verifier_hash_size}; SHA-1 gives 20"
-        )));
+        return Err(bad(
+            FileField::VerifierHashSize,
+            FileProblem::NotRequiredValue {
+                got: verifier_hash_size.into(),
+                required: wide(VERIFIER_HASH_LEN),
+                bound: Bound::Spec,
+            },
+        ));
     }
 
     let mut salt = [0u8; SALT_LEN];
@@ -218,11 +244,7 @@ pub(crate) fn parse(structure: &[u8]) -> Result<CryptoApiHeader, Error> {
     ] {
         match verifier.get(range) {
             Some(src) if src.len() == dst.len() => dst.copy_from_slice(src),
-            _ => {
-                return Err(Error::BadParameters(
-                    "EncryptionVerifier fields unreadable".to_string(),
-                ))
-            }
+            _ => return Err(Error::InvariantViolated(Invariant::InternalSlice)),
         }
     }
 
@@ -251,12 +273,9 @@ impl CryptoApiKeySchedule {
     /// again here so that a caller skipping `parse` cannot make `block_key` slice past
     /// a SHA-1 digest.
     pub(crate) fn new(password: &str, salt: &[u8; SALT_LEN], key_bits: u32) -> Result<Self, Error> {
+        // `parse` bounds it first, so reaching this is ours (#47).
         if !RC4_KEY_BITS.contains(&key_bits) || key_bits % 8 != 0 {
-            return Err(Error::BadParameters(format!(
-                "an RC4 CryptoAPI key of {key_bits} bits is outside {}..={}",
-                RC4_KEY_BITS.start(),
-                RC4_KEY_BITS.end()
-            )));
+            return Err(Error::InvariantViolated(Invariant::Rc4KeyLength));
         }
         // The UTF-16LE re-encoding is wrapped and scoped to this statement, as in
         // `standard::derive_standard_key`: see `sensitive::utf16le_password` for the
@@ -535,14 +554,20 @@ mod tests {
                 20,
             ));
             assert!(
-                matches!(&got, Err(Error::BadParameters(m)) if m.contains("KeySize")),
+                matches!(
+                    &got,
+                    Err(Error::BadParameters {
+                        field: FileField::EncryptionHeaderKeySize,
+                        problem: FileProblem::NotInSet { .. },
+                    })
+                ),
                 "KeySize {bits}: {got:?}"
             );
         }
         // The schedule's own guard, for a caller that skips `parse`.
         assert!(matches!(
             CryptoApiKeySchedule::new("pw", &DOC_SALT, 256),
-            Err(Error::BadParameters(_))
+            Err(Error::InvariantViolated(Invariant::Rc4KeyLength))
         ));
     }
 
@@ -562,22 +587,71 @@ mod tests {
             20,
         );
         // Too small for the fixed fields.
-        assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, 31, 16, 20)), Err(Error::BadParameters(m)) if m.contains("EncryptionHeaderSize"))
-        );
+        assert!(matches!(
+            parse(&structure(
+                4,
+                2,
+                GOOD_FLAGS,
+                ALG_ID_RC4,
+                ALG_ID_HASH_SHA1,
+                128,
+                31,
+                16,
+                20
+            )),
+            Err(Error::BadParameters {
+                field: FileField::EncryptionHeaderSize,
+                problem: FileProblem::OutOfRange {
+                    got: 31,
+                    bound: Bound::Spec,
+                    ..
+                }
+            })
+        ));
         // Over the cap.
-        assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, RC4_ENCRYPTION_HEADER_SIZE_MAX as u32 + 1, 16, 20)), Err(Error::BadParameters(m)) if m.contains("over the"))
-        );
+        assert!(matches!(
+            parse(&structure(
+                4,
+                2,
+                GOOD_FLAGS,
+                ALG_ID_RC4,
+                ALG_ID_HASH_SHA1,
+                128,
+                RC4_ENCRYPTION_HEADER_SIZE_MAX as u32 + 1,
+                16,
+                20
+            )),
+            Err(Error::BadParameters {
+                field: FileField::EncryptionHeaderSize,
+                problem: FileProblem::OutOfRange {
+                    bound: Bound::Margin,
+                    ..
+                }
+            })
+        ));
         // Under the cap but past the bytes present: the header would swallow the verifier
         // and run off the end.
-        assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, RC4_ENCRYPTION_HEADER_SIZE_MAX as u32, 16, 20)), Err(Error::BadParameters(m)) if m.contains("follow the prefix"))
-        );
+        assert!(matches!(
+            parse(&structure(
+                4,
+                2,
+                GOOD_FLAGS,
+                ALG_ID_RC4,
+                ALG_ID_HASH_SHA1,
+                128,
+                RC4_ENCRYPTION_HEADER_SIZE_MAX as u32,
+                16,
+                20
+            )),
+            Err(Error::BadParameters {
+                field: FileField::EncryptionHeaderSize,
+                problem: FileProblem::OutOfBounds { .. }
+            })
+        ));
         // Truncations: the prefix, the header, the verifier.
         for cut in [0usize, 11, 12, 40, good.len() - 60, good.len() - 1] {
             assert!(
-                matches!(parse(&good[..cut]), Err(Error::BadParameters(_))),
+                matches!(parse(&good[..cut]), Err(Error::BadParameters { .. })),
                 "cut at {cut}"
             );
         }
@@ -597,30 +671,97 @@ mod tests {
         }
         assert!(matches!(
             parse(&structure(4, 2, GOOD_FLAGS | FLAG_EXTERNAL, 0, 0, 128, CSP_HEADER_SIZE, 16, 20)),
-            Err(Error::UnsupportedAlgorithm { what: "EncryptionHeader.Flags", name }) if name.contains("fExternal")
+            Err(Error::UnsupportedAlgorithm { what: "EncryptionHeader.Flags", name: AlgorithmName::Fixed(name) }) if name.contains("fExternal")
         ));
         assert!(matches!(
             parse(&structure(4, 2, GOOD_FLAGS | FLAG_AES, 0x660E, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 16, 20)),
-            Err(Error::UnsupportedAlgorithm { what: "EncryptionHeader.Flags", name }) if name.contains("fAES")
+            Err(Error::UnsupportedAlgorithm { what: "EncryptionHeader.Flags", name: AlgorithmName::Fixed(name) }) if name.contains("fAES")
         ));
         assert!(matches!(
-            parse(&structure(4, 2, GOOD_FLAGS, 0x660E, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 16, 20)),
-            Err(Error::UnsupportedAlgorithm { what: "EncryptionHeader.AlgID", name }) if name == "0x0000660e"
+            parse(&structure(
+                4,
+                2,
+                GOOD_FLAGS,
+                0x660E,
+                ALG_ID_HASH_SHA1,
+                128,
+                CSP_HEADER_SIZE,
+                16,
+                20
+            )),
+            Err(Error::UnsupportedAlgorithm {
+                what: "EncryptionHeader.AlgID",
+                name: AlgorithmName::AlgId(0x660E)
+            })
         ));
         assert!(matches!(
-            parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, 0x800C, 128, CSP_HEADER_SIZE, 16, 20)),
-            Err(Error::UnsupportedAlgorithm { what: "EncryptionHeader.AlgIDHash", name }) if name == "0x0000800c"
+            parse(&structure(
+                4,
+                2,
+                GOOD_FLAGS,
+                ALG_ID_RC4,
+                0x800C,
+                128,
+                CSP_HEADER_SIZE,
+                16,
+                20
+            )),
+            Err(Error::UnsupportedAlgorithm {
+                what: "EncryptionHeader.AlgIDHash",
+                name: AlgorithmName::AlgId(0x800C)
+            })
         ));
         assert!(matches!(
-            parse(&structure(4, 2, FLAG_DOC_PROPS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 16, 20)),
-            Err(Error::BadParameters(m)) if m.contains("fCryptoAPI")
+            parse(&structure(
+                4,
+                2,
+                FLAG_DOC_PROPS,
+                ALG_ID_RC4,
+                ALG_ID_HASH_SHA1,
+                128,
+                CSP_HEADER_SIZE,
+                16,
+                20
+            )),
+            Err(Error::BadParameters {
+                field: FileField::EncryptionHeaderFlags,
+                problem: FileProblem::FlagClear
+            })
         ));
         // The verifier's own two sizes.
-        assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 32, 20)), Err(Error::BadParameters(m)) if m.contains("SaltSize"))
-        );
-        assert!(
-            matches!(parse(&structure(4, 2, GOOD_FLAGS, ALG_ID_RC4, ALG_ID_HASH_SHA1, 128, CSP_HEADER_SIZE, 16, 32)), Err(Error::BadParameters(m)) if m.contains("VerifierHashSize"))
-        );
+        assert!(matches!(
+            parse(&structure(
+                4,
+                2,
+                GOOD_FLAGS,
+                ALG_ID_RC4,
+                ALG_ID_HASH_SHA1,
+                128,
+                CSP_HEADER_SIZE,
+                32,
+                20
+            )),
+            Err(Error::BadParameters {
+                field: FileField::VerifierSaltSize,
+                problem: FileProblem::NotRequiredValue { got: 32, .. }
+            })
+        ));
+        assert!(matches!(
+            parse(&structure(
+                4,
+                2,
+                GOOD_FLAGS,
+                ALG_ID_RC4,
+                ALG_ID_HASH_SHA1,
+                128,
+                CSP_HEADER_SIZE,
+                16,
+                32
+            )),
+            Err(Error::BadParameters {
+                field: FileField::VerifierHashSize,
+                problem: FileProblem::NotRequiredValue { got: 32, .. }
+            })
+        ));
     }
 }

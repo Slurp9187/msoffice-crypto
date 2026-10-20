@@ -37,6 +37,9 @@
 //! half of the same ECB helper, so the two directions cannot drift the way two
 //! derivations written side by side can.
 use crate::error::Error;
+use crate::file_params::{
+    bad, wide, AlgorithmName, AllowedSet, Bound, FileField, FileProblem, Invariant,
+};
 use crate::limits;
 use crate::segments::{read_full, SEGMENT_LEN};
 use crate::sensitive::{
@@ -216,27 +219,37 @@ pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, E
     // ceiling on 32 fixed bytes plus a CSP name. The field is an unconstrained `u32`
     // reached before any password work, so it is checked before it is used as an offset.
     let header_size = read_u32(info, 0) as usize;
+    // The floor is the structure's own (32 fixed bytes); the ceiling is a margin of
+    // ours for 32 fixed bytes and a CSP name. Two refusals, two bounds.
+    let header_range = |bound| {
+        bad(
+            FileField::EncryptionHeaderSize,
+            FileProblem::OutOfRange {
+                got: wide(header_size),
+                min: wide(HEADER_FIXED_LEN),
+                max: wide(limits::RC4_ENCRYPTION_HEADER_SIZE_MAX),
+                bound,
+            },
+        )
+    };
     if header_size < HEADER_FIXED_LEN {
-        return Err(Error::BadParameters(format!(
-            "EncryptionHeaderSize is {header_size}; the EncryptionHeader's fixed fields \
-             alone take {HEADER_FIXED_LEN}"
-        )));
+        return Err(header_range(Bound::Spec));
     }
     if header_size > limits::RC4_ENCRYPTION_HEADER_SIZE_MAX {
-        return Err(Error::BadParameters(format!(
-            "EncryptionHeaderSize is {header_size}, over the {} this crate allows for 32 \
-             fixed bytes and a CSP name",
-            limits::RC4_ENCRYPTION_HEADER_SIZE_MAX
-        )));
+        return Err(header_range(Bound::Margin));
     }
 
     // The header itself. `info[0..4]` is the size field, so the header runs from 4 and
     // the verifier from `4 + header_size`.
     let Some(h) = info.get(4..4 + header_size) else {
-        return Err(Error::BadParameters(format!(
-            "EncryptionHeaderSize is {header_size} but only {} bytes follow it",
-            info.len() - 4
-        )));
+        return Err(bad(
+            FileField::EncryptionHeaderSize,
+            FileProblem::OutOfBounds {
+                offset: 4,
+                len: wide(header_size),
+                end: wide(info.len()),
+            },
+        ));
     };
 
     let flags = read_u32(h, 0);
@@ -259,11 +272,14 @@ pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, E
     // be one [MS-OFFCRYPTO] §2.3.4.5 permits: "This value MUST be 0x00000080 (AES-128),
     // 0x000000C0 (AES-192), or 0x00000100 (AES-256)."
     if !limits::STANDARD_KEY_BITS_AES.contains(&key_size_bits) {
-        return Err(Error::BadParameters(format!(
-            "EncryptionHeader.KeySize is {key_size_bits}; [MS-OFFCRYPTO] 2.3.4.5 permits \
-             {:?} for AES",
-            limits::STANDARD_KEY_BITS_AES
-        )));
+        return Err(bad(
+            FileField::EncryptionHeaderKeySize,
+            FileProblem::NotInSet {
+                got: key_size_bits.into(),
+                allowed: AllowedSet::AesKeyBits,
+                bound: Bound::Spec,
+            },
+        ));
     }
     // Second, where the `AlgID` names a key length of its own, `KeySize` must agree with
     // it: §2.3.2 gives AES-128, AES-192 and AES-256 three distinct AlgIDs *and* three
@@ -273,10 +289,14 @@ pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, E
     // for a password that was right.
     if let Some(named) = named_key_bits {
         if key_size_bits != named {
-            return Err(Error::BadParameters(format!(
-                "EncryptionHeader.KeySize is {key_size_bits} but AlgID {alg_id:#010x} names \
-                 AES-{named}; [MS-OFFCRYPTO] 2.3.2 pairs each AlgID with one KeySize"
-            )));
+            return Err(bad(
+                FileField::EncryptionHeaderKeySize,
+                FileProblem::Disagrees {
+                    got: key_size_bits.into(),
+                    expected: named.into(),
+                    with: FileField::EncryptionHeaderAlgId,
+                },
+            ));
         }
     }
 
@@ -299,10 +319,18 @@ pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, E
         ));
     }
 
-    let salt_size = read_u32(v, 0) as usize;
+    // A value the file declares, so a bad parameter, not a missing stream (#47; it was
+    // `MissingStream` until 0.1.0-rc.9). `rc4_cryptoapi::parse` reports its copy the
+    // same way.
+    let salt_size = read_u32(v, 0);
     if salt_size != 16 {
-        return Err(Error::MissingStream(
-            "unexpected EncryptionVerifier salt size",
+        return Err(bad(
+            FileField::VerifierSaltSize,
+            FileProblem::NotRequiredValue {
+                got: salt_size.into(),
+                required: 16,
+                bound: Bound::Spec,
+            },
         ));
     }
 
@@ -315,10 +343,14 @@ pub(crate) fn parse_encryption_info(info: &[u8]) -> Result<StandardParams<'_>, E
     // its copy of the same field for the same reason; the two now agree.
     let verifier_hash_size = read_u32(v, 36);
     if verifier_hash_size as usize != SHA1_LEN {
-        return Err(Error::BadParameters(format!(
-            "EncryptionVerifier.VerifierHashSize is {verifier_hash_size}; \
-             [MS-OFFCRYPTO] 2.3.4.9 requires {SHA1_LEN} (SHA-1)"
-        )));
+        return Err(bad(
+            FileField::VerifierHashSize,
+            FileProblem::NotRequiredValue {
+                got: verifier_hash_size.into(),
+                required: wide(SHA1_LEN),
+                bound: Bound::Spec,
+            },
+        ));
     }
 
     Ok(StandardParams {
@@ -437,11 +469,11 @@ fn aes_key_bits(flags: u32, alg_id: u32) -> Result<Option<u32>, Error> {
     match alg_id {
         ALG_ID_RC4 | 0 => Err(Error::UnsupportedAlgorithm {
             what: WHAT,
-            name: "RC4 CryptoAPI (0x00006801)".to_string(),
+            name: AlgorithmName::Fixed("RC4 CryptoAPI (0x00006801)"),
         }),
         other => Err(Error::UnsupportedAlgorithm {
             what: WHAT,
-            name: format!("{other:#010x}"),
+            name: AlgorithmName::AlgId(other),
         }),
     }
 }
@@ -465,7 +497,7 @@ fn require_sha1(alg_id_hash: u32) -> Result<(), Error> {
         ALG_ID_HASH_SHA1 | 0 => Ok(()),
         other => Err(Error::UnsupportedAlgorithm {
             what: "EncryptionHeader/@AlgIDHash",
-            name: format!("{other:#010x}"),
+            name: AlgorithmName::AlgId(other),
         }),
     }
 }
@@ -500,13 +532,9 @@ pub(crate) fn derive_standard_key(
     // pins it to 128 bits before calling; re-checked here so a future caller cannot
     // slice past the 40 bytes two SHA-1 digests actually supply — and checked first,
     // so a request this cannot meet costs no hashing.
+    // `decrypt` pins the key size before this runs, so reaching it is ours (#47).
     if key_size_bytes > 2 * SHA1_LEN {
-        return Err(Error::BadParameters(format!(
-            "EncryptionHeader.KeySize asks for a {}-byte key; the SHA-1 XOR ladder \
-             yields {}",
-            key_size_bytes,
-            2 * SHA1_LEN
-        )));
+        return Err(Error::InvariantViolated(Invariant::KeyLadderLength));
     }
 
     // H_0 = SHA1(salt + password_utf16le)
@@ -600,10 +628,15 @@ fn decrypt_package_to<S: Read + Seek, W: Write>(
     // the caller quietly received the writer's final-segment padding appended to their
     // ZIP. Compared as `u64`, so no cast can shorten it first.
     if declared_size > data_len {
-        return Err(Error::BadParameters(format!(
-            "EncryptedPackage declares {declared_size} plaintext bytes but carries only \
-             {data_len} bytes of ciphertext"
-        )));
+        return Err(bad(
+            FileField::EncryptedPackageSize,
+            FileProblem::OutOfRange {
+                got: declared_size,
+                min: 0,
+                max: data_len,
+                bound: Bound::Spec,
+            },
+        ));
     }
 
     let mut body = encrypted_package.by_ref().take(data_len);
@@ -649,11 +682,10 @@ fn decrypt_package(key: &DerivedKey, encrypted_package: &[u8]) -> Result<Vec<u8>
 /// states what the cipher requires, and a future caller that skips the first still hits
 /// the second.
 fn check_aes_key(key: &[u8]) -> Result<(), Error> {
+    // The parse boundary refuses every KeySize AES does not define, so reaching this
+    // is ours (#47).
     if !AES_KEY_LENS.contains(&key.len()) {
-        return Err(Error::BadParameters(format!(
-            "AES-ECB takes a 16-, 24- or 32-byte key; this file's parameters produced {}",
-            key.len()
-        )));
+        return Err(Error::InvariantViolated(Invariant::AesKeyLength));
     }
     Ok(())
 }
@@ -875,7 +907,13 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("EncryptionHeaderSize {declared} must be refused"));
             assert!(
-                matches!(err, Error::BadParameters(_) | Error::MissingStream(_)),
+                matches!(
+                    err,
+                    Error::BadParameters {
+                        field: FileField::EncryptionHeaderSize,
+                        ..
+                    } | Error::MissingStream(_)
+                ),
                 "declared={declared} got {err:?}"
             );
         }
@@ -905,9 +943,10 @@ mod tests {
             match &err {
                 Error::UnsupportedAlgorithm { what, name } => {
                     assert_eq!(*what, "EncryptionHeader/@AlgIDHash");
-                    assert!(
-                        name.contains(&format!("{alg_id_hash:#010x}")),
-                        "the refusal must name the value, got: {name}"
+                    assert_eq!(
+                        *name,
+                        AlgorithmName::AlgId(alg_id_hash),
+                        "the refusal must name the value"
                     );
                 }
                 other => panic!("expected UnsupportedAlgorithm, got {other:?}"),
@@ -937,12 +976,14 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("VerifierHashSize {verifier_hash_size} must be refused"));
             assert!(
-                matches!(err, Error::BadParameters(_)),
-                "expected BadParameters for {verifier_hash_size}, got {err:?}"
-            );
-            assert!(
-                err.to_string().contains("VerifierHashSize"),
-                "the refusal must name the field, got: {err}"
+                matches!(
+                    err,
+                    Error::BadParameters {
+                        field: FileField::VerifierHashSize,
+                        problem: FileProblem::NotRequiredValue { got, required: 20, .. },
+                    } if got == u64::from(verifier_hash_size)
+                ),
+                "expected the VerifierHashSize refusal for {verifier_hash_size}, got {err:?}"
             );
         }
         // The control.
@@ -995,7 +1036,7 @@ mod tests {
             assert!(
                 matches!(
                     derive_standard_key("pw", b"1234567890123456", key_size_bytes),
-                    Err(Error::BadParameters(_))
+                    Err(Error::InvariantViolated(Invariant::KeyLadderLength))
                 ),
                 "key_size_bytes={key_size_bytes} must be an error"
             );
@@ -1020,14 +1061,14 @@ mod tests {
             assert!(
                 matches!(
                     aes_ecb_decrypt(&vec![0u8; key_len], &[0u8; 16]),
-                    Err(Error::BadParameters(_))
+                    Err(Error::InvariantViolated(Invariant::AesKeyLength))
                 ),
                 "a {key_len}-byte key must be an error, not a panic"
             );
             assert!(
                 matches!(
                     aes_ecb_encrypt(&vec![0u8; key_len], &[0u8; 16]),
-                    Err(Error::BadParameters(_))
+                    Err(Error::InvariantViolated(Invariant::AesKeyLength))
                 ),
                 "a {key_len}-byte key must be an error on the encrypt side too"
             );
@@ -1085,8 +1126,13 @@ mod tests {
             // them and `Vec<u8>`'s `Debug` would bury the assertion.
             let got = decrypt_package(&key, &forged).map(|p| p.len());
             assert!(
-                matches!(&got, Err(Error::BadParameters(msg))
-                    if msg.contains("EncryptedPackage declares")),
+                matches!(
+                    &got,
+                    Err(Error::BadParameters {
+                        field: FileField::EncryptedPackageSize,
+                        problem: FileProblem::OutOfRange { .. },
+                    })
+                ),
                 "declared={declared} got: {got:?}"
             );
         }
@@ -1149,7 +1195,7 @@ mod tests {
             let err = aes_key_bits(flags, alg_id).expect_err("must be refused");
             assert!(
                 matches!(&err, Error::UnsupportedAlgorithm { what, name }
-                    if *what == "EncryptionHeader/@AlgID" && name.contains(expected)),
+                    if *what == "EncryptionHeader/@AlgID" && name.to_string().contains(expected)),
                 "flags={flags:#x} algId={alg_id:#x} got: {err:?}"
             );
         }
@@ -1403,8 +1449,16 @@ mod tests {
                 panic!("AlgID {alg_id:#010x} with KeySize {key_size_bits} must be refused")
             });
             assert!(
-                matches!(&err, Error::BadParameters(msg)
-                    if msg.contains("KeySize") && msg.contains("AlgID")),
+                matches!(
+                    &err,
+                    Error::BadParameters {
+                        field: FileField::EncryptionHeaderKeySize,
+                        problem: FileProblem::Disagrees {
+                            with: FileField::EncryptionHeaderAlgId,
+                            ..
+                        },
+                    }
+                ),
                 "AlgID={alg_id:#010x} KeySize={key_size_bits} must name both fields, got: {err}"
             );
         }
@@ -1442,7 +1496,13 @@ mod tests {
                     .err()
                     .unwrap_or_else(|| panic!("KeySize {key_size_bits} must be refused"));
                 assert!(
-                    matches!(&err, Error::BadParameters(msg) if msg.contains("KeySize")),
+                    matches!(
+                        &err,
+                        Error::BadParameters {
+                            field: FileField::EncryptionHeaderKeySize,
+                            ..
+                        }
+                    ),
                     "KeySize={key_size_bits} algId={alg_id:#010x} got: {err}"
                 );
             }
