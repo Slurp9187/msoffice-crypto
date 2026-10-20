@@ -519,6 +519,18 @@ fn fixture_copy(s: &Scratch, name: &str, as_name: &str) -> PathBuf {
     dest
 }
 
+/// `agile_encrypted.docx`, copied into `s`, for every test that runs `decrypt` on it with
+/// no `-o`. Most of those are refusals, but the derived output's temporary,
+/// `.agile_encrypted.docx.msoffice-crypto.tmp`, is one name for all of them: run in
+/// parallel on the fixture itself, two tests raced for that file in tests/fixtures/ and
+/// Windows refused the loser (`Access is denied`, exit 2 where 4 was asserted).
+fn agile_copy(s: &Scratch) -> String {
+    fixture_copy(s, "agile_encrypted.docx", "agile_encrypted.docx")
+        .to_str()
+        .expect("utf-8 path")
+        .to_string()
+}
+
 #[cfg(feature = "legacy-binary")]
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -1004,7 +1016,8 @@ fn the_env_value_is_raw_but_the_file_is_first_line() {
     // THE ASYMMETRY, proved with one string. Neither half can pass both ways, and
     // together they are the negative control CLAUDE.md demands: a test where only one
     // direction ever fails cannot distinguish "rule wired" from "always fails".
-    let agile_path = agile();
+    let s = Scratch::new("asymmetry");
+    let agile_path = agile_copy(&s);
 
     // Part A: an env value is used RAW, so the trailing newline is part of the password
     // and the real one does not match.
@@ -1022,7 +1035,6 @@ fn the_env_value_is_raw_but_the_file_is_first_line() {
 
     // Part B: the SAME "testpass\n" written to a password file must decrypt, because the
     // file path strips exactly one trailing newline.
-    let s = Scratch::new("asymmetry");
     let path = pw_file(&s, "pw.txt", "testpass\n");
     let out = run(&[
         "decrypt",
@@ -1042,10 +1054,10 @@ fn the_env_value_is_raw_but_the_file_is_first_line() {
 
 #[test]
 fn a_trailing_space_in_a_password_file_survives_but_a_newline_does_not() {
-    let agile_path = agile();
+    let s = Scratch::new("trailing-space");
+    let agile_path = agile_copy(&s);
 
     // Part A: a trailing SPACE is part of the password, and the fixture's is not.
-    let s = Scratch::new("trailing-space");
     let path = pw_file(&s, "pw.txt", "testpass \n");
     let out = run(&[
         "decrypt",
@@ -1080,7 +1092,8 @@ fn a_trailing_space_in_a_password_file_survives_but_a_newline_does_not() {
 
 #[test]
 fn two_password_sources_is_a_usage_error_naming_both() {
-    let agile_path = agile();
+    let s = Scratch::new("two-sources");
+    let agile_path = agile_copy(&s);
     let env_args: &[&str] = &["--password-env", "PW"];
     let file_args: &[&str] = &["--password-file", "p"];
     let stdin_args: &[&str] = &["--password-stdin"];
@@ -1112,7 +1125,8 @@ fn two_password_sources_is_a_usage_error_naming_both() {
 
 #[test]
 fn no_password_source_without_a_tty_fails_rather_than_hanging() {
-    let agile_path = agile();
+    let s = Scratch::new("no-source");
+    let agile_path = agile_copy(&s);
     // THE NO-HANG PROPERTY IS ENFORCED, NOT OBSERVED: run_bounded kills the child and
     // fails the test by name if it has not exited within 30s.
     let out = run_bounded(&["decrypt", &agile_path], 30);
@@ -1128,7 +1142,8 @@ fn no_password_source_without_a_tty_fails_rather_than_hanging() {
 
 #[test]
 fn there_is_no_password_value_flag_and_the_reason_is_the_message() {
-    let agile_path = agile();
+    let s = Scratch::new("no-value-flag");
+    let agile_path = agile_copy(&s);
     for sub in ["decrypt", "encrypt"] {
         let out = run(&[sub, &agile_path, "--password", NEVER_PRINT]);
         assert_eq!(code(&out), EX_USAGE, "{sub}: {}", stderr(&out));
@@ -1152,7 +1167,8 @@ fn there_is_no_password_value_flag_and_the_reason_is_the_message() {
 
 #[test]
 fn the_named_environment_variable_is_never_read_unless_it_is_named() {
-    let agile_path = agile();
+    let s = Scratch::new("named-control");
+    let agile_path = agile_copy(&s);
 
     // No source flag at all: the variable being SET must not make it apply implicitly.
     // stdin is null, so a Prompt fallback would fail the no-TTY guard rather than hang;
@@ -1175,7 +1191,6 @@ fn the_named_environment_variable_is_never_read_unless_it_is_named() {
 
     // Positive control: the SAME variable, WITH --password-env naming it, must decrypt.
     // This is what proves the first half measures "not implicit" rather than "broken".
-    let s = Scratch::new("named-control");
     let out = run_with_env(
         &[
             "decrypt",
@@ -1194,7 +1209,7 @@ fn the_named_environment_variable_is_never_read_unless_it_is_named() {
 #[test]
 fn a_missing_password_file_is_an_io_error() {
     let s = Scratch::new("missing-pwfile");
-    let agile_path = agile();
+    let agile_path = agile_copy(&s);
     let out = run(&[
         "decrypt",
         &agile_path,
@@ -1207,7 +1222,8 @@ fn a_missing_password_file_is_an_io_error() {
 
 #[test]
 fn an_unset_password_env_var_is_a_usage_error() {
-    let agile_path = agile();
+    let s = Scratch::new("unset-env");
+    let agile_path = agile_copy(&s);
     let out = Command::new(bin())
         .args(["decrypt", &agile_path, "--password-env", UNSET_ENV_NAME])
         .env_remove(UNSET_ENV_NAME)
@@ -1224,7 +1240,8 @@ fn a_non_unicode_password_variable_never_reaches_stderr() {
     // THE CLAUDE.md CRYPTOGRAPHIC-RULES TEST: `VarError::NotUnicode`'s `Display` embeds
     // the OsString. A `map_err(|e| ...)` with `{e}` in `read_password`'s Env arm would put
     // the password on stderr; this is the one test in the repository that would catch it.
-    let agile_path = agile();
+    let s = Scratch::new("non-unicode");
+    let agile_path = agile_copy(&s);
     let out = run_with_env(
         &["decrypt", &agile_path, "--password-env", ENV_NAME],
         ENV_NAME,
@@ -1241,7 +1258,8 @@ fn a_non_unicode_password_variable_never_reaches_stderr() {
 
 #[test]
 fn no_failure_path_echoes_the_password() {
-    let agile_path = agile();
+    let s = Scratch::new("no-echo");
+    let agile_path = agile_copy(&s);
 
     // env, wrong password.
     let out = run_with_env(
@@ -1257,7 +1275,6 @@ fn no_failure_path_echoes_the_password() {
     );
 
     // file, wrong password.
-    let s = Scratch::new("no-echo");
     let path = pw_file(&s, "pw.txt", &format!("{NEVER_PRINT}\n"));
     let out = run(&[
         "decrypt",
@@ -1344,7 +1361,7 @@ fn help_never_defines_a_password_value_option_but_the_prose_denies_it() {
 #[test]
 fn an_empty_password_source_is_a_usage_error_not_a_wrong_password() {
     let s = Scratch::new("empty-pw");
-    let agile_path = agile();
+    let agile_path = agile_copy(&s);
 
     let empty = pw_file(&s, "empty.txt", "");
     let out = run(&[
@@ -1406,7 +1423,8 @@ fn the_equals_form_carries_a_password_file_end_to_end() {
 
 #[test]
 fn a_near_miss_password_flag_is_given_a_suggestion() {
-    let agile_path = agile();
+    let s = Scratch::new("near-miss");
+    let agile_path = agile_copy(&s);
     let out = run(&["decrypt", "--password-en", "X", &agile_path]);
     assert_eq!(code(&out), EX_USAGE, "stderr: {}", stderr(&out));
     assert!(stderr(&out).contains("--password-env"), "{}", stderr(&out));
