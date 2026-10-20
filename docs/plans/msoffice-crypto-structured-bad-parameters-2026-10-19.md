@@ -1,4 +1,4 @@
-Status: Approved, in progress (2026-10-19). The owner answered all five open points as recommended (2026-10-19 UTC; § Open points).
+Status: Shipped in #51 (2026-10-19), unreleased until 0.1.0-rc.9 is published. The owner answered all five open points as recommended (2026-10-19 UTC; § Open points). Two findings refined the plan: the stream read cap became `StreamTooLarge { stream, limit }` with no length, because the capped read stops one byte past the limit; and the record walkers' faults needed a `FileProblem::Unreadable { offset }`.
 
 # Plan: a refusal of the file's own settings carries no text from the file
 
