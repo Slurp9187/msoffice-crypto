@@ -451,3 +451,16 @@ missing_errors_doc = "warn"
 missing_panics_doc = "warn"
 missing_safety_doc = "warn"
 too_long_first_doc_paragraph = "warn"
+
+# The dev and test builds are optimized; overflow checks and debug assertions are separate
+# settings and stay on, so a debug build still traps what it trapped before. Unoptimized,
+# key derivation (tens of thousands of digest iterations per call) was the bulk of every
+# test job: on CI's runner one `crypto-ops` run spent 130 s in the lib tests and 108 s in
+# `tests/streaming_memory.rs`'s one test; locally, 29.6 s and 47.9 s became 0.8 s and 3.5 s.
+# Dependencies at 3, this crate at 1 to keep its own build quick. Profiles are ignored when
+# this crate is a dependency, so consumers are unaffected.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
