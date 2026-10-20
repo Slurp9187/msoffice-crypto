@@ -11,7 +11,7 @@ sibling solved it before inventing something new.
 
 ## Project Status — release candidates published, no stable release
 
-> **`0.1.0-rc.2` through `0.1.0-rc.7` are live on crates.io, none yanked; `CHANGELOG.md`'s
+> **`0.1.0-rc.2` through `0.1.0-rc.9` are live on crates.io, none yanked; `CHANGELOG.md`'s
 > dated headings say when each was cut, and the registry index is the check. There is no
 > stable release. The only known consumer is a private application in the same hands.**
 
@@ -354,7 +354,7 @@ requirement, not a convenience.** Two exact pins on one semver-compatible range 
 be satisfied: a probe crate requiring `msoffice-crypto = "=0.1.0-rc.7"` and
 `secure-gate = "=0.9.0-rc.13"` fails resolution with `failed to select a version for
 secure-gate` (measured 2026-10-18). So the consumer can take rc.13 only by taking
-`0.1.0-rc.8` with it. **No secure-gate type crosses this crate's public API, by design**,
+`0.1.0-rc.8` or later with it (rc.9 is the current one). **No secure-gate type crosses this crate's public API, by design**,
 which is what lets a consumer on a different *range* (0.8.x against this crate's 0.9.x) hold
 both side by side; it does not help two releases of the same range. This paragraph said "a
 consumer on a different version resolves both side by side without conflict" until the
