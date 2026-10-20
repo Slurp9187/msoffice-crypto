@@ -22,7 +22,7 @@ What survives that move is in two places, deliberately:
 
 ---
 
-## [0.1.0-rc.9] - Unreleased
+## [0.1.0-rc.9] - 2026-10-19
 
 ### A refusal of the file's own settings carries no text from the file
 
