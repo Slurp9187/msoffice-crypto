@@ -48,9 +48,10 @@ name: CI
 
 on:
   # Every branch, not just main: work here lands on feature branches that often have
-  # no PR open yet, and a push is the only signal there. The cost is a duplicate run
-  # once a PR does exist. Narrow to `[main]` if that noise outweighs the earlier
-  # feedback. Same shape as odf-crypto's workflow, deliberately.
+  # no PR open yet, and a push is the only signal there. Once a PR does exist, its run
+  # and the branch's push run share one concurrency group (below), so the later one
+  # supersedes the earlier rather than both running to the end. Same shape as
+  # odf-crypto's workflow, deliberately.
   push:
     branches: ["**"]
   pull_request:
@@ -59,9 +60,13 @@ on:
 permissions:
   contents: read
 
-# Supersede a running check when the same ref is pushed again.
+# Supersede a running check when the same branch is pushed again -- by branch, not by
+# `github.ref`, because a PR's run is on `refs/pull/N/merge` and its branch's push run on
+# `refs/heads/<branch>`: keyed on the ref, every PR ran the whole matrix twice. The head
+# repository is in the key so a fork's PR from a branch named `main` cannot cancel a run
+# on this repository's `main`.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 env:
