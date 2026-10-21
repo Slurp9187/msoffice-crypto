@@ -11,7 +11,7 @@ sibling solved it before inventing something new.
 
 ## Project Status — release candidates published, no stable release
 
-> **`0.1.0-rc.2` through `0.1.0-rc.9` are live on crates.io, none yanked; `CHANGELOG.md`'s
+> **`0.1.0-rc.2` through `0.1.0-rc.10` are live on crates.io, none yanked; `CHANGELOG.md`'s
 > dated headings say when each was cut, and the registry index is the check. There is no
 > stable release. The only known consumer is a private application in the same hands.**
 
