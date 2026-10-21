@@ -77,10 +77,10 @@ they cannot open.
 ```toml
 [dependencies]
 # Detection only — no cryptographic dependency.
-msoffice-crypto = "0.1.0-rc.9"
+msoffice-crypto = "0.1.0-rc.10"
 
 # Detection, decryption and encryption.
-msoffice-crypto = { version = "0.1.0-rc.9", features = ["crypto-ops"] }
+msoffice-crypto = { version = "0.1.0-rc.10", features = ["crypto-ops"] }
 ```
 
 Pre-release versions are not matched by ordinary requirements — name the full version as
@@ -380,7 +380,7 @@ to put its types on the boundary was withdrawn as a design error, so a consumer 
 different secure-gate range (0.8.x, say) resolves both side by side without conflict. Within
 0.9.x it cannot: the pin here is exact, and Cargo holds one version per semver-compatible
 range, so a consumer that also depends on secure-gate 0.9 directly must name the release this
-crate pins (`0.9.0-rc.13` for this version).
+crate pins (`0.9.0-rc.15` for this version).
 
 ## Trademarks
 

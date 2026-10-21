@@ -22,6 +22,23 @@ What survives that move is in two places, deliberately:
 
 ---
 
+## [0.1.0-rc.10] - 2026-10-20
+
+### `secure-gate` moves to 0.9.0-rc.15, and the API does not move
+
+The exact pin goes from `=0.9.0-rc.13` to `=0.9.0-rc.15`. Nothing in this crate's API
+changes; the only change since rc.9 is that pin.
+
+secure-gate rc.14 and rc.15 change only its opt-in `sealed` feature: the pre-key's page
+alignment, then a guarded off-heap mapping for it, with `LockError::page_too_large` removed.
+This crate does not enable `sealed`, so none of that is compiled here. The new
+`guarded-block` crate that `sealed` depends on does not enter the graph. The lockfile diff is
+secure-gate's own version, and each feature graph keeps its size.
+
+The reason is the consumer's graph, as it was for rc.13 in 0.1.0-rc.8: Cargo holds one
+version per semver-compatible range, so an application that depends on secure-gate 0.9
+directly can take rc.15 only by taking this release with it.
+
 ## [0.1.0-rc.9] - 2026-10-19
 
 ### A refusal of the file's own settings carries no text from the file
@@ -1881,6 +1898,8 @@ job is parsing bytes an attacker chose — and, as usefully, what does not.
 [MS-CFB]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/
 [MS-PPT]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-ppt/
 [MS-ODRAW]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-odraw/
+[0.1.0-rc.10]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.9...v0.1.0-rc.10
+[0.1.0-rc.9]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.8...v0.1.0-rc.9
 [0.1.0-rc.8]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.7...v0.1.0-rc.8
 [0.1.0-rc.7]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.6...v0.1.0-rc.7
 [0.1.0-rc.6]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.5...v0.1.0-rc.6
