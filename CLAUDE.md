@@ -11,9 +11,9 @@ sibling solved it before inventing something new.
 
 ## Project Status — release candidates published, no stable release
 
-> **`0.1.0-rc.2` through `0.1.0-rc.11` are live on crates.io, none yanked; `CHANGELOG.md`'s
-> dated headings say when each was cut, and the registry index is the check. There is no
-> stable release. The only known consumer is a private application in the same hands.**
+> **Release candidates of `0.1.0`, from `rc.2` on, are live on crates.io; the registry
+> index is the check for which and whether any is yanked, and `CHANGELOG.md`'s dated
+> headings say when each was cut. There is no stable release. The only known consumer is a private application in the same hands.**
 
 This section said "has never been published" until 2026-09-19, two weeks after it stopped
 being true. The conclusions below were right anyway, but for a reason the text did not give,
@@ -42,17 +42,17 @@ an rc line is for.
   includes — all fine, and expected, in a 0.x crate with one consumer.
 - **The one real constraint is that consumer's Office handler, and it is live.** It was
   dormant until rc.2 published and this file said so for four days after it stopped being
-  true. Verified in the consumer's own tree rather than taken on report (`Cargo.toml:244`,
-  as of encrypted-file-vault `39569b0`, its `main` on 2026-10-28): it takes this crate from
-  crates.io pinned at exactly `0.1.0-rc.10` with default features off, enables it through
+  true. Verified in the consumer's own tree rather than taken on report (encrypted-file-vault's
+  `main` on 2026-10-28): its root `Cargo.toml` takes this crate from crates.io pinned to one
+  exact rc with default features off — read the version there, not here — enables it through
   `msoffice-crypto/legacy-binary` (the superset, for `decrypt_binary_office`; in
   `crates/efv-core/Cargo.toml`), and calls eleven entry points — `classify`,
   `classify_from`, `is_cfb_office`, `decrypt_ooxml_with_policy`, `decrypt_ooxml_to`,
   `decrypt_binary_office`, `encrypt_ooxml`, `encrypt_ooxml_with_params`,
   `encrypt_ooxml_with_params_to`, `encrypt_ooxml_standard_with_key_bits` and
-  `encrypt_ooxml_standard_with_key_bits_to` (the same eleven on 2026-10-28). This paragraph
-  named rc.7 and seven entry points, none streaming, until 2026-10-20, and rc.9 until
-  2026-10-28, after the consumer had moved to rc.10.
+  `encrypt_ooxml_standard_with_key_bits_to`. This paragraph named the pinned rc, a line
+  number and a commit until 2026-10-28, and went stale at every bump (it said rc.9 while the
+  consumer was on rc.10); the entry points change only with the API, so they stay.
   **Every item on the old re-enable list is done**, so that list is history rather than a
   to-do.
 
@@ -356,15 +356,14 @@ this crate's open spots.
 
 **secure-gate version.** This crate tracks 0.9.x, matching `odf-crypto`, and the
 dependency is optional on `crypto-ops` — the detection build holds no key material.
-This crate pins `=0.9.0-rc.15` (`Cargo.toml:350`), from 0.1.0-rc.10. The consumer named
-above pins `=0.9.0-rc.15` (`Cargo.toml:91` there, as of encrypted-file-vault `39569b0`, its
-`main` on 2026-10-28), alongside `msoffice-crypto = "=0.1.0-rc.10"`, which is rc.15 too, so
-its graph holds one copy today; rc.11 keeps rc.15, so moving to it needs no secure-gate move. **Within 0.9.x the two must move together, and that is a
-requirement, not a convenience.** Two exact pins on one semver-compatible range cannot both
+This crate pins one exact 0.9 rc in `Cargo.toml`, and the consumer named above pins one in
+its own root `Cargo.toml`; read both there. **Within 0.9.x the two pins must name the same
+release, and that is a requirement, not a convenience.** Two exact pins on one semver-compatible range cannot both
 be satisfied: a probe crate requiring `msoffice-crypto = "=0.1.0-rc.7"` and
 `secure-gate = "=0.9.0-rc.13"` fails resolution with `failed to select a version for
-secure-gate` (measured 2026-10-18). So the consumer can take rc.13 only by taking
-`0.1.0-rc.8` or later with it, and rc.15 only by taking `0.1.0-rc.10` or later. **No secure-gate type crosses this crate's public API, by design**,
+secure-gate` (measured 2026-10-18). So a bump of this crate that also moves its secure-gate
+pin obliges the consumer to move its own pin with it; `CHANGELOG.md` says which release moved
+it. **No secure-gate type crosses this crate's public API, by design**,
 which is what lets a consumer on a different *range* (0.8.x against this crate's 0.9.x) hold
 both side by side; it does not help two releases of the same range. This paragraph said "a
 consumer on a different version resolves both side by side without conflict" until the
