@@ -60,6 +60,22 @@ its reads were never system calls.
   Its errors carry no position, which would lose the offset that
   `a_bad_base64_symbol_is_reported_by_offset_and_not_by_value` holds.
 
+**The four-reader gate, run on the final tree** (2026-10-28, tree `5091c5c`, clean). The
+base64 bump sits on the encrypt path, so the gate was run even though no written byte
+was expected to change. Artifact `msoffice_crypto_encrypt_ooxml.docx`, SHA-256
+`489456e737ade0d036e325d5bd5635464a531b021c0acc89c7c3687687e02177`:
+
+- Word 16.0 build 16.0.19127: PASS (opened, content matches; wrong password refused
+  `0x800A1520`). The COM driver ran under Windows PowerShell 5.1
+  (`MSOFFICE_CRYPTO_PWSH=powershell`), because this workstation has no `pwsh`.
+- LibreOffice 26.8.0.3: PASS (opened, content matches; wrong password asked for another)
+- msoffcrypto-tool 6.0.0: PASS (byte-identical, `dataIntegrity` HMAC verifies)
+- office-crypto 0.3: PASS (byte-identical)
+
+`GATE: PASS (4 of 4 readers ran)`. `--tamper --expect-fail` failed all four readers, and
+`--corrupt-integrity --expect-fail` failed three. The fourth was office-crypto, which does
+not verify `dataIntegrity`.
+
 ## [0.1.0-rc.10] - 2026-10-20
 
 ### `secure-gate` moves to 0.9.0-rc.15, and the API does not move
