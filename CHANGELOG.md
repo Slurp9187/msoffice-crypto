@@ -42,6 +42,15 @@ in the consumer on a 64 MiB file. Decrypt went from 135 to 269 MiB/s (agile) and
 No signature, refusal or result changes. A caller passing a `Cursor` gains little, because
 its reads were never system calls.
 
+### Dependencies
+
+- `zip`, a dev-dependency used only to inflate `docProps/core.xml` in
+  `tests/fixture_identity.rs`, moves from 2.4 to 9.1.3. It now names one inflater,
+  `deflate-flate2-zlib-rs`. The `deflate` feature would also pull the `zopfli` compressor.
+  The lockfile loses `zopfli`, `miniz_oxide`, `syn` and seven others, and gains `zlib-rs`
+  and `typed-path`. zip 9 needs rustc 1.88. The MSRV 1.85 build still passes, because it
+  builds the library and not the tests. No library graph changes.
+
 ## [0.1.0-rc.10] - 2026-10-20
 
 ### `secure-gate` moves to 0.9.0-rc.15, and the API does not move
