@@ -22,6 +22,26 @@ What survives that move is in two places, deliberately:
 
 ---
 
+## [0.1.0-rc.11] - Unreleased
+
+### The container is read through a 4 KiB buffer (#55)
+
+`cfb` reads the allocation table 4 bytes per `read` call, and both places that open a
+container, `classify_from` and the decrypt path, handed it the caller's reader as it came.
+On an unbuffered `File` every one of those calls is a system call. Both now put a 4096-byte
+`BufReader` in front of `cfb`. The bytes it holds are container structure and ciphertext,
+so it is neither wrapped nor wiped.
+
+On a 4 MiB agile package built in the test, `classify_from` goes from 8,548 `read` calls to
+202 and `decrypt_ooxml_to` from 8,686 to 340.
+`the_container_is_read_through_a_buffer_not_four_bytes_at_a_time` holds both under a
+ceiling, and fails with either buffer removed. The throughput figures in #55 were measured
+in the consumer on a 64 MiB file. Decrypt went from 135 to 269 MiB/s (agile) and from 180 to
+536 MiB/s (standard).
+
+No signature, refusal or result changes. A caller passing a `Cursor` gains little, because
+its reads were never system calls.
+
 ## [0.1.0-rc.10] - 2026-10-20
 
 ### `secure-gate` moves to 0.9.0-rc.15, and the API does not move
@@ -1898,6 +1918,7 @@ job is parsing bytes an attacker chose — and, as usefully, what does not.
 [MS-CFB]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/
 [MS-PPT]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-ppt/
 [MS-ODRAW]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-odraw/
+[0.1.0-rc.11]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.10...HEAD
 [0.1.0-rc.10]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.9...v0.1.0-rc.10
 [0.1.0-rc.9]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.8...v0.1.0-rc.9
 [0.1.0-rc.8]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.7...v0.1.0-rc.8

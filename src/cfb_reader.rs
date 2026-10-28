@@ -13,6 +13,15 @@ use crate::error::Error;
 use crate::limits::ENCRYPTION_INFO_READ_CAP;
 use std::io::{Read, Seek};
 
+/// The buffer `classify_from` and the decrypt path put between the caller's reader and
+/// `cfb`, which reads the allocation table 4 bytes per `read` call: about 267,000 calls
+/// for a 64 MiB file, each a system call on an unbuffered `File` (#55). One sector of the
+/// version 4 container, and the page size, so a read that misses costs one page.
+///
+/// What passes through it is container structure and ciphertext, never key material or
+/// plaintext, so the buffer is not wrapped and needs no wiping.
+pub(crate) const CFB_READ_BUFFER: usize = 4096;
+
 /// Take `\EncryptionInfo` from a container already open — the shape `classify` and the
 /// decrypt path use, which open the container once and ask it several things. The
 /// payload is never read, so classifying a 200 MB document costs the container header

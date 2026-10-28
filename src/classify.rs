@@ -715,6 +715,7 @@ pub fn classify_from<R: Read + Seek>(mut reader: R) -> Classification {
         if reader.seek(SeekFrom::Start(0)).is_err() {
             return unknown(Container::Cfb, ContainerRead::Unreadable);
         }
+        let reader = std::io::BufReader::with_capacity(cfb_reader::CFB_READ_BUFFER, reader);
         return match cfb::CompoundFile::open(reader) {
             Ok(mut cfb) => classify_cfb(&mut cfb),
             Err(_) => unknown(Container::Cfb, ContainerRead::Unreadable),
