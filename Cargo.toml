@@ -223,7 +223,11 @@ hmac = { version = "0.12", optional = true }
 aes = { version = "0.8", optional = true, features = ["zeroize"] }
 cbc = { version = "0.1", optional = true, features = ["block-padding", "zeroize"] }
 ecb = { version = "0.1", optional = true }
-base64 = { version = "0.22", optional = true }
+# Default features off for `simd-unsafe`, default-on since 0.23: runtime-dispatched
+# `unsafe` AVX2/NEON code on the parse path of a hostile file, to speed up the few hundred
+# bytes of base64 an agile `EncryptionInfo` holds. `alloc` is all `Engine::decode` and
+# `encode` need.
+base64 = { version = "0.23", optional = true, default-features = false, features = ["alloc"] }
 
 # The two primitives only the 97-2003 binary formats use (feature `legacy-binary`).
 # RustCrypto, MIT/Apache-2.0, on the same `cipher` 0.4 / `digest` 0.10 lines as `aes`

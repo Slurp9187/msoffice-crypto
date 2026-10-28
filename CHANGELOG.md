@@ -50,6 +50,15 @@ its reads were never system calls.
   The lockfile loses `zopfli`, `miniz_oxide`, `syn` and seven others, and gains `zlib-rs`
   and `typed-path`. zip 9 needs rustc 1.88. The MSRV 1.85 build still passes, because it
   builds the library and not the tests. No library graph changes.
+- `base64` moves from 0.22 to 0.23, with default features off. 0.23 turns on
+  `simd-unsafe` by default: runtime-dispatched `unsafe` SIMD, which is not worth having on
+  the parse path of a hostile file for the few hundred bytes an agile `EncryptionInfo`
+  holds. Error messages are unchanged and still report the offset of a bad symbol. The
+  dev graph keeps a second copy, 0.22.1, through the `office-crypto` oracle.
+  `base64ct` was considered instead and not taken. Its constant-time decoding protects
+  nothing here, because every value in the XML is a salt or ciphertext already in the file.
+  Its errors carry no position, which would lose the offset that
+  `a_bad_base64_symbol_is_reported_by_offset_and_not_by_value` holds.
 
 ## [0.1.0-rc.10] - 2026-10-20
 

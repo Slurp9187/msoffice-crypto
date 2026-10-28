@@ -39,6 +39,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -448,7 +454,7 @@ name = "msoffice-crypto"
 version = "0.1.0-rc.11"
 dependencies = [
  "aes",
- "base64",
+ "base64 0.23.1",
  "cbc",
  "cfb",
  "chacha20",
@@ -506,7 +512,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c87c499d4091b8d0d311968583456b45fb127bc30f75ed0170727e6440b8a091"
 dependencies = [
  "aes",
- "base64",
+ "base64 0.22.1",
  "bytemuck",
  "cbc",
  "derivative",
