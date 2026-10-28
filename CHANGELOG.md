@@ -24,20 +24,39 @@ What survives that move is in two places, deliberately:
 
 ## [0.1.0-rc.11] - 2026-10-28
 
-### The container is read through a 4 KiB buffer (#55)
+### The container is read through a sector-sized buffer that survives a seek (#55)
 
 `cfb` reads the allocation table 4 bytes per `read` call, and both places that open a
 container, `classify_from` and the decrypt path, handed it the caller's reader as it came.
-On an unbuffered `File` every one of those calls is a system call. Both now put a 4096-byte
-`BufReader` in front of `cfb`. The bytes it holds are container structure and ciphertext,
-so it is neither wrapped nor wiped.
+On an unbuffered `File` every one of those calls is a system call. Both now put a
+512-byte buffer in front of `cfb`, one sector of a version 3 container, which keeps what it
+holds when `cfb` seeks to a target inside it. The bytes it holds are container structure
+and ciphertext, so it is neither wrapped nor wiped.
 
-On a 4 MiB agile package built in the test, `classify_from` goes from 8,548 `read` calls to
-202 and `decrypt_ooxml_to` from 8,686 to 340.
-`the_container_is_read_through_a_buffer_not_four_bytes_at_a_time` holds both under a
-ceiling, and fails with either buffer removed. The throughput figures in #55 were measured
-in the consumer on a 64 MiB file. Decrypt went from 135 to 269 MiB/s (agile) and from 180 to
-536 MiB/s (standard).
+Both halves of that are load-bearing. The first `v0.1.0-rc.11` tag put a plain 4096-byte
+`BufReader` there, and EFV's header-only guard caught it before publication: `BufReader`
+discards its buffer on every seek, `cfb` seeks before most reads, and each seek became a
+4 KiB refill to use one 512-byte sector. Classifying a 4 MiB container read 823 KB of it, and
+the share grew with the file, so on on-demand or network storage a question about the
+header pulled megabytes. The tag was moved to this change; that version was never
+published.
+
+`classify_from` on a 4 MiB agile package built in the test, as calls and bytes:
+
+| reader in front of `cfb` | calls | bytes |
+| --- | --- | --- |
+| none (0.1.0-rc.10) | 8,548 | about 36 KB |
+| `BufReader`, 4096 (the first rc.11 tag) | 202 | 823,304 |
+| this | 75 | 37,896 |
+
+`decrypt_ooxml_to` on the same package goes from 8,686 calls to 213. On a 4 MiB standard
+package, `classify_from` makes 73 calls for 36,872 bytes, and `decrypt_ooxml_to` 142 calls. `the_container_is_read_through_a_buffer_not_four_bytes_at_a_time`
+holds the calls and the bytes under ceilings, on an agile and a standard package, and
+fails with the buffer removed, with a plain `BufReader` of either size, and with this
+reader at 4096. `the_seek_buffer_agrees_with_an_unbuffered_reader_on_every_seek` holds its
+bytes and positions to a bare `Cursor`'s over every kind of seek. The throughput in #55
+(decrypt 135 to 269 MiB/s agile, 180 to 536 standard, on 64 MiB in the consumer) was
+measured on the plain 4096-byte buffer, not this one.
 
 No signature, refusal or result changes. A caller passing a `Cursor` gains little, because
 its reads were never system calls.
@@ -60,10 +79,12 @@ its reads were never system calls.
   Its errors carry no position, which would lose the offset that
   `a_bad_base64_symbol_is_reported_by_offset_and_not_by_value` holds.
 
-**The four-reader gate, run on the final tree** (2026-10-28, tree `5091c5c`, clean). The
+**The four-reader gate, run on the final tree** (2026-10-28, tree `5055abb`, clean). The
 base64 bump sits on the encrypt path, so the gate was run even though no written byte
-was expected to change. Artifact `msoffice_crypto_encrypt_ooxml.docx`, SHA-256
-`489456e737ade0d036e325d5bd5635464a531b021c0acc89c7c3687687e02177`:
+was expected to change. It was first run on `5091c5c`, the first tag's tree, with the
+same verdicts, and run again here after the buffer change. Artifact
+`msoffice_crypto_encrypt_ooxml.docx`, SHA-256
+`b2613318404948156bf6ac2dce2db962cb101080a5b2421edea76551a42eecee`:
 
 - Word 16.0 build 16.0.19127: PASS (opened, content matches; wrong password refused
   `0x800A1520`). The COM driver ran under Windows PowerShell 5.1

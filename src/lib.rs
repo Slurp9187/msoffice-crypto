@@ -1194,7 +1194,7 @@ fn decrypt_ooxml_core<R: Read + Seek, W: Write>(
         return Err(Error::NotACfbFile);
     }
     reader.seek(SeekFrom::Start(0))?;
-    let reader = std::io::BufReader::with_capacity(cfb_reader::CFB_READ_BUFFER, reader);
+    let reader = cfb_reader::SeekBufReader::new(reader)?;
     let mut cfb = cfb::CompoundFile::open(reader).map_err(container_error)?;
 
     // A rights-managed package has an `EncryptedPackage` and no `EncryptionInfo`; without

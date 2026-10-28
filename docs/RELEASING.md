@@ -139,10 +139,10 @@ fewer in each column, the CLI's interrupt fallback, which exists only off Window
 
 | Build | tarball | repository |
 | --- | --- | --- |
-| detection | 45 passed, 0 failed, **17 ignored** | 62 passed, **0 ignored** |
-| `crypto-ops` | 258 passed, 0 failed, **30 ignored** | 300 passed, **0 ignored** |
-| `legacy-binary` | 295 passed, 0 failed, **45 ignored** | 366 passed, **0 ignored** |
-| `cli,legacy-binary` | 343 passed, 0 failed, **45 ignored** | 477 passed, **0 ignored** |
+| detection | 46 passed, 0 failed, **17 ignored** | 63 passed, **0 ignored** |
+| `crypto-ops` | 259 passed, 0 failed, **30 ignored** | 301 passed, **0 ignored** |
+| `legacy-binary` | 296 passed, 0 failed, **45 ignored** | 367 passed, **0 ignored** |
+| `cli,legacy-binary` | 344 passed, 0 failed, **45 ignored** | 478 passed, **0 ignored** |
 
 **`tools/check_test_counts.py` measures this table, and CI runs it** (the `test-counts`
 job). It runs every configuration in the repository, packages the crate, extracts it to a
