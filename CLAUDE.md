@@ -347,6 +347,12 @@ closes only the first, and `Closes #10-#15` closes nothing at all. One keyword p
 Verify with
 `gh pr view <n> --json closingIssuesReferences` rather than trusting the prose.
 
+**Streaming.** Before changing a streaming encrypt or decrypt path, a buffer or segment size,
+or the peak-heap gate, load the global `streaming-crypto` skill. It holds the rules this crate
+shares with the other format crates EFV uses (one cipher per key, buffer the parser and never
+the plaintext, bound every input, prove a change with a bench and a memory gate), and lists
+this crate's open spots.
+
 **secure-gate version.** This crate tracks 0.9.x, matching `odf-crypto`, and the
 dependency is optional on `crypto-ops` — the detection build holds no key material.
 This crate pins `=0.9.0-rc.15` (`Cargo.toml:346`), from 0.1.0-rc.10. The consumer named
