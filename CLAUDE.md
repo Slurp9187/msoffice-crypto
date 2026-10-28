@@ -258,7 +258,7 @@ src/standard_encrypt.rs the Office 2007 writer: salt, derived key, verifier blob
 src/integrity.rs       dataIntegrity HMAC verification + IntegrityPolicy / IntegrityOutcome
 src/hash.rs            HashAlgorithm dispatch and IV derivation           (crypto-ops)
 src/segments.rs        the reader-driven 4096-byte segmenter both directions share (D4)   (+ segments_tests.rs)
-src/cfb_reader.rs      capped stream reads, and read_full, which every reader-driven loop uses
+src/cfb_reader.rs      capped stream reads, read_full, which every reader-driven loop uses, and SeekBufReader, the sector-sized buffer in front of cfb
 src/limits.rs          every bound, each with cited provenance
 src/sensitive.rs       secure-gate aliases — the only place they are declared   (+ sensitive_tests.rs)
 src/error.rs           Error -- the crate's single public error type

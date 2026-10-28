@@ -11,16 +11,83 @@
 
 use crate::error::Error;
 use crate::limits::ENCRYPTION_INFO_READ_CAP;
-use std::io::{Read, Seek};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 
 /// The buffer `classify_from` and the decrypt path put between the caller's reader and
 /// `cfb`, which reads the allocation table 4 bytes per `read` call: about 267,000 calls
-/// for a 64 MiB file, each a system call on an unbuffered `File` (#55). One sector of the
-/// version 4 container, and the page size, so a read that misses costs one page.
+/// for a 64 MiB file, each a system call on an unbuffered `File` (#55).
+///
+/// One sector of the version 3 container, the smallest a CFB has ([MS-CFB] §2.2,
+/// `SectorShift` 9). `cfb` seeks to a sector before reading it, so a refill starts on a
+/// sector boundary and a buffer no larger than a sector never reads past the sector asked
+/// for. At 4096 it did: a version 3 allocation table is scattered 512-byte sectors, and
+/// each refill took eight sectors to use one. A version 4 container's 4096-byte sectors
+/// cost eight refills each here, which is still a call per 128 FAT entries.
 ///
 /// What passes through it is container structure and ciphertext, never key material or
 /// plaintext, so the buffer is not wrapped and needs no wiping.
-pub(crate) const CFB_READ_BUFFER: usize = 4096;
+pub(crate) const CFB_READ_BUFFER: usize = 512;
+
+/// A [`BufReader`] that keeps its buffer across a seek landing inside it.
+///
+/// `cfb` seeks to every sector before reading it, and `BufReader::seek` discards the
+/// buffer whatever the target, so a plain one turns each of those seeks into a fresh
+/// refill. With a 4096-byte buffer, classifying a 4 MiB container read 823 KB of it, a
+/// share that grows with the file, where a header-only read was the point: on on-demand
+/// or network storage that is megabytes pulled to answer "is this encrypted" (found by
+/// EFV's header-only guard before rc.11 was published). `BufReader::seek_relative` keeps
+/// the buffer when the target is inside it, so this tracks the logical position and
+/// turns `cfb`'s absolute seeks into relative ones: a directory entry or a short stream
+/// in the sector just read is served from the buffer.
+pub(crate) struct SeekBufReader<R> {
+    inner: BufReader<R>,
+    /// The logical position: where the next byte handed out comes from.
+    pos: u64,
+}
+
+impl<R: Read + Seek> SeekBufReader<R> {
+    pub(crate) fn new(mut reader: R) -> io::Result<Self> {
+        let pos = reader.stream_position()?;
+        Ok(SeekBufReader {
+            inner: BufReader::with_capacity(CFB_READ_BUFFER, reader),
+            pos,
+        })
+    }
+}
+
+impl<R: Read> Read for SeekBufReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.pos = self.pos.saturating_add(n as u64);
+        Ok(n)
+    }
+}
+
+impl<R: Read + Seek> Seek for SeekBufReader<R> {
+    fn seek(&mut self, target: SeekFrom) -> io::Result<u64> {
+        let relative = match target {
+            SeekFrom::Start(to) => i64::try_from(i128::from(to) - i128::from(self.pos)).ok(),
+            SeekFrom::Current(by) => Some(by),
+            SeekFrom::End(_) => None,
+        };
+        match relative {
+            Some(by) => match self.inner.seek_relative(by) {
+                Ok(()) => {
+                    self.pos = self.pos.checked_add_signed(by).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "seek before byte 0")
+                    })?;
+                }
+                // A failed relative seek leaves the position unknown: ask the reader.
+                Err(e) => {
+                    self.pos = self.inner.stream_position()?;
+                    return Err(e);
+                }
+            },
+            None => self.pos = self.inner.seek(target)?,
+        }
+        Ok(self.pos)
+    }
+}
 
 /// Take `\EncryptionInfo` from a container already open — the shape `classify` and the
 /// decrypt path use, which open the container once and ask it several things. The
@@ -154,5 +221,46 @@ mod tests {
     fn an_ordinary_encryption_info_stream_is_returned_whole() {
         let data = cfb_with_encryption_info(1441);
         assert_eq!(read_encryption_info(&data).unwrap().len(), 1441);
+    }
+
+    /// `SeekBufReader` hands out the bytes and positions a bare `Cursor` does, over every
+    /// path its `seek` takes: a target inside the buffer either side of the position, one
+    /// outside it, `Current`, `End`, past the end, and before byte 0, which both refuse.
+    /// A position that drifted would have `cfb` read the wrong sector without a word.
+    #[test]
+    fn the_seek_buffer_agrees_with_an_unbuffered_reader_on_every_seek() {
+        let data: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        let mut plain = Cursor::new(data.clone());
+        let mut buffered = SeekBufReader::new(Cursor::new(data)).unwrap();
+        let steps = [
+            (SeekFrom::Start(0), 7),
+            (SeekFrom::Start(100), 4),   // forward, inside the buffer
+            (SeekFrom::Start(20), 4),    // backward, inside the buffer
+            (SeekFrom::Start(511), 2),   // across the buffer's end
+            (SeekFrom::Start(4_000), 3), // outside it
+            (SeekFrom::Current(-3), 10),
+            (SeekFrom::Current(300), 1),
+            (SeekFrom::End(-5), 10), // runs out after five
+            (SeekFrom::End(10), 4),  // past the end: reads nothing
+            (SeekFrom::Start(9_999), 1),
+            (SeekFrom::Start(0), 600), // more than the buffer holds
+        ];
+        for (i, (to, len)) in steps.into_iter().enumerate() {
+            let at = plain.seek(to).unwrap();
+            assert_eq!(
+                buffered.seek(to).unwrap(),
+                at,
+                "step {i}: position after {to:?}"
+            );
+            let (mut want, mut got) = (vec![0u8; len], vec![0u8; len]);
+            let n = read_full(&mut plain, &mut want).unwrap();
+            assert_eq!(read_full(&mut buffered, &mut got).unwrap(), n, "step {i}");
+            assert_eq!(got, want, "step {i}: bytes after {to:?}");
+        }
+        // Before byte 0 is refused by both, and leaves the position usable.
+        let at = plain.stream_position().unwrap();
+        assert!(plain.seek(SeekFrom::Current(-1_000_000)).is_err());
+        assert!(buffered.seek(SeekFrom::Current(-1_000_000)).is_err());
+        assert_eq!(buffered.stream_position().unwrap(), at);
     }
 }

@@ -721,17 +721,31 @@ fn require_on_a_standard_file_writes_nothing() {
     assert_eq!(sink.bytes, 0);
 }
 
-/// A reader that counts the `read` calls reaching it: what an unbuffered `File` turns into
-/// system calls, one each.
+/// A reader that counts the `read` calls reaching it, and the bytes they return: what an
+/// unbuffered `File` turns into system calls, one each, and what on-demand or network
+/// storage has to fetch.
 struct CountingReads {
     inner: Cursor<Vec<u8>>,
     reads: usize,
+    bytes: usize,
+}
+
+impl CountingReads {
+    fn new(data: Vec<u8>) -> Self {
+        CountingReads {
+            inner: Cursor::new(data),
+            reads: 0,
+            bytes: 0,
+        }
+    }
 }
 
 impl Read for CountingReads {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.reads += 1;
-        self.inner.read(buf)
+        let n = self.inner.read(buf)?;
+        self.bytes += n;
+        Ok(n)
     }
 }
 impl Seek for CountingReads {
@@ -742,40 +756,70 @@ impl Seek for CountingReads {
 
 /// `cfb` reads its allocation table 4 bytes per call, so without a buffer in front of it
 /// the caller's reader sees a call per FAT entry, and a call is a system call on a `File`
-/// (#55). Measured on a 4 MiB package, encrypted here so the published crate runs it:
-/// 8,548 reads to classify and 8,686 to decrypt without the buffer, 202 and 340 with it.
-/// The ceilings sit between the two, with room on both sides.
+/// (#55). It also seeks before most reads, and `std`'s `BufReader` discards its buffer on
+/// every seek, so a plain one turns each seek into a fresh refill: `classify_from` then
+/// reads a growing share of the file it was meant to read the header of. Both are held
+/// here, on a 4 MiB package of each kind, encrypted here so the published crate runs it.
+///
+/// `classify_from` on the agile package, as calls and bytes:
+///
+/// | reader in front of `cfb` | calls | bytes |
+/// | --- | --- | --- |
+/// | none (0.1.0-rc.10) | 8,548 | about 36 KB |
+/// | `BufReader`, 4096 (the unpublished rc.11 tag) | 202 | 823,304 |
+/// | `BufReader`, 512 | 202 | 102,920 |
+/// | `SeekBufReader`, 4096 | 67 | 270,344 |
+/// | `SeekBufReader`, 512 (this) | 75 | 37,896 |
+///
+/// The ceilings sit between this row and the nearest other, so each of the four fails it.
 #[test]
 fn the_container_is_read_through_a_buffer_not_four_bytes_at_a_time() {
     let mut plain = fixture("plain.docx");
     plain.resize(4 << 20, 0);
-    let mut encrypted = Cursor::new(Vec::new());
-    encrypt_ooxml_to(Cursor::new(&plain), &mut encrypted, PASSWORD).unwrap();
-    let encrypted = encrypted.into_inner();
+    let cases: [(&str, EncryptTo, Family); 2] = [
+        (
+            "agile",
+            |p, w| encrypt_ooxml_to(Cursor::new(p), w, PASSWORD),
+            Family::Agile,
+        ),
+        (
+            "standard",
+            |p, w| encrypt_ooxml_standard_to(Cursor::new(p), w, PASSWORD),
+            Family::Standard,
+        ),
+    ];
+    for (name, encrypt, family) in cases {
+        let mut encrypted = Cursor::new(Vec::new());
+        encrypt(&plain, &mut encrypted).unwrap();
+        let encrypted = encrypted.into_inner();
 
-    let mut reader = CountingReads {
-        inner: Cursor::new(encrypted.clone()),
-        reads: 0,
-    };
-    let class = classify_from(&mut reader);
-    assert_eq!(class.family, Family::Agile);
-    let classify_reads = reader.reads;
+        let mut reader = CountingReads::new(encrypted.clone());
+        let class = classify_from(&mut reader);
+        assert_eq!(class.family, family, "{name}");
+        let (classify_reads, classify_bytes) = (reader.reads, reader.bytes);
 
-    let mut reader = CountingReads {
-        inner: Cursor::new(encrypted),
-        reads: 0,
-    };
-    let mut out = Vec::new();
-    decrypt_ooxml_to(&mut reader, &mut out, PASSWORD, IntegrityPolicy::default()).unwrap();
-    assert_eq!(out, plain);
-    let decrypt_reads = reader.reads;
+        let mut reader = CountingReads::new(encrypted);
+        let mut out = Vec::new();
+        decrypt_ooxml_to(&mut reader, &mut out, PASSWORD, IntegrityPolicy::default()).unwrap();
+        assert_eq!(out, plain, "{name}");
+        let decrypt_reads = reader.reads;
 
-    assert!(
-        classify_reads < 1_000,
-        "classify_from made {classify_reads} reads"
-    );
-    assert!(
-        decrypt_reads < 2_000,
-        "decrypt_ooxml_to made {decrypt_reads} reads"
-    );
+        eprintln!(
+            "{name}: classify_from {classify_reads} reads, {classify_bytes} bytes; \
+             decrypt_ooxml_to {decrypt_reads} reads"
+        );
+        assert!(
+            classify_reads < 140,
+            "{name}: classify_from made {classify_reads} reads"
+        );
+        assert!(
+            classify_bytes < 64 << 10,
+            "{name}: classify_from read {classify_bytes} bytes of a {} byte container",
+            plain.len()
+        );
+        assert!(
+            decrypt_reads < 2_000,
+            "{name}: decrypt_ooxml_to made {decrypt_reads} reads"
+        );
+    }
 }
