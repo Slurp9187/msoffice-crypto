@@ -22,7 +22,7 @@ What survives that move is in two places, deliberately:
 
 ---
 
-## [0.1.0-rc.11] - 2026-10-28
+## [0.1.0-rc.11] - Unreleased
 
 ### The container is read through a 4 KiB buffer (#55)
 
