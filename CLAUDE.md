@@ -11,7 +11,7 @@ sibling solved it before inventing something new.
 
 ## Project Status — release candidates published, no stable release
 
-> **`0.1.0-rc.2` through `0.1.0-rc.10` are live on crates.io, none yanked; `CHANGELOG.md`'s
+> **`0.1.0-rc.2` through `0.1.0-rc.11` are live on crates.io, none yanked; `CHANGELOG.md`'s
 > dated headings say when each was cut, and the registry index is the check. There is no
 > stable release. The only known consumer is a private application in the same hands.**
 
@@ -42,16 +42,17 @@ an rc line is for.
   includes — all fine, and expected, in a 0.x crate with one consumer.
 - **The one real constraint is that consumer's Office handler, and it is live.** It was
   dormant until rc.2 published and this file said so for four days after it stopped being
-  true. Verified in the consumer's own tree rather than taken on report (`Cargo.toml:236`,
-  as of encrypted-file-vault `1973f7e`, its `main` on 2026-10-20): it takes this crate from
-  crates.io pinned at exactly `0.1.0-rc.9` with default features off, enables it through
+  true. Verified in the consumer's own tree rather than taken on report (`Cargo.toml:244`,
+  as of encrypted-file-vault `39569b0`, its `main` on 2026-10-28): it takes this crate from
+  crates.io pinned at exactly `0.1.0-rc.10` with default features off, enables it through
   `msoffice-crypto/legacy-binary` (the superset, for `decrypt_binary_office`; in
   `crates/efv-core/Cargo.toml`), and calls eleven entry points — `classify`,
   `classify_from`, `is_cfb_office`, `decrypt_ooxml_with_policy`, `decrypt_ooxml_to`,
   `decrypt_binary_office`, `encrypt_ooxml`, `encrypt_ooxml_with_params`,
   `encrypt_ooxml_with_params_to`, `encrypt_ooxml_standard_with_key_bits` and
-  `encrypt_ooxml_standard_with_key_bits_to`. This paragraph named rc.7 and seven entry
-  points, none streaming, until 2026-10-20.
+  `encrypt_ooxml_standard_with_key_bits_to` (the same eleven on 2026-10-28). This paragraph
+  named rc.7 and seven entry points, none streaming, until 2026-10-20, and rc.9 until
+  2026-10-28, after the consumer had moved to rc.10.
   **Every item on the old re-enable list is done**, so that list is history rather than a
   to-do.
 
@@ -355,10 +356,10 @@ this crate's open spots.
 
 **secure-gate version.** This crate tracks 0.9.x, matching `odf-crypto`, and the
 dependency is optional on `crypto-ops` — the detection build holds no key material.
-This crate pins `=0.9.0-rc.15` (`Cargo.toml:346`), from 0.1.0-rc.10. The consumer named
-above pins `=0.9.0-rc.13` (`Cargo.toml:91` there, as of encrypted-file-vault `1973f7e`, its
-`main` on 2026-10-20), alongside `msoffice-crypto = "=0.1.0-rc.9"`, which is rc.13 too, so
-its graph holds one copy today. **Within 0.9.x the two must move together, and that is a
+This crate pins `=0.9.0-rc.15` (`Cargo.toml:350`), from 0.1.0-rc.10. The consumer named
+above pins `=0.9.0-rc.15` (`Cargo.toml:91` there, as of encrypted-file-vault `39569b0`, its
+`main` on 2026-10-28), alongside `msoffice-crypto = "=0.1.0-rc.10"`, which is rc.15 too, so
+its graph holds one copy today; rc.11 keeps rc.15, so moving to it needs no secure-gate move. **Within 0.9.x the two must move together, and that is a
 requirement, not a convenience.** Two exact pins on one semver-compatible range cannot both
 be satisfied: a probe crate requiring `msoffice-crypto = "=0.1.0-rc.7"` and
 `secure-gate = "=0.9.0-rc.13"` fails resolution with `failed to select a version for
