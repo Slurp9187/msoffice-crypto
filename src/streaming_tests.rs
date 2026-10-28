@@ -720,3 +720,62 @@ fn require_on_a_standard_file_writes_nothing() {
     );
     assert_eq!(sink.bytes, 0);
 }
+
+/// A reader that counts the `read` calls reaching it: what an unbuffered `File` turns into
+/// system calls, one each.
+struct CountingReads {
+    inner: Cursor<Vec<u8>>,
+    reads: usize,
+}
+
+impl Read for CountingReads {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.reads += 1;
+        self.inner.read(buf)
+    }
+}
+impl Seek for CountingReads {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+/// `cfb` reads its allocation table 4 bytes per call, so without a buffer in front of it
+/// the caller's reader sees a call per FAT entry, and a call is a system call on a `File`
+/// (#55). Measured on a 4 MiB package, encrypted here so the published crate runs it:
+/// 8,548 reads to classify and 8,686 to decrypt without the buffer, 202 and 340 with it.
+/// The ceilings sit between the two, with room on both sides.
+#[test]
+fn the_container_is_read_through_a_buffer_not_four_bytes_at_a_time() {
+    let mut plain = fixture("plain.docx");
+    plain.resize(4 << 20, 0);
+    let mut encrypted = Cursor::new(Vec::new());
+    encrypt_ooxml_to(Cursor::new(&plain), &mut encrypted, PASSWORD).unwrap();
+    let encrypted = encrypted.into_inner();
+
+    let mut reader = CountingReads {
+        inner: Cursor::new(encrypted.clone()),
+        reads: 0,
+    };
+    let class = classify_from(&mut reader);
+    assert_eq!(class.family, Family::Agile);
+    let classify_reads = reader.reads;
+
+    let mut reader = CountingReads {
+        inner: Cursor::new(encrypted),
+        reads: 0,
+    };
+    let mut out = Vec::new();
+    decrypt_ooxml_to(&mut reader, &mut out, PASSWORD, IntegrityPolicy::default()).unwrap();
+    assert_eq!(out, plain);
+    let decrypt_reads = reader.reads;
+
+    assert!(
+        classify_reads < 1_000,
+        "classify_from made {classify_reads} reads"
+    );
+    assert!(
+        decrypt_reads < 2_000,
+        "decrypt_ooxml_to made {decrypt_reads} reads"
+    );
+}

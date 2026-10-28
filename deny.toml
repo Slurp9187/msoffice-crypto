@@ -66,11 +66,12 @@ version = 2
 # took the MIT half of this crate's offer and then builds the CLI still has to satisfy
 # Apache-2.0 for those two, which is the sentence that whole paragraph above exists for.
 #
-# `zopfli` is Apache-2.0-only as well and is NOT in scope here: it reaches Cargo.lock
-# through the `zip` DEV-dependency (zip's `deflate` feature), appears in no `cargo tree -e
-# normal` output at all, and `exclude-dev = true` above is why this file never sees it. It
-# is not, as the plan once said, pulled by the office-crypto oracle -- `cargo tree -p
-# office-crypto` does not reach it.
+# `zopfli`, Apache-2.0-only as well, was in Cargo.lock until 0.1.0-rc.11 through the `zip`
+# DEV-dependency (zip's `deflate` feature), and never in scope here: it appeared in no
+# `cargo tree -e normal` output, and `exclude-dev = true` above keeps this file from seeing
+# the dev graph. The move to zip 9 names its one inflater, `deflate-flate2-zlib-rs`, and
+# zopfli left the lockfile. It was never, as the plan once said, pulled by the
+# office-crypto oracle -- `cargo tree -p office-crypto` does not reach it.
 #
 # Anything absent is denied: under `version = 2` this list is exhaustive, not advisory.
 # The absences that matter, and are deliberate:

@@ -122,10 +122,9 @@ pub(crate) const AES128_KEY_LEN: usize = 16;
 /// is checked against the format's list (see [`aes_key_bits`]). This one exists for
 /// [`check_aes_key`], whose subject is the cipher's requirement rather than the file's
 /// declaration.
-const AES_KEY_LENS: [usize; 3] = [16, 24, 32];
+const AES_KEY_LENS: [usize; 3] = [AES128_KEY_LEN, 24, 32];
 
 const _: () = {
-    assert!(AES_KEY_LENS[0] == AES128_KEY_LEN);
     assert!(AES_KEY_LENS[0] * 8 == limits::STANDARD_KEY_BITS_AES[0] as usize);
     assert!(AES_KEY_LENS[1] * 8 == limits::STANDARD_KEY_BITS_AES[1] as usize);
     assert!(AES_KEY_LENS[2] * 8 == limits::STANDARD_KEY_BITS_AES[2] as usize);

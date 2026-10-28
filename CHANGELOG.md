@@ -22,6 +22,60 @@ What survives that move is in two places, deliberately:
 
 ---
 
+## [0.1.0-rc.11] - Unreleased
+
+### The container is read through a 4 KiB buffer (#55)
+
+`cfb` reads the allocation table 4 bytes per `read` call, and both places that open a
+container, `classify_from` and the decrypt path, handed it the caller's reader as it came.
+On an unbuffered `File` every one of those calls is a system call. Both now put a 4096-byte
+`BufReader` in front of `cfb`. The bytes it holds are container structure and ciphertext,
+so it is neither wrapped nor wiped.
+
+On a 4 MiB agile package built in the test, `classify_from` goes from 8,548 `read` calls to
+202 and `decrypt_ooxml_to` from 8,686 to 340.
+`the_container_is_read_through_a_buffer_not_four_bytes_at_a_time` holds both under a
+ceiling, and fails with either buffer removed. The throughput figures in #55 were measured
+in the consumer on a 64 MiB file. Decrypt went from 135 to 269 MiB/s (agile) and from 180 to
+536 MiB/s (standard).
+
+No signature, refusal or result changes. A caller passing a `Cursor` gains little, because
+its reads were never system calls.
+
+### Dependencies
+
+- `zip`, a dev-dependency used only to inflate `docProps/core.xml` in
+  `tests/fixture_identity.rs`, moves from 2.4 to 9.1.3. It now names one inflater,
+  `deflate-flate2-zlib-rs`. The `deflate` feature would also pull the `zopfli` compressor.
+  The lockfile loses `zopfli`, `miniz_oxide`, `syn` and seven others, and gains `zlib-rs`
+  and `typed-path`. zip 9 needs rustc 1.88. The MSRV 1.85 build still passes, because it
+  builds the library and not the tests. No library graph changes.
+- `base64` moves from 0.22 to 0.23, with default features off. 0.23 turns on
+  `simd-unsafe` by default: runtime-dispatched `unsafe` SIMD, which is not worth having on
+  the parse path of a hostile file for the few hundred bytes an agile `EncryptionInfo`
+  holds. Error messages are unchanged and still report the offset of a bad symbol. The
+  dev graph keeps a second copy, 0.22.1, through the `office-crypto` oracle.
+  `base64ct` was considered instead and not taken. Its constant-time decoding protects
+  nothing here, because every value in the XML is a salt or ciphertext already in the file.
+  Its errors carry no position, which would lose the offset that
+  `a_bad_base64_symbol_is_reported_by_offset_and_not_by_value` holds.
+
+**The four-reader gate, run on the final tree** (2026-10-28, tree `5091c5c`, clean). The
+base64 bump sits on the encrypt path, so the gate was run even though no written byte
+was expected to change. Artifact `msoffice_crypto_encrypt_ooxml.docx`, SHA-256
+`489456e737ade0d036e325d5bd5635464a531b021c0acc89c7c3687687e02177`:
+
+- Word 16.0 build 16.0.19127: PASS (opened, content matches; wrong password refused
+  `0x800A1520`). The COM driver ran under Windows PowerShell 5.1
+  (`MSOFFICE_CRYPTO_PWSH=powershell`), because this workstation has no `pwsh`.
+- LibreOffice 26.8.0.3: PASS (opened, content matches; wrong password asked for another)
+- msoffcrypto-tool 6.0.0: PASS (byte-identical, `dataIntegrity` HMAC verifies)
+- office-crypto 0.3: PASS (byte-identical)
+
+`GATE: PASS (4 of 4 readers ran)`. `--tamper --expect-fail` failed all four readers, and
+`--corrupt-integrity --expect-fail` failed three. The fourth was office-crypto, which does
+not verify `dataIntegrity`.
+
 ## [0.1.0-rc.10] - 2026-10-20
 
 ### `secure-gate` moves to 0.9.0-rc.15, and the API does not move
@@ -1898,6 +1952,7 @@ job is parsing bytes an attacker chose — and, as usefully, what does not.
 [MS-CFB]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/
 [MS-PPT]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-ppt/
 [MS-ODRAW]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-odraw/
+[0.1.0-rc.11]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.10...HEAD
 [0.1.0-rc.10]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.9...v0.1.0-rc.10
 [0.1.0-rc.9]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.8...v0.1.0-rc.9
 [0.1.0-rc.8]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.7...v0.1.0-rc.8

@@ -77,10 +77,10 @@ they cannot open.
 ```toml
 [dependencies]
 # Detection only — no cryptographic dependency.
-msoffice-crypto = "0.1.0-rc.10"
+msoffice-crypto = "0.1.0-rc.11"
 
 # Detection, decryption and encryption.
-msoffice-crypto = { version = "0.1.0-rc.10", features = ["crypto-ops"] }
+msoffice-crypto = { version = "0.1.0-rc.11", features = ["crypto-ops"] }
 ```
 
 Pre-release versions are not matched by ordinary requirements — name the full version as

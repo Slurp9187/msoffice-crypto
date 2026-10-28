@@ -1664,7 +1664,9 @@ fn base64_error(e: &base64::DecodeError) -> Error {
     Error::XmlParse(match e {
         B64::InvalidByte(at, _) => format!("base64: invalid symbol at offset {at}"),
         B64::InvalidLength(at) => format!("base64: invalid length at offset {at}"),
-        B64::InvalidLastSymbol(at, _) => format!("base64: invalid final symbol at offset {at}"),
+        B64::InvalidLastSymbol { offset: at, .. } => {
+            format!("base64: invalid final symbol at offset {at}")
+        }
         B64::InvalidPadding => "base64: incorrect padding".to_string(),
     })
 }

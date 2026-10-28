@@ -95,7 +95,7 @@
 //! `sha2`, `hmac`, `base64` and `rand`:
 //!
 //! ```toml
-//! msoffice-crypto = { version = "0.1.0-rc.10", features = ["crypto-ops"] }
+//! msoffice-crypto = { version = "0.1.0-rc.11", features = ["crypto-ops"] }
 //! ```
 //!
 //! <div class="warning">
@@ -134,7 +134,7 @@
 //! nothing modern needs — to that build alone:
 //!
 //! ```toml
-//! msoffice-crypto = { version = "0.1.0-rc.10", features = ["legacy-binary"] }
+//! msoffice-crypto = { version = "0.1.0-rc.11", features = ["legacy-binary"] }
 //! ```
 //!
 //! # Bounds on untrusted input
@@ -1194,6 +1194,7 @@ fn decrypt_ooxml_core<R: Read + Seek, W: Write>(
         return Err(Error::NotACfbFile);
     }
     reader.seek(SeekFrom::Start(0))?;
+    let reader = std::io::BufReader::with_capacity(cfb_reader::CFB_READ_BUFFER, reader);
     let mut cfb = cfb::CompoundFile::open(reader).map_err(container_error)?;
 
     // A rights-managed package has an `EncryptedPackage` and no `EncryptionInfo`; without

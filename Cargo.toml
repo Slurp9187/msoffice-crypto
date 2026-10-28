@@ -1,6 +1,6 @@
 [package]
 name = "msoffice-crypto"
-version = "0.1.0-rc.10"
+version = "0.1.0-rc.11"
 edition = "2021"
 description = "Microsoft Office document encryption per MS-OFFCRYPTO: detect, decrypt and encrypt (agile and Office 2007 standard), with key material that zeroizes on drop and a detection build that links no cryptography. Not affiliated with Microsoft."
 rust-version = "1.85"
@@ -223,7 +223,11 @@ hmac = { version = "0.12", optional = true }
 aes = { version = "0.8", optional = true, features = ["zeroize"] }
 cbc = { version = "0.1", optional = true, features = ["block-padding", "zeroize"] }
 ecb = { version = "0.1", optional = true }
-base64 = { version = "0.22", optional = true }
+# Default features off for `simd-unsafe`, default-on since 0.23: runtime-dispatched
+# `unsafe` AVX2/NEON code on the parse path of a hostile file, to speed up the few hundred
+# bytes of base64 an agile `EncryptionInfo` holds. `alloc` is all `Engine::decode` and
+# `encode` need.
+base64 = { version = "0.23", optional = true, default-features = false, features = ["alloc"] }
 
 # The two primitives only the 97-2003 binary formats use (feature `legacy-binary`).
 # RustCrypto, MIT/Apache-2.0, on the same `cipher` 0.4 / `digest` 0.10 lines as `aes`
@@ -389,9 +393,12 @@ cfb = "0.15"
 # deflated inside the package, so a raw byte scan cannot see the author fields at all --
 # that is exactly how a scan over tests/fixtures/ reports the three Office-written agile
 # fixtures as clean when they are not.
-# `default-features = false`: the default set pulls `time`, which requires rustc 1.88
-# and breaks the MSRV 1.85 job -- and this only ever inflates one deflated entry.
-zip = { version = "2.2", default-features = false, features = ["deflate"] }
+# `default-features = false` and the one inflater: this only ever inflates one deflated
+# entry, and the default set adds `time`, AES, bzip2, lzma, zstd and more. Not `deflate`
+# either, which in zip 9 also pulls `zopfli`, a compressor this never runs. zip 9 needs
+# rustc 1.88, past this crate's MSRV; a dev-dependency may, since the MSRV job builds
+# rather than tests.
+zip = { version = "9.1.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # Differential oracle: an independent MIT implementation of the same formats,
 # used to check this crate's output against someone else's reading of the spec.
