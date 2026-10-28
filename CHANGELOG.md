@@ -79,10 +79,12 @@ its reads were never system calls.
   Its errors carry no position, which would lose the offset that
   `a_bad_base64_symbol_is_reported_by_offset_and_not_by_value` holds.
 
-**The four-reader gate, run on the final tree** (2026-10-28, tree `5091c5c`, clean). The
+**The four-reader gate, run on the final tree** (2026-10-28, tree `5055abb`, clean). The
 base64 bump sits on the encrypt path, so the gate was run even though no written byte
-was expected to change. Artifact `msoffice_crypto_encrypt_ooxml.docx`, SHA-256
-`489456e737ade0d036e325d5bd5635464a531b021c0acc89c7c3687687e02177`:
+was expected to change. It was first run on `5091c5c`, the first tag's tree, with the
+same verdicts, and run again here after the buffer change. Artifact
+`msoffice_crypto_encrypt_ooxml.docx`, SHA-256
+`b2613318404948156bf6ac2dce2db962cb101080a5b2421edea76551a42eecee`:
 
 - Word 16.0 build 16.0.19127: PASS (opened, content matches; wrong password refused
   `0x800A1520`). The COM driver ran under Windows PowerShell 5.1
