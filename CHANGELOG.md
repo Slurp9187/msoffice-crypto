@@ -58,19 +58,44 @@ compressed and a MAC's output on drop. That was checked in the published sources
 0.11.3, block-buffer 0.12.1 and sha2 0.11.1, not taken from the feature's name.
 
 `sha2` is locked at 0.11.0, because 0.11.1 declares rust-version 1.88, one above this
-crate's. The ciphers (`aes`, `cbc`, `ecb`, `rc4`) are on the separate `cipher` 0.4 line and
-do not move. Output is unchanged: the seeded SHA-256 goldens for agile and standard pass
-as they were, and so do the msoffcrypto-tool vectors and the Office-written fixtures.
-
-Each build with cryptography in it gains five crates: `hybrid-array`, `crypto-common` 0.2,
-`cpufeatures` 0.3, `ctutils` 0.4.7 and `cmov`. `digest` and `block-buffer` change version,
-and the detection build is unchanged. `ctutils` is the crate RUSTSEC-2026-0385 concerns;
-0.4.7 is outside it, and it is the other reason this release needs Rust 1.87.
+crate's.
 
 The MD5 of the Office 97 password is still finalized straight into the wrapped key buffer.
 digest 0.11 deprecates the slice cast that did it, and its replacement is fallible, so the
 16-byte length is now a compile-time assertion, which leaves the failure arm unreachable.
 Skipping that write fails three tests, among them the msoffcrypto-tool block-key vector.
+
+### The ciphers move to the `cipher` 0.5 line
+
+`aes` 0.9.2, `cbc` 0.2.1, `ecb` 0.2.1 and, under `legacy-binary`, `rc4` 0.2.0, so the graph
+holds one generation of the shared RustCrypto crates rather than one per family. `aes` is
+locked at 0.9.2, because 0.9.3 declares rust-version 1.89.
+
+The constructors this crate now calls, `new_from_slices` and `new_from_slice`, refuse a
+key or IV of the wrong length with an error where cipher 0.4's `GenericArray::from_slice`
+panicked. This crate's own length checks still run first and still report
+`InvariantViolated`, so no path changes its error. `rc4` 0.2's single `Rc4` takes any key
+of 1 to 256 bytes, so the formats' 5-to-16 range is now an explicit check rather than one
+generic arm per length. The keystream is held by value and no longer boxed.
+
+`aes`, `cbc` and `rc4` keep their `zeroize` features. In aes 0.9 the wipe is one `Drop` on
+each cipher type over the whole struct, whichever backend is compiled in. `ecb` gained a
+`zeroize` feature in 0.2 and it is on, though it closes no gap: an ECB mode holds only the
+block cipher, whose round keys `aes` already wipes. It is on so the `packaging invariants`
+CI job can require the feature on every cipher and hash this crate links, which it now does
+for `aes`, `cbc`, `ecb`, `rc4`, `sha1`, `sha2`, `hmac` and `md-5`. Removing one is reported,
+which was checked by removing `hmac`'s.
+
+Output is unchanged after both moves. The seeded SHA-256 goldens for agile and standard pass
+as they were, and so do the msoffcrypto-tool vectors and the Office-written fixtures.
+
+The two moves together take `crypto-ops` from 36 crates to 39 and `legacy-binary` from 38 to
+41. `hybrid-array` replaces `generic-array`; `ctutils` 0.4.7, `cmov` and `cpubits` are new.
+The detection build is unchanged at 13. `ctutils` is the crate RUSTSEC-2026-0385 concerns,
+and 0.4.7 is outside it; it is the other reason this release needs Rust 1.87.
+
+The lockfile also takes patch releases of `clap`, `rand`, `rustix`, `serde_json` and
+`thiserror`. `quick-xml` stays on 0.41, as its note in `Cargo.toml` explains.
 
 ## [0.1.0-rc.11] - 2026-10-28
 

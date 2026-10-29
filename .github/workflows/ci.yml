@@ -475,6 +475,9 @@ jobs:
     #    gained a `zeroize` feature on the digest 0.11 line, and the state they hold here is
     #    the spin hash's view of the password, the HMAC's key and, under `legacy-binary`,
     #    the RC4 key derivation. The same silent loss applies, so the same guard does.
+    #    `ecb` is in the list too: its feature (new in 0.2) only forwards to the cipher
+    #    `aes` already wipes, but checking every cipher and hash leaves no exception to
+    #    remember.
     #
     # 3. `src/bin/msoffice-crypto.rs` must be in the packaged files. Same silent shape as
     #    (1): with the binary excluded, `cargo package --locked` still EXITS 0. It adds one
@@ -505,7 +508,7 @@ jobs:
         run: |
           cargo tree --locked -e features --no-default-features --features legacy-binary > feats.txt
           missing=
-          for c in aes cbc rc4 sha1 sha2 hmac md-5; do
+          for c in aes cbc ecb rc4 sha1 sha2 hmac md-5; do
             grep -q "$c feature \"zeroize\"" feats.txt || missing="$missing $c"
           done
           if [ -n "$missing" ]; then
@@ -516,7 +519,7 @@ jobs:
             echo "memory, and no test in this suite can see it."
             exit 1
           fi
-          echo "aes/cbc/rc4/sha1/sha2/hmac/md-5 zeroize enabled"
+          echo "aes/cbc/ecb/rc4/sha1/sha2/hmac/md-5 zeroize enabled"
       - name: the CLI ships in the package
         run: |
           cargo package --locked --list > files.txt

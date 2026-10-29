@@ -50,7 +50,7 @@ use crate::sensitive::{
 };
 use aes::{Aes128, Aes192, Aes256};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use cbc::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
+use cbc::cipher::{block_padding::NoPadding, BlockModeDecrypt, KeyIvInit};
 use quick_xml::{events::Event, Reader};
 use secure_gate::{ConstantTimeEq, RevealSecret, RevealSecretMut};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -843,8 +843,8 @@ fn unsupported_algorithm(what: &'static str, name: &str) -> Error {
 /// AES-CBC decrypt with NoPadding, AES-128/192/256 by key length. `ciphertext` must be a
 /// multiple of 16 bytes.
 ///
-/// The key and IV lengths are checked rather than asserted. `GenericArray::from_slice`
-/// panics on a length mismatch, and the key length is file-derived: it is `keyBits / 8`,
+/// The key and IV lengths are checked before the cipher is built, and refused as
+/// [`Error::InvariantViolated`], because the key length is file-derived: it is `keyBits / 8`,
 /// the length [`derive_block_key`] cuts the named digest to. The IV no longer arrives raw
 /// — the password-encryptor blobs come through [`AgileParams::password_blob_iv`] and the
 /// package and `dataIntegrity` IVs through [`crate::hash::derive_iv`], and both fit their
@@ -857,17 +857,16 @@ fn unsupported_algorithm(what: &'static str, name: &str) -> Error {
 /// Word 2010's own AES-128/SHA-1 default, were refused one frame after the parser had
 /// accepted them.
 pub(crate) fn aes_cbc_decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, Error> {
-    use aes::cipher::generic_array::GenericArray;
     check_cbc_lengths(key, iv)?;
-    let iv = GenericArray::from_slice(iv);
     let mut out = vec![0u8; ciphertext.len()];
     // The key length *is* the cipher: `keyBits` 128, 192 and 256 name AES-128, AES-192 and
     // AES-256, and `check_cbc_lengths` has already refused anything else, which is what
     // makes the third arm total rather than a guess.
     macro_rules! run {
         ($cipher:ty) => {
-            cbc::Decryptor::<$cipher>::new(GenericArray::from_slice(key), iv)
-                .decrypt_padded_b2b_mut::<NoPadding>(ciphertext, &mut out)
+            cbc::Decryptor::<$cipher>::new_from_slices(key, iv)
+                .map_err(|_| Error::CipherError)?
+                .decrypt_padded_b2b::<NoPadding>(ciphertext, &mut out)
         };
     }
     match key.len() {
@@ -894,15 +893,14 @@ pub(crate) fn aes_cbc_decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Resul
 /// bytes the reader is not expecting and lengthen every blob past what `<keyData>` says.
 ///
 pub(crate) fn aes_cbc_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, Error> {
-    use aes::cipher::generic_array::GenericArray;
-    use cbc::cipher::BlockEncryptMut;
+    use cbc::cipher::BlockModeEncrypt;
     check_cbc_lengths(key, iv)?;
-    let iv = GenericArray::from_slice(iv);
     let mut out = vec![0u8; plaintext.len()];
     macro_rules! run {
         ($cipher:ty) => {
-            cbc::Encryptor::<$cipher>::new(GenericArray::from_slice(key), iv)
-                .encrypt_padded_b2b_mut::<NoPadding>(plaintext, &mut out)
+            cbc::Encryptor::<$cipher>::new_from_slices(key, iv)
+                .map_err(|_| Error::CipherError)?
+                .encrypt_padded_b2b::<NoPadding>(plaintext, &mut out)
         };
     }
     match key.len() {
@@ -920,13 +918,12 @@ pub(crate) fn aes_cbc_encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result
 /// that returned a fresh `Vec` would put every segment of the document in an unwrapped
 /// allocation on its way there. `buf` must be a multiple of 16 bytes.
 pub(crate) fn aes_cbc_decrypt_in_place(buf: &mut [u8], key: &[u8], iv: &[u8]) -> Result<(), Error> {
-    use aes::cipher::generic_array::GenericArray;
     check_cbc_lengths(key, iv)?;
-    let iv = GenericArray::from_slice(iv);
     macro_rules! run {
         ($cipher:ty) => {
-            cbc::Decryptor::<$cipher>::new(GenericArray::from_slice(key), iv)
-                .decrypt_padded_mut::<NoPadding>(buf)
+            cbc::Decryptor::<$cipher>::new_from_slices(key, iv)
+                .map_err(|_| Error::CipherError)?
+                .decrypt_padded::<NoPadding>(buf)
                 .map(|_| ())
         };
     }
@@ -942,15 +939,14 @@ pub(crate) fn aes_cbc_decrypt_in_place(buf: &mut [u8], key: &[u8], iv: &[u8]) ->
 /// [`aes_cbc_decrypt_in_place`]'s reason on the way in. `buf` must be a multiple of 16
 /// bytes.
 pub(crate) fn aes_cbc_encrypt_in_place(buf: &mut [u8], key: &[u8], iv: &[u8]) -> Result<(), Error> {
-    use aes::cipher::generic_array::GenericArray;
-    use cbc::cipher::BlockEncryptMut;
+    use cbc::cipher::BlockModeEncrypt;
     check_cbc_lengths(key, iv)?;
-    let iv = GenericArray::from_slice(iv);
     let len = buf.len();
     macro_rules! run {
         ($cipher:ty) => {
-            cbc::Encryptor::<$cipher>::new(GenericArray::from_slice(key), iv)
-                .encrypt_padded_mut::<NoPadding>(buf, len)
+            cbc::Encryptor::<$cipher>::new_from_slices(key, iv)
+                .map_err(|_| Error::CipherError)?
+                .encrypt_padded::<NoPadding>(buf, len)
                 .map(|_| ())
         };
     }
@@ -964,8 +960,9 @@ pub(crate) fn aes_cbc_encrypt_in_place(buf: &mut [u8], key: &[u8], iv: &[u8]) ->
 
 /// The key and IV length rules both CBC directions share.
 ///
-/// Checked rather than asserted: `GenericArray::from_slice` panics on a length mismatch,
-/// and on the *decrypt* side the key length is file-derived — `keyBits / 8` is the length
+/// Checked here so a bad length is a named [`Error::InvariantViolated`] rather than the
+/// cipher's own refusal (cipher 0.5's `new_from_slices` returns an error; cipher 0.4's
+/// `GenericArray::from_slice`, until 0.1.0-rc.12, panicked), and on the *decrypt* side the key length is file-derived — `keyBits / 8` is the length
 /// [`derive_block_key`] cuts the named digest to. Every in-crate IV now arrives already
 /// fitted to a `blockSize` the parser pinned to 16, so the IV arm guards the seam rather
 /// than a live path. A key of any length AES does not define must produce an error rather
@@ -2273,11 +2270,11 @@ mod tests {
 
     /// AES-256-CBC/NoPadding — the writer half of `aes_cbc_decrypt`.
     fn cbc_encrypt(plain: &[u8], key: &[u8], iv: &[u8]) -> Vec<u8> {
-        use aes::cipher::generic_array::GenericArray;
-        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+        use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
         let mut out = vec![0u8; plain.len()];
-        cbc::Encryptor::<Aes256>::new(GenericArray::from_slice(key), GenericArray::from_slice(iv))
-            .encrypt_padded_b2b_mut::<NoPadding>(plain, &mut out)
+        cbc::Encryptor::<Aes256>::new_from_slices(key, iv)
+            .unwrap()
+            .encrypt_padded_b2b::<NoPadding>(plain, &mut out)
             .unwrap();
         out
     }
