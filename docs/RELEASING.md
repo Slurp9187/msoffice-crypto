@@ -325,7 +325,7 @@ git grep -n -iE 'unpublished|never been published|repo is (currently )?private|n
 | File | What changes |
 | --- | --- |
 | `README.md` | `> **Status: early, unpublished.**`, and the version in the `[dependencies]` snippet. |
-| `CLAUDE.md` | The whole *Project Status — pre-release, nothing published* section, which instructs its own revision at exactly this point. "Breaking API changes are free" stops being true; say what replaces it. |
+| `CLAUDE.md` | The whole *Project Status — pre-release, nothing published* section, which instructs its own revision at exactly this point. "Breaking API changes are free" stops being true; say what replaces it. First publish only: since 2026-10-28 the file names no current version, so a later rc needs no edit here. |
 | `docs/plans/msoffice-crypto-foundation-2026-09-04.md` | §S8's "Blocked on: the repo is currently private", §7's path-dependency paragraph, and the `Status:` line at the top → `Shipped (<date>)` with the landing commit. |
 | `docs/handoffs/2026-09-05-cold-start.md` | The `⬜ #9` row. Handoffs are dated snapshots — if it reads as historical, leave it; if it reads as current state, it needs a superseding note rather than an edit. |
 | `CHANGELOG.md` | A `v0.1.0-rc.1` version heading goes on top; the dated record stays beneath it **as written**. A release heading summarising the dated entries would lose the reasoning, which is the whole reason they are dated. |
