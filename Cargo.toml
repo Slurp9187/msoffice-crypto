@@ -1,9 +1,9 @@
 [package]
 name = "msoffice-crypto"
-version = "0.1.0-rc.11"
+version = "0.1.0-rc.12"
 edition = "2021"
 description = "Microsoft Office document encryption per MS-OFFCRYPTO: detect, decrypt and encrypt (agile and Office 2007 standard), with key material that zeroizes on drop and a detection build that links no cryptography. Not affiliated with Microsoft."
-rust-version = "1.85"
+rust-version = "1.87"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Slurp9187/msoffice-crypto"
 # Without this, the crates.io listing offers a Repository chip and no Documentation one,
@@ -110,7 +110,6 @@ crypto-ops = [
     "dep:secure-gate",
     "dep:sha2",
     "secure-gate/ct-eq",
-    "secure-gate/rand",
 ]
 
 # Word 97-2003, Excel 97-2003 and PowerPoint 97-2003 decryption (plan slice S3):
@@ -246,9 +245,11 @@ md-5 = { version = "0.10", optional = true }
 # generator take an *injected* RNG so a test can seed it (plan D3). Both are re-exports
 # of `rand_core`'s, so naming `rand` rather than `rand_core` costs nothing.
 #
-# Zero added crates: `secure-gate/rand` (enabled just above, for `Dynamic::from_rng`)
-# already resolves rand 0.10 with `sys_rng`, so this names a dependency the graph has
-# rather than adding one.
+# This is the only route rand enters the graph. Until secure-gate 0.9.0-rc.16 it also came
+# in through `secure-gate/rand`, for `Dynamic::from_rng`; rc.16 removed `from_rng`, and the
+# feature now gives only `from_random`, which draws from the system RNG and so cannot be
+# seeded, so it is no longer enabled. secure-gate's own rand dependency asked for the same
+# `sys_rng` this one does, so the graph lost nothing.
 #
 # `default-features = false` keeps the distribution machinery, `thread_rng` and the SIMD
 # backends out; `sys_rng` is the one feature the production path needs.
@@ -262,18 +263,21 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 # msoffcrypto-tool and herumi/msoffice all hold key bytes in bare containers),
 # and it is the reason this crate exists rather than a dependency on one of them.
 #
-# "rand" IS enabled, through `crypto-ops` below. It arrived with the encrypt path, where
-# `Dynamic::from_rng(len, &mut rng)` draws the session key (agile_encrypt.rs), the standard
-# verifier (standard_encrypt.rs) and the dataIntegrity HMAC key (integrity.rs) straight into
-# the wrapper's own storage, so the secret never exists outside it. Passing the RNG in rather
+# "rand" is NOT enabled: since rc.16 it gives only `from_random`, which takes no RNG. The
+# encrypt path draws with `Dynamic::try_new_with(len, |b| fill(rng, b))` instead -- the
+# session key (agile_encrypt.rs), the standard verifier (standard_encrypt.rs) and the
+# dataIntegrity HMAC key (integrity.rs) -- straight into the wrapper's own pre-zeroed
+# storage, so the secret never exists outside it, and a failed draw is wiped before the
+# error returns. Until rc.16 this was `Dynamic::from_rng(len, &mut rng)`, the same draw:
+# one `try_fill_bytes` over the same length, so the seeded goldens did not move. Passing the RNG in rather
 # than reaching for a global is what makes the same code deterministic under a seeded
 # generator, and that is what allows byte-exact golden output rather than round-trip-only
 # tests.
 #
 # Salts and IVs are NOT drawn this way and are NOT wrapped: they are written into
 # EncryptionInfo in the clear, so wrapping them would be theatre. (An earlier version of this
-# comment claimed `Fixed::from_random()` supplied them. It never did -- every `from_rng` call
-# in this crate is on `Dynamic`, and `Fixed` is used at exactly one site, the XOR obfuscation
+# comment claimed `Fixed::from_random()` supplied them. It never did -- every RNG draw into a
+# wrapper in this crate is on `Dynamic`, and `Fixed` is used at exactly one site, the XOR obfuscation
 # array.) Version tracks odf-crypto rather than the consumer's =0.8.0-rc.10 pin; see the
 # README's compatibility note.
 #
@@ -304,15 +308,21 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 # `dynamic_newtype!` declaration, and this crate declares none: every wrapper is a plain
 # alias in `src/sensitive.rs`.
 #
-# rc.15 is what is pinned now. rc.14 and rc.15 change only the opt-in `sealed` feature (the
-# pre-key's page alignment, then its guarded off-heap mapping and the `LockError` API), and
-# `sealed` is not enabled here, so nothing this crate compiles changed. The move is for the
-# consumer's graph: Cargo holds one version per semver-compatible range, so a consumer
-# pinning secure-gate rc.15 exactly cannot resolve against a crate still pinning rc.13
-# exactly -- the two pins move together or not at all.
+# rc.14 and rc.15 changed only the opt-in `sealed` feature (the pre-key's page alignment,
+# then its guarded off-heap mapping and the `LockError` API), and `sealed` is not enabled
+# here, so nothing this crate compiles changed.
+#
+# rc.16 is what is pinned now, and it is the second release in this span to change what
+# this crate calls: it removed `from_rng`, so the three RNG draws above moved to
+# `try_new_with`, and it raised its MSRV to 1.87, which raised this crate's with it. It also
+# requires zeroize ^1.9.1. Its removed decode traits (`FromHexStr` and kin) were never used
+# here, since this crate enables no encoding. Every pin move is for the consumer's graph as
+# well: Cargo holds one version per semver-compatible range, so a consumer pinning one
+# secure-gate rc exactly cannot resolve against a crate pinning another -- the two pins move
+# together or not at all.
 #
 # When it goes on, the seeded RNG is a `chacha20` dev-dependency and NOT
-# `rand_chacha`. from_rng's `TryRng + TryCryptoRng` bounds come from rand_core
+# `rand_chacha`. the injected RNG's `TryRng + TryCryptoRng` bounds come from rand_core
 # 0.10, which secure-gate 0.9 resolves; rand_chacha 0.9 is pinned to rand_core
 # 0.9 and does not satisfy them. rand's own StdRng is the trap next door -- it
 # is ChaCha12 and it takes a seed, so it compiles, but rand documents it as
@@ -347,7 +357,7 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 #
 # This is not a dependency-count argument. In the build that has key material, secure-gate
 # and its `zeroize` come along regardless -- that is what they are for.
-secure-gate = { version = "=0.9.0-rc.15", optional = true, default-features = false, features = [
+secure-gate = { version = "=0.9.0-rc.16", optional = true, default-features = false, features = [
     "alloc",
 ] }
 
@@ -408,7 +418,7 @@ office-crypto = "0.3"
 # The seeded RNG that makes encrypt output byte-exact under test (plan D3).
 #
 # `chacha20`, NOT `rand_chacha`, and not `rand::rngs::StdRng` -- see the note on the
-# `rand` dependency above and plan D3 for the full reasoning. Briefly: `from_rng`'s
+# `rand` dependency above and plan D3 for the full reasoning. Briefly: the injected RNG's
 # bounds come from rand_core 0.10 and `rand_chacha` 0.9 is pinned to rand_core 0.9, so
 # it does not satisfy them; and `StdRng` *is* seedable ChaCha12 that compiles fine here
 # but is documented non-portable "even with a fixed seed", which would silently

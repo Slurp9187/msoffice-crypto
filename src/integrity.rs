@@ -443,7 +443,7 @@ fn unwrap_blob(
 ) -> Result<Vec<u8>, Error> {
     // A whole number of AES blocks, at least `hashSize` long: the length `hashSize`
     // padded up to the block is the one it must have.
-    if blob.len() < hash_size || blob.len() % AES_BLOCK_LEN != 0 {
+    if blob.len() < hash_size || !blob.len().is_multiple_of(AES_BLOCK_LEN) {
         return Err(bad(
             field,
             FileProblem::Disagrees {
@@ -506,7 +506,7 @@ pub(crate) fn draw_key<R: rand::TryRng + rand::TryCryptoRng>(
     hash: HashAlgorithm,
     rng: &mut R,
 ) -> Result<IntegrityKey, Error> {
-    IntegrityKey::from_rng(hash.digest_len(), rng).map_err(crate::agile_encrypt::random_source)
+    IntegrityKey::try_new_with(hash.digest_len(), |b| crate::agile_encrypt::fill(rng, b))
 }
 
 /// [`generate`] with the HMAC key supplied — deterministic, which is what makes it

@@ -132,7 +132,7 @@
 //! `H_final` as `PasswordDigest`), the verifier and its hash (`VerifierPlaintext`). The
 //! salt and both ciphertext blobs are written into the file in the clear and are not.
 
-use crate::agile_encrypt::{fill, random_source};
+use crate::agile_encrypt::fill;
 use crate::error::{EncryptParam, EncryptParamProblem, Error};
 use crate::segments::read_full;
 use crate::sensitive::{DerivedKey, PlaintextSegment, VerifierPlaintext};
@@ -412,7 +412,7 @@ pub(crate) fn generate<R: TryRng + TryCryptoRng>(
 
     // The verifier: 16 random bytes, held wrapped. Not a key, but its hash is how a
     // password guess is confirmed offline, so it gets no more exposure than the key.
-    let verifier = VerifierPlaintext::from_rng(VERIFIER_LEN, rng).map_err(random_source)?;
+    let verifier = VerifierPlaintext::try_new_with(VERIFIER_LEN, |b| fill(rng, b))?;
     let encrypted_verifier =
         verifier.with_secret(|v| key.with_secret(|k| aes_ecb_encrypt(k, v)))?;
 

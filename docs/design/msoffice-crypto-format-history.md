@@ -447,7 +447,7 @@ Crypto libraries will not. You need an application-level converter:
 > `unwrap` outside tests, there is a fuzz target, and 0.1.9 added overflow and DoS guards
 > to the `.doc` walker. That is a plausible fit for preview or search indexing in the consumer, and
 > no fit for "give the user back their file". If it is ever taken as a dependency for that
-> narrower job: MSRV 1.88 on edition 2024 (this crate is 1.85, the consumer 1.81); 69 crates in the
+> narrower job: MSRV 1.88 on edition 2024 (this crate is 1.87, the consumer 1.81); 69 crates in the
 > default build against this crate's 16 for detection and 34 for decrypt — `zip`,
 > `quick-xml`, `serde_json`, `encoding_rs` and an unconditional `libc`; and a hand-rolled
 > CFB reader rather than `cfb`.

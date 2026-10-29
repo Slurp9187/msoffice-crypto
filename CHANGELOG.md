@@ -22,6 +22,29 @@ What survives that move is in two places, deliberately:
 
 ---
 
+## [0.1.0-rc.12] - 2026-10-29
+
+### `secure-gate` moves to 0.9.0-rc.16, and the MSRV to 1.87
+
+The exact pin goes from `=0.9.0-rc.15` to `=0.9.0-rc.16`, and `rust-version` from 1.85 to
+1.87, because rc.16 requires 1.87. A consumer on an older toolchain cannot build this
+release. The public API does not change.
+
+rc.16 removed `from_rng`. The three draws that used it — the agile session key, the
+`dataIntegrity` HMAC key and the standard verifier — now fill the wrapper's own pre-zeroed
+storage through `try_new_with` with the same injected RNG, which also wipes a partial fill
+if the RNG fails. It is the same single `try_fill_bytes` over the same length, so encrypted
+output under a seeded RNG is byte-identical to rc.11's, and the seeded goldens pass
+unchanged. `secure-gate/rand` is no longer enabled: it now gives only `from_random`, which
+takes no RNG and which this crate does not use. `rand` still enters the graph through
+this crate's own dependency, with the same `sys_rng` feature. rc.16's other removals, the
+`FromHexStr` family of decode traits, reach nothing here.
+
+The lockfile moves secure-gate and `zeroize` 1.9.0 to 1.9.1, which rc.16 requires.
+
+As with rc.13 and rc.15, the pin also moves for the consumer's graph: an application that
+depends on secure-gate 0.9 directly can take rc.16 only by taking this release with it.
+
 ## [0.1.0-rc.11] - 2026-10-28
 
 ### The container is read through a sector-sized buffer that survives a seek (#55)
@@ -1973,7 +1996,8 @@ job is parsing bytes an attacker chose — and, as usefully, what does not.
 [MS-CFB]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/
 [MS-PPT]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-ppt/
 [MS-ODRAW]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-odraw/
-[0.1.0-rc.11]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.10...HEAD
+[0.1.0-rc.12]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.11...v0.1.0-rc.12
+[0.1.0-rc.11]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.10...v0.1.0-rc.11
 [0.1.0-rc.10]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.9...v0.1.0-rc.10
 [0.1.0-rc.9]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.8...v0.1.0-rc.9
 [0.1.0-rc.8]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.7...v0.1.0-rc.8
