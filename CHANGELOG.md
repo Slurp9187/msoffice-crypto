@@ -45,6 +45,33 @@ The lockfile moves secure-gate and `zeroize` 1.9.0 to 1.9.1, which rc.16 require
 As with rc.13 and rc.15, the pin also moves for the consumer's graph: an application that
 depends on secure-gate 0.9 directly can take rc.16 only by taking this release with it.
 
+### Hash and HMAC state is wiped on drop
+
+`sha1`, `sha2` and `hmac` move to the digest 0.11 line (0.11.0, 0.11.0 and 0.13.0), and
+`md-5` under `legacy-binary` to 0.11.0, each with its `zeroize` feature on. That state lives
+inside the hasher, out of reach of this crate's secure-gate wrappers, and here it is
+password- and key-derived: the spin hash runs SHA over the password, the `dataIntegrity`
+HMAC's inner and outer states are its key, and under `legacy-binary` SHA-1 and MD5 derive the
+RC4 keys. The 0.10 / 0.12 line had no such feature, so until now that state was freed
+unwiped. With it, digest 0.11 wipes the hash core's state, the buffer of input not yet
+compressed and a MAC's output on drop. That was checked in the published sources of digest
+0.11.3, block-buffer 0.12.1 and sha2 0.11.1, not taken from the feature's name.
+
+`sha2` is locked at 0.11.0, because 0.11.1 declares rust-version 1.88, one above this
+crate's. The ciphers (`aes`, `cbc`, `ecb`, `rc4`) are on the separate `cipher` 0.4 line and
+do not move. Output is unchanged: the seeded SHA-256 goldens for agile and standard pass
+as they were, and so do the msoffcrypto-tool vectors and the Office-written fixtures.
+
+Each build with cryptography in it gains five crates: `hybrid-array`, `crypto-common` 0.2,
+`cpufeatures` 0.3, `ctutils` 0.4.7 and `cmov`. `digest` and `block-buffer` change version,
+and the detection build is unchanged. `ctutils` is the crate RUSTSEC-2026-0385 concerns;
+0.4.7 is outside it, and it is the other reason this release needs Rust 1.87.
+
+The MD5 of the Office 97 password is still finalized straight into the wrapped key buffer.
+digest 0.11 deprecates the slice cast that did it, and its replacement is fallible, so the
+16-byte length is now a compile-time assertion, which leaves the failure arm unreachable.
+Skipping that write fails three tests, among them the msoffcrypto-tool block-key vector.
+
 ## [0.1.0-rc.11] - 2026-10-28
 
 ### The container is read through a sector-sized buffer that survives a seek (#55)

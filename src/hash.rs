@@ -31,7 +31,7 @@
 
 use crate::error::Error;
 use crate::file_params::Invariant;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -248,11 +248,12 @@ impl HashAlgorithm {
 
 /// An HMAC in progress, under whichever hash the file named.
 ///
-/// **Holds ipad/opad state derived from the key, and nothing wipes it.** `hmac` 0.12 has
-/// no `Drop` and no `zeroize` feature — the residue the secure-gate skill already records
-/// for the one-shot [`HashAlgorithm::hmac`]. The streaming paths keep this alive for a
-/// whole pass over the package rather than for one call, which lengthens the window but
-/// does not change what is exposed: the capability to forge a tag under that one key.
+/// **Holds ipad/opad state derived from the key, wiped on drop.** `hmac`'s `zeroize`
+/// feature, on since 0.1.0-rc.12 (it was not available on `hmac` 0.12), wipes the inner and
+/// outer hash cores when this drops, as it does for the one-shot [`HashAlgorithm::hmac`].
+/// The streaming paths keep this alive for a whole pass over the package rather than for
+/// one call, which lengthens the window in which the state exists: the capability to forge
+/// a tag under that one key.
 /// It lives on the stack of the function running the pass and is never boxed or cloned.
 pub(crate) enum HmacState {
     Sha1(Hmac<Sha1>),

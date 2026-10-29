@@ -194,14 +194,27 @@ cfb = "0.15"
 quick-xml = "0.41"
 thiserror = "2.0"
 
-sha2 = { version = "0.10", optional = true }
-sha1 = { version = "0.10", optional = true }
+# `zeroize` on every hash, and on `hmac` and `md-5` below, for the reason it is on `aes`,
+# `cbc` and `rc4`: the state lives inside the hasher, where no wrapper of ours reaches it.
+# Here that state is password- and key-derived -- the spin hash runs SHA over the
+# password, the dataIntegrity HMAC's inner and outer states are its key, and under
+# `legacy-binary` SHA-1 and MD5 derive the RC4 keys. With the feature, digest 0.11 wipes
+# the core state, the block buffer of input not yet compressed, and a MAC's output on
+# drop (read in the published sources of digest 0.11.3, block-buffer 0.12.1 and sha2
+# 0.11.1). The 0.10 / 0.12 line had no such feature, so this came with the move to digest
+# 0.11 in 0.1.0-rc.12.
+#
+# `default-features = false` leaves out `oid`, and its `const-oid` crate, which nothing
+# here uses. sha2 is held at 0.11.0 in Cargo.lock: 0.11.1 declares rust-version 1.88,
+# one above this crate's, and the MSRV job builds `--locked`.
+sha2 = { version = "0.11", optional = true, default-features = false, features = ["zeroize"] }
+sha1 = { version = "0.11", optional = true, default-features = false, features = ["zeroize"] }
 
 # HMAC for the ECMA-376 agile `dataIntegrity` tag (S2). Keyed with the value
 # recovered from `encryptedHmacKey` and evaluated over the whole EncryptedPackage
 # stream. The hash comes from the file's own `keyData/@hashAlgorithm`, so all four
 # of SHA-1/256/384/512 are wired even though every fixture in the corpus is SHA-512.
-hmac = { version = "0.12", optional = true }
+hmac = { version = "0.13", optional = true, features = ["zeroize"] }
 
 # `zeroize` on both, for the reason it is on `rc4` below: the AES key schedule is the
 # round keys expanded from the session key, and the CBC state carries a block of
@@ -229,15 +242,16 @@ ecb = { version = "0.1", optional = true }
 base64 = { version = "0.23", optional = true, default-features = false, features = ["alloc"] }
 
 # The two primitives only the 97-2003 binary formats use (feature `legacy-binary`).
-# RustCrypto, MIT/Apache-2.0, on the same `cipher` 0.4 / `digest` 0.10 lines as `aes`
-# and `sha1`, so they add exactly two crates and no second copy of a trait crate --
-# both were already in the dev graph through `office-crypto`.
+# RustCrypto, MIT/Apache-2.0, on the same `cipher` 0.4 / `digest` 0.11 lines as `aes`
+# and `sha1`, so they add exactly two crates and no second copy of a trait crate. (Both
+# were already in the dev graph through `office-crypto` when they were added; from rc.12
+# `md-5` is the 0.11 one, and office-crypto's 0.10 copy stays dev-only.)
 #
 # `rc4`'s `zeroize` feature wipes the 256-byte key schedule on drop; the schedule is
 # a function of the block key, so leaving it behind would leave the key behind.
 # `zeroize` itself is already in the graph through secure-gate.
 rc4 = { version = "0.1", optional = true, features = ["zeroize"] }
-md-5 = { version = "0.10", optional = true }
+md-5 = { version = "0.11", optional = true, default-features = false, features = ["zeroize"] }
 
 # Randomness for the encrypt path (plan slice S5, step 4): salts, the verifier input and the
 # session key. Two things come from here and nothing else does -- `SysRng` for the
