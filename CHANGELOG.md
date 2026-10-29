@@ -45,6 +45,69 @@ The lockfile moves secure-gate and `zeroize` 1.9.0 to 1.9.1, which rc.16 require
 As with rc.13 and rc.15, the pin also moves for the consumer's graph: an application that
 depends on secure-gate 0.9 directly can take rc.16 only by taking this release with it.
 
+### Hash and HMAC state is wiped on drop
+
+`sha1`, `sha2` and `hmac` move to the digest 0.11 line (0.11.0, 0.11.0 and 0.13.0), and
+`md-5` under `legacy-binary` to 0.11.0, each with its `zeroize` feature on. That state lives
+inside the hasher, out of reach of this crate's secure-gate wrappers, and here it is
+password- and key-derived: the spin hash runs SHA over the password, the `dataIntegrity`
+HMAC's inner and outer states are its key, and under `legacy-binary` SHA-1 and MD5 derive the
+RC4 keys. The 0.10 / 0.12 line had no such feature, so until now that state was freed
+unwiped. With it, digest 0.11 wipes the hash core's state, the buffer of input not yet
+compressed and a MAC's output on drop. That was checked in the published sources of digest
+0.11.3, block-buffer 0.12.1 and sha2 0.11.1, not taken from the feature's name.
+
+`sha2` is locked at 0.11.0, because 0.11.1 declares rust-version 1.88, one above this
+crate's.
+
+The MD5 of the Office 97 password is still finalized straight into the wrapped key buffer.
+digest 0.11 deprecates the slice cast that did it, and its replacement is fallible, so the
+16-byte length is now a compile-time assertion, which leaves the failure arm unreachable.
+Skipping that write fails three tests, among them the msoffcrypto-tool block-key vector.
+
+### The ciphers move to the `cipher` 0.5 line
+
+`aes` 0.9.2, `cbc` 0.2.1, `ecb` 0.2.1 and, under `legacy-binary`, `rc4` 0.2.0, so the graph
+holds one generation of the shared RustCrypto crates rather than one per family. `aes` is
+locked at 0.9.2, because 0.9.3 declares rust-version 1.89.
+
+The constructors this crate now calls, `new_from_slices` and `new_from_slice`, refuse a
+key or IV of the wrong length with an error where cipher 0.4's `GenericArray::from_slice`
+panicked. This crate's own length checks still run first and still report
+`InvariantViolated`, so no path changes its error. `rc4` 0.2's single `Rc4` takes any key
+of 1 to 256 bytes, so the formats' 5-to-16 range is now an explicit check rather than one
+generic arm per length. The keystream is held by value and no longer boxed.
+
+`aes`, `cbc` and `rc4` keep their `zeroize` features. In aes 0.9 the wipe is one `Drop` on
+each cipher type over the whole struct, whichever backend is compiled in. `ecb` gained a
+`zeroize` feature in 0.2 and it is on, though it closes no gap: an ECB mode holds only the
+block cipher, whose round keys `aes` already wipes. It is on so the `packaging invariants`
+CI job can require the feature on every cipher and hash this crate links, which it now does
+for `aes`, `cbc`, `ecb`, `rc4`, `sha1`, `sha2`, `hmac` and `md-5`. Removing one is reported,
+which was checked by removing `hmac`'s.
+
+Output is unchanged after both moves. The seeded SHA-256 goldens for agile and standard pass
+as they were, and so do the msoffcrypto-tool vectors and the Office-written fixtures.
+
+Four-reader gate on the agile artifact from tree `f5c481a`, which has both moves (41,984 bytes, SHA-256
+`de9a727a4fd4eb086ee0cee29f239474e327240b50afc2fbd475da7248246993`), 2026-10-29:
+
+- Word 16.0 build 16.0.19127: opened, content matches; wrong password refused
+  `0x800A1520` — PASS
+- LibreOffice 26.8.0.3: opened, content matches; wrong password refused by the verifier —
+  PASS
+- msoffcrypto-tool 6.0.0: byte-identical to `plain.docx`, `dataIntegrity` HMAC verifies;
+  wrong password refused — PASS
+- office-crypto 0.3: byte-identical to `plain.docx` — PASS
+
+The two moves together take `crypto-ops` from 36 crates to 39 and `legacy-binary` from 38 to
+41. `hybrid-array` replaces `generic-array`; `ctutils` 0.4.7, `cmov` and `cpubits` are new.
+The detection build is unchanged at 13. `ctutils` is the crate RUSTSEC-2026-0385 concerns,
+and 0.4.7 is outside it; it is the other reason this release needs Rust 1.87.
+
+The lockfile also takes patch releases of `clap`, `rand`, `rustix`, `serde_json` and
+`thiserror`. `quick-xml` stays on 0.41, as its note in `Cargo.toml` explains.
+
 ## [0.1.0-rc.11] - 2026-10-28
 
 ### The container is read through a sector-sized buffer that survives a seek (#55)

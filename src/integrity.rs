@@ -642,15 +642,15 @@ pub(crate) fn seal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aes::cipher::generic_array::GenericArray;
     use aes::Aes256;
-    use cbc::cipher::{block_padding::NoPadding, BlockEncryptMut, KeyIvInit};
+    use cbc::cipher::{block_padding::NoPadding, BlockModeEncrypt, KeyIvInit};
 
     /// Encrypt with AES-256-CBC/NoPadding — the writer half of `unwrap_blob`.
     fn cbc_encrypt(plain: &[u8], key: &[u8], iv: &[u8]) -> Vec<u8> {
         let mut out = vec![0u8; plain.len()];
-        cbc::Encryptor::<Aes256>::new(GenericArray::from_slice(key), GenericArray::from_slice(iv))
-            .encrypt_padded_b2b_mut::<NoPadding>(plain, &mut out)
+        cbc::Encryptor::<Aes256>::new_from_slices(key, iv)
+            .unwrap()
+            .encrypt_padded_b2b::<NoPadding>(plain, &mut out)
             .unwrap();
         out
     }

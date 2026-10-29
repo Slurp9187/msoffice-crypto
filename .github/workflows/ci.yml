@@ -471,6 +471,14 @@ jobs:
     #    this step checks all three rather than growing a second copy of itself later.
     #    `legacy-binary` is a superset of `crypto-ops`, so one feature tree sees all three.
     #
+    #    From 0.1.0-rc.12 the hashes are checked too: `sha1`, `sha2`, `hmac` and `md-5`
+    #    gained a `zeroize` feature on the digest 0.11 line, and the state they hold here is
+    #    the spin hash's view of the password, the HMAC's key and, under `legacy-binary`,
+    #    the RC4 key derivation. The same silent loss applies, so the same guard does.
+    #    `ecb` is in the list too: its feature (new in 0.2) only forwards to the cipher
+    #    `aes` already wipes, but checking every cipher and hash leaves no exception to
+    #    remember.
+    #
     # 3. `src/bin/msoffice-crypto.rs` must be in the packaged files. Same silent shape as
     #    (1): with the binary excluded, `cargo package --locked` still EXITS 0. It adds one
     #    more `warning: ignoring binary ... is not included in the published package` to
@@ -496,21 +504,22 @@ jobs:
             exit 1
           fi
           echo "build.rs ships"
-      - name: the cipher crates keep their zeroize features
+      - name: the cipher and hash crates keep their zeroize features
         run: |
           cargo tree --locked -e features --no-default-features --features legacy-binary > feats.txt
           missing=
-          for c in aes cbc rc4; do
+          for c in aes cbc ecb rc4 sha1 sha2 hmac md-5; do
             grep -q "$c feature \"zeroize\"" feats.txt || missing="$missing $c"
           done
           if [ -n "$missing" ]; then
-            echo "::error::these cipher dependencies have lost their zeroize feature:$missing"
-            echo "Each wipes cipher state derived from a key -- rc4's 256-byte schedule,"
-            echo "aes's expanded round keys, cbc's chaining block. Without it that state"
-            echo "survives the drop in memory, and no test in this suite can see it."
+            echo "::error::these dependencies have lost their zeroize feature:$missing"
+            echo "Each wipes state derived from a key or password -- rc4's 256-byte schedule,"
+            echo "aes's expanded round keys, cbc's chaining block, the hash cores and buffers,"
+            echo "the HMAC's ipad/opad state. Without it that state survives the drop in"
+            echo "memory, and no test in this suite can see it."
             exit 1
           fi
-          echo "aes/cbc/rc4 zeroize enabled"
+          echo "aes/cbc/ecb/rc4/sha1/sha2/hmac/md-5 zeroize enabled"
       - name: the CLI ships in the package
         run: |
           cargo package --locked --list > files.txt

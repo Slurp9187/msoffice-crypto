@@ -174,12 +174,16 @@ about differently is how the wrong one gets copied next.
 
 Re-derive from the manifests rather than trusting this list — it was incomplete once already.
 
-- `Sha512`/`Sha1` hashers buffer the raw password until `finalize` and drop unzeroized;
-  `sha1`/`sha2` at 0.10 expose no `zeroize` feature.
-- **`HmacSha*` holds opad/ipad state derived from `IntegrityKey`, and nothing wipes it.**
-  `hmac` 0.12 has no `Drop`, no zeroize, and only `reset`/`std` features — unlike `aes`, `cbc`
-  and `rc4` there is no flag to turn on. Exposure is MAC-forgery capability under that key.
-  **This entry was missing until the rc.12 audit**, and the way it was missing is the lesson:
+- **Closed in 0.1.0-rc.12:** `Sha512`/`Sha1` hashers buffered the raw password until
+  `finalize` and dropped unzeroized, because `sha1`/`sha2` at 0.10 exposed no `zeroize`
+  feature. On the digest 0.11 line they do, and it is on: the core state and the block
+  buffer are wiped on drop. `md-5` likewise.
+- **Closed in 0.1.0-rc.12: `HmacSha*` held opad/ipad state derived from `IntegrityKey`, and
+  nothing wiped it.** `hmac` 0.12 had no `Drop` and no zeroize. `hmac` 0.13's `zeroize`
+  (forwarding to `digest/zeroize`) is on, so its inner and outer hash cores wipe on drop, and
+  the `packaging invariants` CI job now keeps all four hash crates' features on beside
+  `aes`, `cbc` and `rc4`. Exposure while it lived was MAC-forgery capability under that key.
+  **This entry was missing until the secure-gate rc.12 audit**, and the way it was missing is the lesson:
   the hasher class directly above it was known, written down, and then not carried across to
   the HMAC path in the same crate. Since rc.7 the streaming paths keep this state
   (`hash::HmacState`) alive for a whole pass over the package rather than for one call: a

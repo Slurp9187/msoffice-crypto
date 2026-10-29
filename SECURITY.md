@@ -63,12 +63,14 @@ another crate:
 - **Key-derived state held inside a dependency, where no wrapper here can reach it.** Three
   kinds, and they are different in what can be done about them. The cipher key schedules
   *are* wiped, because `aes`, `cbc` and `rc4` each have a `zeroize` feature and this crate
-  enables all three — a CI invariant keeps them on, since losing one is silent. The
-  `HmacSha*` opad/ipad state, derived from the integrity key, is **not**: `hmac` 0.12 has no
-  `Drop` and no feature to enable, so it moves only on a dependency bump. Hasher buffers
-  (`sha1`, `sha2`, `md-5` at 0.10) are likewise not wipeable and hold password bytes until
-  `finalize`. Reports here are welcome and will be forwarded upstream, but this crate cannot
-  fix them in place.
+  enables all three — a CI invariant keeps them on, since losing one is silent. Since
+  0.1.0-rc.12 so are the hash and HMAC states (the `HmacSha*` opad/ipad state derived from
+  the integrity key, and the `sha1`, `sha2` and `md-5` cores and buffers that see password
+  bytes): on the digest 0.11 line each has a `zeroize` feature, this crate enables all four,
+  and the same CI invariant covers them. Until rc.12 they could not be wiped, because `hmac`
+  0.12 and the 0.10 hashes had no such feature. What remains is state a dependency holds with
+  no feature to turn on. Reports here are welcome and will be forwarded upstream, but this
+  crate cannot fix them in place.
 - **Anything requiring the attacker to already control the calling process.**
 - **Findings in a dependency** with an advisory already published. Those belong upstream;
   `cargo deny check advisories` runs here on every push and will surface them.

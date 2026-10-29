@@ -39,6 +39,11 @@ const REPEAT_LEN: usize = TRUNCATED_LEN + SALT_LEN;
 /// Sixteen repetitions: the 336 bytes `H1` is the MD5 of.
 const BUFFER_LEN: usize = 16 * REPEAT_LEN;
 
+// `H0` is finalized into the last `REPEAT_LEN - TRUNCATED_LEN` bytes of the buffer, so that
+// span must be exactly an MD5 output. Checked at compile time, which is what makes the
+// fallible conversion in `Office97KeySchedule::new` unreachable rather than merely unlikely.
+const _: () = assert!(REPEAT_LEN - TRUNCATED_LEN == 16);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Office97Header {
     pub(crate) salt: [u8; SALT_LEN],
@@ -115,9 +120,12 @@ impl Office97KeySchedule {
             let (body, last) = b.split_at_mut(BUFFER_LEN - REPEAT_LEN);
             let (_, h0) = last.split_at_mut(TRUNCATED_LEN);
             utf16le_password(password).with_secret(|pw| {
-                Md5::new()
-                    .chain_update(pw)
-                    .finalize_into(Output::<Md5>::from_mut_slice(h0));
+                // `h0` is 16 bytes by the assertion beside `BUFFER_LEN`, so this cannot
+                // fail; `if let` rather than `expect` because this module denies panics.
+                // Finalizing in place keeps `H0` out of any buffer this crate does not wipe.
+                if let Ok(out) = <&mut Output<Md5>>::try_from(h0) {
+                    Md5::new().chain_update(pw).finalize_into(out);
+                }
             });
             // `last` is `[5 unwritten | H0]`; `H0[..5]` is `last[5..10]`.
             let truncated = TRUNCATED_LEN..2 * TRUNCATED_LEN;

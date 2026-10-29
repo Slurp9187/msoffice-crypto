@@ -20,7 +20,7 @@
 use crate::error::Error;
 use crate::file_params::Invariant;
 use crate::sensitive::{DerivedKey, VerifierPlaintext};
-use rc4::{consts::*, Key, KeyInit, Rc4, StreamCipher};
+use rc4::{KeyInit, Rc4, StreamCipher};
 use secure_gate::{ConstantTimeEq, RevealSecret};
 
 /// Per-block key derivation — the one thing the two RC4 families do differently.
@@ -30,7 +30,7 @@ pub(crate) trait BlockKeySchedule {
 }
 
 /// An RC4 keystream under one block key.
-pub(crate) struct Keystream(Box<dyn StreamCipher>);
+pub(crate) struct Keystream(Rc4);
 
 impl Keystream {
     /// Build the keystream for `key`.
@@ -39,28 +39,21 @@ impl Keystream {
     /// `KeySize` of 48 to 128 bits in 8-bit steps — plus 16 for its zero-padded 40-bit
     /// key and for Office 97/2000 RC4, whose key is always 128 bits. 5 is admitted so a
     /// 40-bit key that somehow arrives unpadded is still a cipher and not a slice panic.
-    /// Anything else is a bug in the schedule that produced it, and is refused rather
-    /// than sliced: `GenericArray::from_slice` panics on a length mismatch, and the
-    /// length reaches here from the file's `KeySize`.
+    /// Anything else is a bug in the schedule that produced it, and is refused here:
+    /// `rc4` 0.2 accepts any key of 1 to 256 bytes, so the formats' narrower range is this
+    /// crate's to enforce. (Until 0.1.0-rc.12 the cipher was generic over its key length,
+    /// one arm per size, and `GenericArray::from_slice` panicked on a mismatch.)
     pub(crate) fn new(key: &DerivedKey) -> Result<Self, Error> {
-        macro_rules! cipher_for {
-            ($k:expr, $($n:literal => $size:ty),+ $(,)?) => {
-                match $k.len() {
-                    $( $n => Some(Box::new(Rc4::<$size>::new(Key::<$size>::from_slice($k)))
-                        as Box<dyn StreamCipher>), )+
-                    _ => None,
-                }
-            };
-        }
-        let cipher = key.with_secret(|k| {
-            cipher_for!(k, 5 => U5, 6 => U6, 7 => U7, 8 => U8, 9 => U9, 10 => U10, 11 => U11,
-                12 => U12, 13 => U13, 14 => U14, 15 => U15, 16 => U16)
-        });
         // Every caller derives a key the header's own bounds size, so a length outside
         // 5..=16 is ours (#47).
-        cipher
-            .map(Self)
-            .ok_or(Error::InvariantViolated(Invariant::Rc4KeyLength))
+        key.with_secret(|k| {
+            if !(5..=16).contains(&k.len()) {
+                return Err(Error::InvariantViolated(Invariant::Rc4KeyLength));
+            }
+            Rc4::new_from_slice(k)
+                .map(Self)
+                .map_err(|_| Error::InvariantViolated(Invariant::Rc4KeyLength))
+        })
     }
 
     pub(crate) fn apply(&mut self, data: &mut [u8]) {

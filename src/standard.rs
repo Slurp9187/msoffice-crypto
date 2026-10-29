@@ -47,7 +47,7 @@ use crate::sensitive::{
     VerifierPlaintext,
 };
 use aes::{Aes128, Aes192, Aes256};
-use ecb::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyInit};
+use ecb::cipher::{block_padding::NoPadding, BlockModeDecrypt, BlockModeEncrypt, KeyInit};
 use secure_gate::{ConstantTimeEq, RevealSecret, RevealSecretMut};
 use sha1::{Digest, Sha1};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -674,7 +674,8 @@ fn decrypt_package(key: &DerivedKey, encrypted_package: &[u8]) -> Result<Vec<u8>
 /// The key length rule both ECB directions share.
 ///
 /// Checked rather than asserted, mirroring `agile::check_cbc_lengths` for the same
-/// reason: `GenericArray::from_slice` panics on a length mismatch, and on the decrypt
+/// reason: a bad length must be a named error (cipher 0.4's `GenericArray::from_slice`
+/// panicked on one until 0.1.0-rc.12; cipher 0.5's `new_from_slice` refuses it), and on the decrypt
 /// side the length is reachable from `EncryptionHeader.KeySize`, an unconstrained u32 in
 /// the file. The check belongs here *as well as* at the parse boundary — the parse check
 /// states what the *format* permits and what the file's own `AlgID` agrees with, this one
@@ -700,7 +701,6 @@ fn check_aes_key(key: &[u8]) -> Result<(), Error> {
 /// the cipher the same way, from the same fact, so neither can be fixed without the
 /// other's shape being visible.
 pub(crate) fn aes_ecb_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
-    use aes::cipher::generic_array::GenericArray;
     check_aes_key(key)?;
     let mut out = vec![0u8; ciphertext.len()];
     // The key length *is* the cipher, and `check_aes_key` has already refused every
@@ -708,8 +708,9 @@ pub(crate) fn aes_ecb_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, 
     // a guess.
     macro_rules! run {
         ($cipher:ty) => {
-            ecb::Decryptor::<$cipher>::new(GenericArray::from_slice(key))
-                .decrypt_padded_b2b_mut::<NoPadding>(ciphertext, &mut out)
+            ecb::Decryptor::<$cipher>::new_from_slice(key)
+                .map_err(|_| Error::CipherError)?
+                .decrypt_padded_b2b::<NoPadding>(ciphertext, &mut out)
         };
     }
     match key.len() {
@@ -735,13 +736,13 @@ pub(crate) fn aes_ecb_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, 
 /// containers no writer of ours yet emits, and because letting the two directions differ
 /// in what they accept is how a crate ends up writing a file it cannot read.
 pub(crate) fn aes_ecb_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
-    use aes::cipher::generic_array::GenericArray;
     check_aes_key(key)?;
     let mut out = vec![0u8; plaintext.len()];
     macro_rules! run {
         ($cipher:ty) => {
-            ecb::Encryptor::<$cipher>::new(GenericArray::from_slice(key))
-                .encrypt_padded_b2b_mut::<NoPadding>(plaintext, &mut out)
+            ecb::Encryptor::<$cipher>::new_from_slice(key)
+                .map_err(|_| Error::CipherError)?
+                .encrypt_padded_b2b::<NoPadding>(plaintext, &mut out)
         };
     }
     match key.len() {
@@ -757,12 +758,12 @@ pub(crate) fn aes_ecb_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, E
 /// `agile::aes_cbc_decrypt_in_place` for why a returned `Vec` would not do. `buf` must
 /// be a multiple of 16 bytes.
 pub(crate) fn aes_ecb_decrypt_in_place(key: &[u8], buf: &mut [u8]) -> Result<(), Error> {
-    use aes::cipher::generic_array::GenericArray;
     check_aes_key(key)?;
     macro_rules! run {
         ($cipher:ty) => {
-            ecb::Decryptor::<$cipher>::new(GenericArray::from_slice(key))
-                .decrypt_padded_mut::<NoPadding>(buf)
+            ecb::Decryptor::<$cipher>::new_from_slice(key)
+                .map_err(|_| Error::CipherError)?
+                .decrypt_padded::<NoPadding>(buf)
                 .map(|_| ())
         };
     }
@@ -777,13 +778,13 @@ pub(crate) fn aes_ecb_decrypt_in_place(key: &[u8], buf: &mut [u8]) -> Result<(),
 /// [`aes_ecb_encrypt`] in place: the ciphertext overwrites the plaintext in `buf`. `buf`
 /// must be a multiple of 16 bytes.
 pub(crate) fn aes_ecb_encrypt_in_place(key: &[u8], buf: &mut [u8]) -> Result<(), Error> {
-    use aes::cipher::generic_array::GenericArray;
     check_aes_key(key)?;
     let len = buf.len();
     macro_rules! run {
         ($cipher:ty) => {
-            ecb::Encryptor::<$cipher>::new(GenericArray::from_slice(key))
-                .encrypt_padded_mut::<NoPadding>(buf, len)
+            ecb::Encryptor::<$cipher>::new_from_slice(key)
+                .map_err(|_| Error::CipherError)?
+                .encrypt_padded::<NoPadding>(buf, len)
                 .map(|_| ())
         };
     }
@@ -1044,8 +1045,8 @@ mod tests {
         assert!(derive_standard_key("pw", b"1234567890123456", 40).is_ok());
     }
 
-    /// `GenericArray::from_slice` panics on any length AES does not define, and the
-    /// length reaches here from `EncryptionHeader.KeySize`. This is the mirror of the
+    /// `GenericArray::from_slice` panicked on any length AES does not define (cipher 0.4,
+    /// until 0.1.0-rc.12), and the length reaches here from `EncryptionHeader.KeySize`. This is the mirror of the
     /// guard `agile::aes_cbc_decrypt` already had — the sibling function did not get it,
     /// so a `KeySize` of 0 or 64 bits cleared the slice above and crashed here.
     /// Both directions share the rule, so both are asserted.
