@@ -255,7 +255,7 @@ pub(crate) fn generate<R: TryRng + TryCryptoRng>(
     // §2.3.4.13 step 1 sizes the package key from `Encryptor.KeyData.keyBits`. Drawn at
     // full length rather than drawn short and padded to fit; see the module header.
     let session_key_len = to_len(params.key_data_key_bits / 8);
-    let session_key = SessionKey::from_rng(session_key_len, rng).map_err(random_source)?;
+    let session_key = SessionKey::try_new_with(session_key_len, |b| fill(rng, b))?;
 
     // The plaintext of `encryptedKeyValue` is that key in a `roundUp(keyBits / 8,
     // blockSize)` buffer with a **zero** tail -- not the key alone. AES-192 is where the

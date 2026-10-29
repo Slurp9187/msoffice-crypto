@@ -65,9 +65,9 @@ const _: () = {
     assert!(limits::AGILE_KEY_BITS_ALLOWED[0] < limits::AGILE_KEY_BITS_ALLOWED[1]);
     assert!(limits::AGILE_KEY_BITS_ALLOWED[1] < limits::AGILE_KEY_BITS_ALLOWED[2]);
     assert!(limits::AGILE_KEY_BITS_ALLOWED[0] >= ST_KEY_BITS_MIN);
-    assert!(limits::AGILE_KEY_BITS_ALLOWED[0] % 8 == 0);
-    assert!(limits::AGILE_KEY_BITS_ALLOWED[1] % 8 == 0);
-    assert!(limits::AGILE_KEY_BITS_ALLOWED[2] % 8 == 0);
+    assert!(limits::AGILE_KEY_BITS_ALLOWED[0].is_multiple_of(8));
+    assert!(limits::AGILE_KEY_BITS_ALLOWED[1].is_multiple_of(8));
+    assert!(limits::AGILE_KEY_BITS_ALLOWED[2].is_multiple_of(8));
 };
 
 /// The one accepted key size a `keyBits` refusal points the caller at.

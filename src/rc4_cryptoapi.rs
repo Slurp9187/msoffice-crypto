@@ -274,7 +274,7 @@ impl CryptoApiKeySchedule {
     /// a SHA-1 digest.
     pub(crate) fn new(password: &str, salt: &[u8; SALT_LEN], key_bits: u32) -> Result<Self, Error> {
         // `parse` bounds it first, so reaching this is ours (#47).
-        if !RC4_KEY_BITS.contains(&key_bits) || key_bits % 8 != 0 {
+        if !RC4_KEY_BITS.contains(&key_bits) || !key_bits.is_multiple_of(8) {
             return Err(Error::InvariantViolated(Invariant::Rc4KeyLength));
         }
         // The UTF-16LE re-encoding is wrapped and scoped to this statement, as in

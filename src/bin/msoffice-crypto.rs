@@ -1267,7 +1267,7 @@ fn read_password_from(source: PasswordSource, dir: Direction) -> Result<String, 
             // Refuse rather than block on a prompt nobody can see: with stdin redirected
             // from NUL or /dev/null there is no one to type into it, and a hang is a
             // failure no exit code can report. `std::io::IsTerminal`, stable since 1.70
-            // and well under this crate's 1.85 MSRV -- no `atty`, no `is-terminal`.
+            // and well under this crate's 1.87 MSRV -- no `atty`, no `is-terminal`.
             if !std::io::stdin().is_terminal() {
                 eprintln!(
                     "msoffice-crypto: no password source and stdin is not a terminal.\n\

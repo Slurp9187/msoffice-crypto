@@ -404,7 +404,7 @@ seen while something else was building is not evidence of anything.
 
 **Always run all five feature configurations.** A change can be clean in one and broken
 in another, and the detection build is the one people forget. `.github/workflows/ci.yml`
-runs this matrix plus an MSRV 1.85 build, the docs.rs nightly build, `cargo package
+runs this matrix plus an MSRV 1.87 build, the docs.rs nightly build, `cargo package
 --locked`, a `cargo deny` job over licences, advisories, bans and sources, a `prose` job
 running `tools/audit_claims.py`, a `packaging-invariants` job (build.rs stays in the
 `include` allowlist; `rc4` keeps `zeroize`; `src/bin/msoffice-crypto.rs` stays in the

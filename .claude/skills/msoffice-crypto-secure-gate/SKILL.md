@@ -15,14 +15,14 @@ true of this crate.**
 ## Dependency
 
 ```toml
-secure-gate = { version = "=0.9.0-rc.15", optional = true, default-features = false, features = ["alloc"] }
+secure-gate = { version = "=0.9.0-rc.16", optional = true, default-features = false, features = ["alloc"] }
 ```
 
-Enabled by the crate's own `crypto-ops` feature, which also turns on `secure-gate/ct-eq` and
-`secure-gate/rand`. Not `encoding` — this crate neither displays nor copies key material.
+Enabled by the crate's own `crypto-ops` feature, which also turns on `secure-gate/ct-eq`. Not
+`rand`: since rc.16 it gives only `from_random`, which takes no RNG (see below). Not `encoding` — this crate neither displays nor copies key material.
 
 **Optional, on `crypto-ops`.** The rule for adding a secure-gate feature is: *does the
-detection build use it?* None of `alloc`, `ct-eq` or `rand` is, so all three ride on
+detection build use it?* Neither `alloc` nor `ct-eq` is, so both ride on
 `crypto-ops`. This is not a dependency-count argument — in the build that has key material,
 secure-gate and its `zeroize` come along regardless, which is what they are for. What holds is
 that no module compiled into the detection build references it, because that build holds no key
@@ -33,9 +33,10 @@ computes against a value the *file* supplies — the textbook MAC-forgery oracle
 short-circuiting `==` leaks how many leading bytes of a forged tag were right. Marginal cost is
 zero: `subtle` is a leaf, and `hmac` pulls it in regardless via `digest`'s `mac` feature.
 
-**Every rule in the global skill is read against rc.15**, taken in 0.1.0-rc.10; rc.14 and
-rc.15 change only the opt-in `sealed` feature, which is not enabled here. rc.13 was taken in
-0.1.0-rc.8. Each bump is a coordinated ecosystem wave — see the global skill's *upgrade* reference: two exact pins on
+**Every rule in the global skill is read against rc.16**, taken in 0.1.0-rc.12. rc.16 removed
+`from_rng` (the three draws moved to `try_new_with`) and raised the MSRV to 1.87, which this
+crate's followed. rc.14 and rc.15, taken in 0.1.0-rc.10, change only the opt-in `sealed`
+feature, which is not enabled here. rc.13 was taken in 0.1.0-rc.8. Each bump is a coordinated ecosystem wave — see the global skill's *upgrade* reference: two exact pins on
 one 0.9 range cannot resolve together, so the consumer moves only when this crate does. This
 crate declares no newtypes (`grep -rn 'derive:' src/` is empty), so the rc.13
 `derive: [ConstantTimeEq]` break does **not** hit it, and nothing it calls changed. The opt-in
@@ -107,7 +108,7 @@ when a new `Fixed` shares a size with an existing one outside a single module.
 Measured in `src/` (files, not occurrences):
 
 ```sh
-for m in with_secret with_secret_mut expose_secret into_inner from_rng from_random new_with ct_eq; do
+for m in with_secret with_secret_mut expose_secret into_inner try_new_with from_random new_with ct_eq; do
   printf '%-16s %s\n' "$m" "$(grep -rl "$m" --include=*.rs src/ | wc -l)"
 done
 ```
@@ -117,7 +118,7 @@ done
 | `with_secret` | 13 |
 | `new_with` | 10 |
 | `ct_eq` | 6 |
-| `from_rng` | 4 |
+| `try_new_with` | 3 |
 | `with_secret_mut` | 4 |
 | `expose_secret` | **0** |
 | `into_inner` | **0** |
@@ -138,11 +139,14 @@ way, and treat the first `expose_secret` as a decision to argue for rather than 
 `cursor.into_inner()` or `cfb.into_inner()`. Filter before counting — a case-sensitive
 exclusion of `Cursor` alone still reports 17 false hits.
 
-`from_rng`, not `from_random`: **the RNG is injected, never a global.** `generate(password,
+`try_new_with` over the injected RNG, not `from_random`: **the RNG is injected, never a
+global.** Each draw is `Dynamic::try_new_with(len, |b| fill(rng, b))`, filling the wrapper's
+own pre-zeroed slot and wiping it if the RNG fails; until rc.16 it was `from_rng(len, rng)`,
+the same single `try_fill_bytes`, so no seeded golden moved. `generate(password,
 spin_count, rng)` takes `&mut R where R: rand::TryRng + rand::TryCryptoRng`, and
 `generate_with_system_rng` is a one-line wrapper passing `rand::rngs::SysRng` — so the seeded
 path a test drives and the path a caller gets are the same function. Tests use
-`chacha20::ChaCha12Rng`, **not** `rand_chacha` (pinned to `rand_core` 0.9, fails `from_rng`'s
+`chacha20::ChaCha12Rng`, **not** `rand_chacha` (pinned to `rand_core` 0.9, fails the injected RNG's
 bounds) and **not** `rand::rngs::StdRng` (documented non-portable even with a fixed seed, which
 would silently invalidate a committed golden).
 

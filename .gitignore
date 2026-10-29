@@ -2,7 +2,7 @@
 
 # Secondary CARGO_TARGET_DIRs. Concurrent agents share the primary `target/`
 # (cargo's own lock serialises them) and use a separate one for the MSRV
-# toolchain so a 1.85 build does not evict the stable artifacts.
+# toolchain so an MSRV build does not evict the stable artifacts.
 /target-msrv
 
 # Worktrees the agent harness creates for parallel work. They contain full

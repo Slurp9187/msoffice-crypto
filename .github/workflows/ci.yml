@@ -42,7 +42,7 @@ name: CI
 # `sha_pinning_required` is set on the repository, so a tag reintroduced here fails the
 # run rather than quietly working.
 #
-# `dtolnay/rust-toolchain` publishes no releases: `stable`, `nightly` and `1.85.0` are
+# `dtolnay/rust-toolchain` publishes no releases: `stable`, `nightly` and `1.87.0` are
 # branches. Pinning fixes the action's own code; which toolchain it installs is still
 # resolved at run time, which is the reason to use it at all.
 
@@ -527,11 +527,11 @@ jobs:
 
   msrv:
     # Keep in step with `rust-version` in Cargo.toml; bump both together.
-    name: MSRV 1.85
+    name: MSRV 1.87
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@3230091d7ef9483f601620abacc570c22cf44d22 # branch `1.85.0`, resolved 2026-09-11
+      - uses: dtolnay/rust-toolchain@9fd5edfc8bba9f7408b867e3f58b5a2119358898 # branch `1.87.0`, resolved 2026-10-29
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: msrv
