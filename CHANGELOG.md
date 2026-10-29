@@ -89,6 +89,17 @@ which was checked by removing `hmac`'s.
 Output is unchanged after both moves. The seeded SHA-256 goldens for agile and standard pass
 as they were, and so do the msoffcrypto-tool vectors and the Office-written fixtures.
 
+Four-reader gate on the agile artifact from tree `f5c481a`, which has both moves (41,984 bytes, SHA-256
+`de9a727a4fd4eb086ee0cee29f239474e327240b50afc2fbd475da7248246993`), 2026-10-29:
+
+- Word 16.0 build 16.0.19127: opened, content matches; wrong password refused
+  `0x800A1520` — PASS
+- LibreOffice 26.8.0.3: opened, content matches; wrong password refused by the verifier —
+  PASS
+- msoffcrypto-tool 6.0.0: byte-identical to `plain.docx`, `dataIntegrity` HMAC verifies;
+  wrong password refused — PASS
+- office-crypto 0.3: byte-identical to `plain.docx` — PASS
+
 The two moves together take `crypto-ops` from 36 crates to 39 and `legacy-binary` from 38 to
 41. `hybrid-array` replaces `generic-array`; `ctutils` 0.4.7, `cmov` and `cpubits` are new.
 The detection build is unchanged at 13. `ctutils` is the crate RUSTSEC-2026-0385 concerns,
