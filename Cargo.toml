@@ -1,6 +1,6 @@
 [package]
 name = "msoffice-crypto"
-version = "0.1.0-rc.12"
+version = "0.1.0-rc.13"
 edition = "2021"
 description = "Microsoft Office document encryption per MS-OFFCRYPTO: detect, decrypt and encrypt (agile and Office 2007 standard), with key material that zeroizes on drop and a detection build that links no cryptography. Not affiliated with Microsoft."
 rust-version = "1.87"
@@ -340,14 +340,17 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 # then its guarded off-heap mapping and the `LockError` API), and `sealed` is not enabled
 # here, so nothing this crate compiles changed.
 #
-# rc.16 is what is pinned now, and it is the second release in this span to change what
-# this crate calls: it removed `from_rng`, so the three RNG draws above moved to
+# rc.16 was the second release in this span to change what this crate calls: it removed `from_rng`, so the three RNG draws above moved to
 # `try_new_with`, and it raised its MSRV to 1.87, which raised this crate's with it. It also
 # requires zeroize ^1.9.1. Its removed decode traits (`FromHexStr` and kin) were never used
 # here, since this crate enables no encoding. Every pin move is for the consumer's graph as
 # well: Cargo holds one version per semver-compatible range, so a consumer pinning one
 # secure-gate rc exactly cannot resolve against a crate pinning another -- the two pins move
 # together or not at all.
+#
+# rc.17 is what is pinned now, and nothing this crate compiles changed in it: its Poly1305
+# wipe is inside `sealed`, its bech32 0.12 move reaches only the `encoding` types, and its
+# MSRV stays 1.87. The move is for the consumer's graph alone.
 #
 # When it goes on, the seeded RNG is a `chacha20` dev-dependency and NOT
 # `rand_chacha`. the injected RNG's `TryRng + TryCryptoRng` bounds come from rand_core
@@ -385,7 +388,7 @@ rand = { version = "0.10", optional = true, default-features = false, features =
 #
 # This is not a dependency-count argument. In the build that has key material, secure-gate
 # and its `zeroize` come along regardless -- that is what they are for.
-secure-gate = { version = "=0.9.0-rc.16", optional = true, default-features = false, features = [
+secure-gate = { version = "=0.9.0-rc.17", optional = true, default-features = false, features = [
     "alloc",
 ] }
 

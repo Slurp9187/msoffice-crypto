@@ -15,7 +15,7 @@ true of this crate.**
 ## Dependency
 
 ```toml
-secure-gate = { version = "=0.9.0-rc.16", optional = true, default-features = false, features = ["alloc"] }
+secure-gate = { version = "=0.9.0-rc.17", optional = true, default-features = false, features = ["alloc"] }
 ```
 
 Enabled by the crate's own `crypto-ops` feature, which also turns on `secure-gate/ct-eq`. Not
@@ -33,7 +33,9 @@ computes against a value the *file* supplies — the textbook MAC-forgery oracle
 short-circuiting `==` leaks how many leading bytes of a forged tag were right. Marginal cost is
 zero: `subtle` is a leaf, and `hmac` pulls it in regardless via `digest`'s `mac` feature.
 
-**Every rule in the global skill is read against rc.16**, taken in 0.1.0-rc.12. rc.16 removed
+**Every rule in the global skill is read against rc.17**, taken in 0.1.0-rc.13; rc.17 changes
+nothing this crate compiles (its fixes are in `sealed` and `encoding`, neither enabled here).
+rc.16, taken in 0.1.0-rc.12, removed
 `from_rng` (the three draws moved to `try_new_with`) and raised the MSRV to 1.87, which this
 crate's followed. rc.14 and rc.15, taken in 0.1.0-rc.10, change only the opt-in `sealed`
 feature, which is not enabled here. rc.13 was taken in 0.1.0-rc.8. Each bump is a coordinated ecosystem wave — see the global skill's *upgrade* reference: two exact pins on

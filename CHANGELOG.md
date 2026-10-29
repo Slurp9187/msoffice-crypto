@@ -22,6 +22,19 @@ What survives that move is in two places, deliberately:
 
 ---
 
+## [0.1.0-rc.13] - 2026-10-29
+
+### `secure-gate` moves to 0.9.0-rc.17, and the API does not move
+
+The exact pin goes from `=0.9.0-rc.16` to `=0.9.0-rc.17`. Nothing this crate compiles
+changed in rc.17. Its Poly1305 wipe is inside the `sealed` feature and its `bech32` 0.12
+move reaches only the `encoding` types, and this crate enables neither. Its MSRV stays at
+1.87. The public API does not change.
+
+The move is for the consumer's graph, as with every secure-gate pin before it: an
+application that depends on secure-gate 0.9 directly can take rc.17 only by taking this
+release with it.
+
 ## [0.1.0-rc.12] - 2026-10-29
 
 ### `secure-gate` moves to 0.9.0-rc.16, and the MSRV to 1.87
@@ -2059,6 +2072,7 @@ job is parsing bytes an attacker chose — and, as usefully, what does not.
 [MS-CFB]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/
 [MS-PPT]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-ppt/
 [MS-ODRAW]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-odraw/
+[0.1.0-rc.13]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.12...v0.1.0-rc.13
 [0.1.0-rc.12]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.11...v0.1.0-rc.12
 [0.1.0-rc.11]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.10...v0.1.0-rc.11
 [0.1.0-rc.10]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.9...v0.1.0-rc.10
