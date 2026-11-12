@@ -15,7 +15,7 @@ true of this crate.**
 ## Dependency
 
 ```toml
-secure-gate = { version = "=0.9.0-rc.17", optional = true, default-features = false, features = ["alloc"] }
+secure-gate = { version = "=0.9.0-rc.18", optional = true, default-features = false, features = ["alloc"] }
 ```
 
 Enabled by the crate's own `crypto-ops` feature, which also turns on `secure-gate/ct-eq`. Not
@@ -33,8 +33,11 @@ computes against a value the *file* supplies — the textbook MAC-forgery oracle
 short-circuiting `==` leaks how many leading bytes of a forged tag were right. Marginal cost is
 zero: `subtle` is a leaf, and `hmac` pulls it in regardless via `digest`'s `mac` feature.
 
-**Every rule in the global skill is read against rc.17**, taken in 0.1.0-rc.13; rc.17 changes
-nothing this crate compiles (its fixes are in `sealed` and `encoding`, neither enabled here).
+**Every rule in the global skill is read against rc.18**, taken in 0.1.0-rc.14; rc.18 changes
+nothing this crate compiles (bech32 types made private, `traits::revealed_secrets` renamed,
+serde `derive` no longer enabled, and a wipe fix in the hex/Base32/Base64url decoders: none
+used or enabled here). rc.17, taken in 0.1.0-rc.13, changed
+nothing this crate compiles either (its fixes are in `sealed` and `encoding`, neither enabled here).
 rc.16, taken in 0.1.0-rc.12, removed
 `from_rng` (the three draws moved to `try_new_with`) and raised the MSRV to 1.87, which this
 crate's followed. rc.14 and rc.15, taken in 0.1.0-rc.10, change only the opt-in `sealed`
