@@ -22,6 +22,21 @@ What survives that move is in two places, deliberately:
 
 ---
 
+## [0.1.0-rc.14] - 2026-11-12
+
+### `secure-gate` moves to 0.9.0-rc.18, and the API does not move
+
+The exact pin goes from `=0.9.0-rc.17` to `=0.9.0-rc.18`, the last candidate before 0.9.0.
+Nothing this crate compiles changed in rc.18. It makes the bech32 checksum types private,
+renames `traits::revealed_secrets` to `traits::encoded_secret`, stops enabling serde's
+`derive`, raises its serde floor to 1.0.95, and wipes the decode buffer when hex, Base32 or
+Base64url input is rejected. This crate enables `alloc` alone and names none of the moved
+types. Its MSRV stays at 1.87. The public API does not change.
+
+The move is for the consumer's graph, as with every secure-gate pin before it: an
+application that depends on secure-gate 0.9 directly can take rc.18 only by taking this
+release with it.
+
 ## [0.1.0-rc.13] - 2026-10-29
 
 ### `secure-gate` moves to 0.9.0-rc.17, and the API does not move
@@ -2072,6 +2087,7 @@ job is parsing bytes an attacker chose — and, as usefully, what does not.
 [MS-CFB]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/
 [MS-PPT]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-ppt/
 [MS-ODRAW]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-odraw/
+[0.1.0-rc.14]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.13...v0.1.0-rc.14
 [0.1.0-rc.13]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.12...v0.1.0-rc.13
 [0.1.0-rc.12]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.11...v0.1.0-rc.12
 [0.1.0-rc.11]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.10...v0.1.0-rc.11
