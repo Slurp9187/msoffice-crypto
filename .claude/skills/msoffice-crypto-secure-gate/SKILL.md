@@ -15,8 +15,13 @@ true of this crate.**
 ## Dependency
 
 ```toml
-secure-gate = { version = "=0.9.0-rc.19", optional = true, default-features = false, features = ["alloc"] }
+secure-gate = { version = "=<one exact 0.9 release>", optional = true, default-features = false, features = ["alloc"] }
 ```
+
+**The pinned release is in `Cargo.toml`, and only there.** This file names no version on
+purpose, so a secure-gate bump never touches it. The rationale above the pin in `Cargo.toml`
+records what each release changed for this crate, and `CHANGELOG.md` records which of this
+crate's releases moved the pin.
 
 Enabled by the crate's own `crypto-ops` feature, which also turns on `secure-gate/ct-eq`. Not
 `rand`: since rc.16 it gives only `from_random`, which takes no RNG (see below). Not `encoding` — this crate neither displays nor copies key material.
@@ -33,20 +38,26 @@ computes against a value the *file* supplies — the textbook MAC-forgery oracle
 short-circuiting `==` leaks how many leading bytes of a forged tag were right. Marginal cost is
 zero: `subtle` is a leaf, and `hmac` pulls it in regardless via `digest`'s `mac` feature.
 
-**Every rule in the global skill is read against rc.19**, taken in 0.1.0-rc.15; rc.19 changes
-nothing this crate compiles (it adds `sealed_dynamic_newtype!`, behind `sealed`, which is not
-enabled here). rc.18, taken in 0.1.0-rc.14, changed nothing this crate compiles either (bech32 types made private, `traits::revealed_secrets` renamed,
-serde `derive` no longer enabled, and a wipe fix in the hex/Base32/Base64url decoders: none
-used or enabled here). rc.17, taken in 0.1.0-rc.13, changed
-nothing this crate compiles either (its fixes are in `sealed` and `encoding`, neither enabled here).
-rc.16, taken in 0.1.0-rc.12, removed
-`from_rng` (the three draws moved to `try_new_with`) and raised the MSRV to 1.87, which this
-crate's followed. rc.14 and rc.15, taken in 0.1.0-rc.10, change only the opt-in `sealed`
-feature, which is not enabled here. rc.13 was taken in 0.1.0-rc.8. Each bump is a coordinated ecosystem wave — see the global skill's *upgrade* reference: two exact pins on
-one 0.9 range cannot resolve together, so the consumer moves only when this crate does. This
-crate declares no newtypes (`grep -rn 'derive:' src/` is empty), so the rc.13
-`derive: [ConstantTimeEq]` break does **not** hit it, and nothing it calls changed. The opt-in
-`sealed` feature is not enabled.
+**What a bump has to check.** This crate's surface on secure-gate is narrow and fixed:
+- the `alloc` and `ct-eq` features (`sealed`, `encoding`, `rand`, `serde` and `cloneable` are
+  not enabled);
+- `Dynamic` and `Fixed` used as plain aliases;
+- `new_with` on both, and `try_new_with` on `Dynamic`;
+- `with_secret` and `with_secret_mut`, through the `RevealSecret` and `RevealSecretMut`
+  traits;
+- `ct_eq`, through `ConstantTimeEq`;
+- the MSRV.
+
+It declares no newtypes (`grep -rn 'derive:' src/` is empty). A release that changes none of
+these changes nothing this crate compiles, and most do not: their changes land in `sealed`,
+`encoding` or the newtype macros. When one does change something on that list (rc.16 removed
+`from_rng` and raised the MSRV to 1.87), the code and this file change with it. Otherwise
+the bump is the pin, `Cargo.lock`, a line in the `Cargo.toml` rationale, and a changelog entry.
+This file does not change.
+
+Each bump is a coordinated ecosystem wave. See the global skill's *upgrade* reference: two
+exact pins on one 0.9 range cannot resolve together, so the consumer moves only when this
+crate does.
 
 ## Boundary — the public API stays plain
 
