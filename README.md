@@ -368,6 +368,12 @@ remediated by the `quick-xml` floor in `Cargo.toml`.
 Rust **1.87**, checked by a dedicated CI job rather than declared and hoped for. It was
 1.85 until 0.1.0-rc.12, which took secure-gate 0.9.0-rc.16 and the 1.87 that release requires.
 
+The newest releases of some dependencies need a newer compiler than this crate does: on
+2026-11-14, `aes` 0.9.4 needs 1.89 and `sha2` 0.11.1 needs 1.88. On Rust 1.87, let Cargo's
+MSRV-aware resolver choose (`resolver = "3"` in the workspace manifest, or
+`CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback` in the environment), and it picks
+the newest versions that build on 1.87.
+
 ## Sibling crate
 
 [`odf-crypto`](https://github.com/Slurp9187/odf-crypto) does for OpenDocument what this
