@@ -141,8 +141,8 @@ fewer in each column, the CLI's interrupt fallback, which exists only off Window
 | --- | --- | --- |
 | detection | 46 passed, 0 failed, **17 ignored** | 63 passed, **0 ignored** |
 | `crypto-ops` | 259 passed, 0 failed, **30 ignored** | 301 passed, **0 ignored** |
-| `legacy-binary` | 296 passed, 0 failed, **45 ignored** | 367 passed, **0 ignored** |
-| `cli,legacy-binary` | 344 passed, 0 failed, **45 ignored** | 478 passed, **0 ignored** |
+| `legacy-binary` | 297 passed, 0 failed, **45 ignored** | 367 passed, **0 ignored** |
+| `cli,legacy-binary` | 345 passed, 0 failed, **45 ignored** | 478 passed, **0 ignored** |
 
 **`tools/check_test_counts.py` measures this table, and CI runs it** (the `test-counts`
 job). It runs every configuration in the repository, packages the crate, extracts it to a
@@ -157,7 +157,9 @@ The totals are not expected to match across the two columns. `detection` does --
 `passed` plus `ignored` is the repository's `passed`, the same tests with the corpus ones
 reported honestly as ignored -- but the others lose tests outright, because the `tests/*.rs`
 integration files are not in the `include` allowlist and so do not exist in the tarball at
-all.
+all. The one exception, from 0.1.0, is `tests/legacy_allocation.rs`: it builds its workbook
+at runtime and needs no fixture, so it ships and is the one test the two `legacy-binary`
+rows gain in the tarball.
 
 **The ignored count is a check, not an accident.** `build.rs` sets `cfg(fixture_corpus)`
 when it finds any of the twenty-two withheld fixtures, and the corpus-dependent tests carry
