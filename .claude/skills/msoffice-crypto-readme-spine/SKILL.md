@@ -24,7 +24,7 @@ by muscle memory.
 3  pitch paragraph + status blockquote
 4  ## What it does                capability grid: ✅ / ❌ / n/a + Needs column
    [SLOT C]  ## Why this one
-5  ## Install                     commented two-line toml + pre-release caveat
+5  ## Install                     commented two-line toml
    [SLOT A]  (empty here)
 6  ## Usage                       fn main() -> Result<…>, rust,no_run
 7  ## Command line

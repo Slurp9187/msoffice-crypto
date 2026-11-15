@@ -581,7 +581,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "msoffice-crypto"
-version = "0.1.0-rc.15"
+version = "0.1.0"
 dependencies = [
  "aes 0.9.2",
  "base64 0.23.1",
@@ -814,9 +814,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "secure-gate"
-version = "0.9.0-rc.19"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02dde514c5490c222438491af9bd77446148b6d26630c69072a047b713d58fed"
+checksum = "5db1026e7e1438a8b66f8c1e9dd21ce4d09800f328e4e421c5edd99d12967b5c"
 dependencies = [
  "base16ct",
  "base32ct",

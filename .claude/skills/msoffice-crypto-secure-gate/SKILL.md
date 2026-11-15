@@ -15,13 +15,13 @@ true of this crate.**
 ## Dependency
 
 ```toml
-secure-gate = { version = "=<one exact 0.9 release>", optional = true, default-features = false, features = ["alloc"] }
+secure-gate = { version = "0.9", optional = true, default-features = false, features = ["alloc"] }
 ```
 
-**The pinned release is in `Cargo.toml`, and only there.** This file names no version on
-purpose, so a secure-gate bump never touches it. The rationale above the pin in `Cargo.toml`
+**A caret on the stable 0.9, since 0.1.0.** Through the release candidates the requirement
+was one exact rc; secure-gate 0.9.0 made it `"0.9"`. The rationale above it in `Cargo.toml`
 records what each release changed for this crate, and `CHANGELOG.md` records which of this
-crate's releases moved the pin.
+crate's releases moved it.
 
 Enabled by the crate's own `crypto-ops` feature, which also turns on `secure-gate/ct-eq`. Not
 `rand`: since rc.16 it gives only `from_random`, which takes no RNG (see below). Not `encoding` — this crate neither displays nor copies key material.
@@ -51,13 +51,16 @@ zero: `subtle` is a leaf, and `hmac` pulls it in regardless via `digest`'s `mac`
 It declares no newtypes (`grep -rn 'derive:' src/` is empty). A release that changes none of
 these changes nothing this crate compiles, and most do not: their changes land in `sealed`,
 `encoding` or the newtype macros. When one does change something on that list (rc.16 removed
-`from_rng` and raised the MSRV to 1.87), the code and this file change with it. Otherwise
-the bump is the pin, `Cargo.lock`, a line in the `Cargo.toml` rationale, and a changelog entry.
-This file does not change.
+`from_rng` and raised the MSRV to 1.87), the code and this file change with it.
 
-Each bump is a coordinated ecosystem wave. See the global skill's *upgrade* reference: two
-exact pins on one 0.9 range cannot resolve together, so the consumer moves only when this
-crate does.
+**A new 0.9.x needs no edit at all**: the caret admits it, and `cargo update -p secure-gate`
+moves `Cargo.lock`. Read its changelog against the list anyway. Semver promises the API
+stays compatible, not that nothing on the list moves, and an MSRV raise is semver-compatible
+and would raise this crate's with it.
+
+Through the release candidates each bump was a coordinated ecosystem wave (see the global
+skill's *upgrade* reference): two exact pins on one 0.9 range cannot resolve together, so the
+consumer moved only when this crate did. With the caret it takes a 0.9.x on its own schedule.
 
 ## Boundary — the public API stays plain
 

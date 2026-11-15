@@ -9,64 +9,55 @@ sibling solved it before inventing something new.
 
 ---
 
-## Project Status — release candidates published, no stable release
+## Project Status — stable since 0.1.0
 
-> **Release candidates of `0.1.0`, from `rc.2` on, are live on crates.io; the registry
-> index is the check for which and whether any is yanked, and `CHANGELOG.md`'s dated
-> headings say when each was cut. There is no stable release. The only known consumer is a private application in the same hands.**
-
-This section said "has never been published" until 2026-09-19, two weeks after it stopped
-being true. The conclusions below were right anyway, but for a reason the text did not give,
-so the reason is now written down: the latitude comes from the **release-candidate line**,
-not from nothing having shipped.
+> **`0.1.0` is the first stable release, cut on 2026-11-14 after release candidates `rc.2`
+> through `rc.15`. The registry index is the check for what is published and whether any is
+> yanked, and `CHANGELOG.md`'s dated headings say when each was cut. The only known consumer
+> is a private application in the same hands.**
 
 The dates are local, as `CHANGELOG.md`'s are: rc.2's registry timestamp is
 `2026-09-16T03:04Z`, which is the same evening on a UTC-7 machine. This file carried that
 UTC date until 2026-09-21 — the drift the changelog convention exists to stop,
 reappearing in the file that states the convention.
 
-An `0.1.0-rc.N` is unstable twice over. It is `0.x`, which semver puts outside its
-compatibility guarantee, and it is a pre-release, which Cargo will not resolve for anyone who
-has not explicitly named a pre-release requirement. Breaking one rc against the next is what
-an rc line is for.
+Until 0.1.0 the latitude came from the release-candidate line: an `0.1.0-rc.N` was a
+pre-release, which Cargo resolves only for someone who names one, and breaking one rc against
+the next was what the line was for. **That latitude ended at 0.1.0.** Cargo treats every 0.1.x
+as compatible with every other, so a caller on `"0.1"` takes the next 0.1.x without being
+asked. What replaces the old rules:
 
-- **Breaking API changes are free.** No deprecation cycle, no compatibility shim, no
-  `#[deprecated]` re-export. Change the signature, fix the one caller, fix the tests. What a
-  published rc does add is a duty to **say so in the changelog** — plainly, as a fact, with no
-  migration recipe. The case that earned this: `Document::OoxmlPackage` narrowed in rc.3 from
-  "any ZIP or a CFB-wrapped package" to "CFB-wrapped package only", which breaks a consumer
-  matching it with no compile error at all, because `#[non_exhaustive]` had already pushed
-  them to write the catch-all that swallows the new variant. Nothing was removed, so nothing
-  scanning for breaking changes finds it.
-- **Feature reshuffles are free.** Moving items behind `crypto-ops`, changing what `default`
-  includes — all fine, and expected, in a 0.x crate with one consumer.
-- **The one real constraint is that consumer's Office handler, and it is live.** It was
-  dormant until rc.2 published and this file said so for four days after it stopped being
-  true. Verified in the consumer's own tree rather than taken on report (encrypted-file-vault's
-  `main` on 2026-10-28): its root `Cargo.toml` takes this crate from crates.io pinned to one
-  exact rc with default features off — read the version there, not here — enables it through
-  `msoffice-crypto/legacy-binary` (the superset, for `decrypt_binary_office`; in
-  `crates/efv-core/Cargo.toml`), and calls eleven entry points — `classify`,
-  `classify_from`, `is_cfb_office`, `decrypt_ooxml_with_policy`, `decrypt_ooxml_to`,
-  `decrypt_binary_office`, `encrypt_ooxml`, `encrypt_ooxml_with_params`,
+- **A breaking change waits for 0.2.0.** Removing or renaming a public item, changing a
+  signature, or removing a feature or taking something out of `default` breaks a caller, and
+  none of it lands in a 0.1.x. **A narrowed meaning counts, and it is the one nothing flags.**
+  The case that earned this: `Document::OoxmlPackage` narrowed in rc.3 from "any ZIP or a
+  CFB-wrapped package" to "CFB-wrapped package only", which breaks a consumer matching it
+  with no compile error at all, because `#[non_exhaustive]` had already pushed them to write
+  the catch-all that swallows the new variant. Nothing was removed, so nothing scanning for
+  breaking changes finds it.
+- **Additions are 0.1.x.** A new function, a new feature, a new variant on a
+  `#[non_exhaustive]` enum. An item leaves a 0.1.x by `#[deprecated]`, and is removed in
+  0.2.0.
+- **Every release says what it changes in the changelog**, plainly, as a fact; a 0.2.0 says
+  what broke.
+- **The one consumer is live.** Verified in the consumer's own tree rather than taken on
+  report (encrypted-file-vault's `main` on 2026-10-28): its root `Cargo.toml` takes this
+  crate from crates.io pinned to one exact release with default features off — read the
+  version there, not here — enables it through `msoffice-crypto/legacy-binary` (the
+  superset, for `decrypt_binary_office`; in `crates/efv-core/Cargo.toml`), and calls eleven
+  entry points — `classify`, `classify_from`, `is_cfb_office`, `decrypt_ooxml_with_policy`,
+  `decrypt_ooxml_to`, `decrypt_binary_office`, `encrypt_ooxml`, `encrypt_ooxml_with_params`,
   `encrypt_ooxml_with_params_to`, `encrypt_ooxml_standard_with_key_bits` and
-  `encrypt_ooxml_standard_with_key_bits_to`. This paragraph named the pinned rc, a line
-  number and a commit until 2026-10-28, and went stale at every bump (it said rc.9 while the
-  consumer was on rc.10); the entry points change only with the API, so they stay.
-  **Every item on the old re-enable list is done**, so that list is history rather than a
-  to-do.
+  `encrypt_ooxml_standard_with_key_bits_to`. The entry points change only with the API, so
+  they stay; the version changes at every bump, so it is not written here. When you change
+  the API, say in your report what the consumer's next bump lands. **That application is
+  still not edited from here** — read it to check a claim, never to fix one.
 
-  What replaces it: **the pin is exact, and a bump is the event to write for.**
-  An API change here reaches nobody until someone moves that `=` pin, so when you change the
-  API, say in your report what the bump lands — not what a re-enable would need. Both kinds
-  of change count, and they are not equally visible: a refusal that did not exist before
-  announces itself, while a narrowed meaning compiles silently (see the rc.3
-  `Document::OoxmlPackage` case above). **That application is still not edited from here** —
-  read it to check a claim, never to fix one.
-
-Revisit this section the moment a **stable** `0.1.0` is cut — that, not the first
-`cargo publish`, is where the API becomes a promise. The earlier wording named the publish and
-was overtaken by it in silence; the trigger is the version number, which is checkable.
+This section said "release candidates published, no stable release" until 0.1.0 was cut,
+and instructed its own revision at that point; the rc-line rules it held are in git history.
+It also once said "has never been published", for two weeks after rc.2 made that false —
+which is why the trigger for the next revision is a version number, which is checkable:
+revisit this section when 0.2.0 or 1.0.0 is cut.
 
 ---
 
@@ -356,23 +347,18 @@ this crate's open spots.
 
 **secure-gate version.** This crate tracks 0.9.x, matching `odf-crypto`, and the
 dependency is optional on `crypto-ops` — the detection build holds no key material.
-This crate pins one exact 0.9 rc in `Cargo.toml`, and the consumer named above pins one in
-its own root `Cargo.toml`; read both there. **Within 0.9.x the two pins must name the same
-release, and that is a requirement, not a convenience.** Two exact pins on one semver-compatible range cannot both
-be satisfied: a probe crate requiring `msoffice-crypto = "=0.1.0-rc.7"` and
+**Since 0.1.0 the requirement is a caret, `"0.9"`**, against secure-gate's first stable
+release. Through the release candidates it was one exact rc, and then the consumer's pin was
+a requirement, not a convenience: two exact pins on one semver-compatible range cannot both
+be satisfied — a probe crate requiring `msoffice-crypto = "=0.1.0-rc.7"` and
 `secure-gate = "=0.9.0-rc.13"` fails resolution with `failed to select a version for
-secure-gate` (measured 2026-10-18). So a bump of this crate that also moves its secure-gate
-pin obliges the consumer to move its own pin with it; `CHANGELOG.md` says which release moved
-it. **No secure-gate type crosses this crate's public API, by design**,
-which is what lets a consumer on a different *range* (0.8.x against this crate's 0.9.x) hold
-both side by side; it does not help two releases of the same range. This paragraph said "a
-consumer on a different version resolves both side by side without conflict" until the
-rc.13 re-pin, which was true only across ranges. The plan to move the boundary onto its types ("S1 part 3")
-was withdrawn as a design error on 2026-09-04 and is not coming back without new evidence.
-This paragraph claimed the consumer was on `=0.8.0-rc.10` until 2026-09-21 — two versions
-stale, and stale in the direction that made the side-by-side case look load-bearing when
-nothing was currently exercising it. The secure-gate skill is the
-authority on what is wrapped; it agrees.
+secure-gate` (measured 2026-10-18). With the caret, a consumer that depends on secure-gate
+0.9 directly shares one copy with this crate whichever 0.9.x it names, and a new secure-gate
+0.9.x needs no release here — only `Cargo.lock` moves. **No secure-gate type crosses this
+crate's public API, by design**, which is what lets a consumer on a different *range* (0.8.x
+against this crate's 0.9.x) hold both side by side. The plan to move the boundary onto its
+types ("S1 part 3") was withdrawn as a design error on 2026-09-04 and is not coming back
+without new evidence. The secure-gate skill is the authority on what is wrapped; it agrees.
 
 ---
 
