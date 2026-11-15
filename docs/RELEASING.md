@@ -194,6 +194,10 @@ in anger. Publishing `0.1.0` makes the API a promise on the day it lands.
 Recommended: publish `0.1.0-rc.1` as the tree stands, let the consumer's re-enable exercise it,
 then cut `0.1.0`. Both are cheap; only the second is irreversible.
 
+**Done.** Fourteen candidates followed rc.1, the consumer re-enabled its Office handler
+against them, and `0.1.0` was cut on 2026-11-14, when secure-gate 0.9.0 gave the dependency a
+stable release to require. This step stays as the record of why the line began at rc.1.
+
 ## 5. The repository transition
 
 Owned by the maintainer, not scripted here. Two facts from the 2026-09-05 survey that the
@@ -310,8 +314,10 @@ cargo add msoffice-crypto@<exact version> --features crypto-ops
 cargo build --locked
 ```
 
-An exact version, because of the pre-release rule in step 4. This is what proves the crate
-resolves from the registry rather than from this working copy.
+An exact version: for a pre-release because of the rule in step 4, and for any release so
+that the smoke test builds the version just published rather than an older one that also
+matches. This is what proves the crate resolves from the registry rather than from this
+working copy.
 
 ## 7. Truth edits, after publish
 

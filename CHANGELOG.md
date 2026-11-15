@@ -1,4 +1,4 @@
-Status: Pre-release — release candidates are published; no stable 0.1.0 has been cut
+Status: Stable — 0.1.0 is the first stable release; 0.1.x releases are compatible with each other
 
 # Changelog
 
@@ -21,6 +21,32 @@ What survives that move is in two places, deliberately:
   assertable and that argument needs the numbers to be somewhere a consumer can read them.
 
 ---
+
+## [0.1.0] - 2026-11-14
+
+### The first stable release
+
+From this release the public API follows semantic versioning: 0.1.x releases are compatible
+with each other, and a breaking change waits for 0.2.0. The API is the same as
+0.1.0-rc.15.
+
+### `secure-gate` moves to 0.9.0, and the requirement becomes a caret
+
+`=0.9.0-rc.19` becomes `"0.9"`, against secure-gate's first stable release. Nothing this
+crate compiles changed in 0.9.0: against rc.19 its code diff is the version line. Its MSRV
+stays at 1.87.
+
+The exact pin was there because a caret on a pre-release also matches later pre-releases,
+and those broke. A caret on a stable release matches only compatible ones, so the pin goes.
+A consumer that depends on secure-gate 0.9 directly no longer has to name the release this
+crate pins: any 0.9.x requirement resolves to one copy shared with this crate.
+
+### `tests/legacy_allocation.rs` ships in the package
+
+The guard on the BIFF record-count allocation (a hostile `.xls` once cost 9.0x its size in
+memory before any password check) is now in the `.crate`. It builds its workbook at runtime
+and needs no fixture, so it runs for anyone who tests the package with `legacy-binary`,
+where the corpus tests are ignored.
 
 ## [0.1.0-rc.15] - 2026-11-13
 
@@ -2098,6 +2124,7 @@ job is parsing bytes an attacker chose — and, as usefully, what does not.
 [MS-CFB]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/
 [MS-PPT]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-ppt/
 [MS-ODRAW]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-odraw/
+[0.1.0]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.15...v0.1.0
 [0.1.0-rc.15]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.14...v0.1.0-rc.15
 [0.1.0-rc.14]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.13...v0.1.0-rc.14
 [0.1.0-rc.13]: https://github.com/Slurp9187/msoffice-crypto/compare/v0.1.0-rc.12...v0.1.0-rc.13

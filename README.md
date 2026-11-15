@@ -12,9 +12,9 @@ Every encryption format the specification defines — OOXML and the 97-2003 bina
 documents alike — with **key material that zeroizes on drop**. What it writes is a subset
 of what it reads, and the table below says which.
 
-> **Status: release candidates on crates.io, no stable release.** The API is still free to
-> break between candidates. The badge above is the newest on the registry; the version this
-> tree builds is the one in `Cargo.toml`.
+> **Status: stable since 0.1.0.** The public API follows semantic versioning: 0.1.x releases
+> are compatible with each other, and a breaking change waits for 0.2.0. The badge above is
+> the newest on the registry; the version this tree builds is the one in `Cargo.toml`.
 
 ## What it does
 
@@ -77,14 +77,11 @@ they cannot open.
 ```toml
 [dependencies]
 # Detection only — no cryptographic dependency.
-msoffice-crypto = "0.1.0-rc.15"
+msoffice-crypto = "0.1.0"
 
 # Detection, decryption and encryption.
-msoffice-crypto = { version = "0.1.0-rc.15", features = ["crypto-ops"] }
+msoffice-crypto = { version = "0.1.0", features = ["crypto-ops"] }
 ```
-
-Pre-release versions are not matched by ordinary requirements — name the full version as
-above; `"0.1"` will not resolve to it.
 
 The CLI is a separate install; see [Command line](#command-line).
 
@@ -379,9 +376,9 @@ crate does for Microsoft Office — same method, same author, different format f
 its public API** — the password is `&str` and the plaintext is `Vec<u8>`, by design. A plan
 to put its types on the boundary was withdrawn as a design error, so a consumer on a
 different secure-gate range (0.8.x, say) resolves both side by side without conflict. Within
-0.9.x it cannot: the pin here is exact, and Cargo holds one version per semver-compatible
-range, so a consumer that also depends on secure-gate 0.9 directly must name the release this
-crate pins (`0.9.0-rc.17` for this version).
+0.9.x the requirement here is a caret, `"0.9"`, so a consumer that also depends on
+secure-gate 0.9 directly shares one copy with this crate, whichever 0.9.x it names. Through
+the release candidates the pin was exact, and such a consumer had to name the same rc.
 
 ## Trademarks
 
